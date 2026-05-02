@@ -1,0 +1,148 @@
+import { mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { Database } from "bun:sqlite";
+import type { ChatBinding, ChatId, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "./types.ts";
+
+interface WorkspaceRow {
+  name: string;
+  path: string;
+  created_at: number;
+}
+
+interface BindingRow {
+  chat_id: number;
+  workspace_name: string;
+  updated_at: number;
+}
+
+interface TranscriptRow {
+  text: string;
+}
+
+export class Store {
+  readonly db: Database;
+
+  constructor(path: string) {
+    const absolutePath = resolve(path);
+    mkdirSync(dirname(absolutePath), { recursive: true });
+    this.db = new Database(absolutePath);
+    this.db.run("PRAGMA journal_mode = WAL");
+    this.migrate();
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  migrate(): void {
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS workspaces (
+        name TEXT PRIMARY KEY,
+        path TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS chat_bindings (
+        chat_id INTEGER PRIMARY KEY,
+        workspace_name TEXT NOT NULL REFERENCES workspaces(name),
+        updated_at INTEGER NOT NULL
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS agent_sessions (
+        session_key TEXT PRIMARY KEY,
+        chat_id INTEGER NOT NULL,
+        workspace_name TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        stopped_at INTEGER
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS transcript_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        workspace_name TEXT NOT NULL,
+        role TEXT NOT NULL,
+        text TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )
+    `);
+  }
+
+  upsertWorkspace(record: WorkspaceRecord): void {
+    this.db.query(`
+      INSERT INTO workspaces (name, path, created_at)
+      VALUES ($name, $path, $createdAt)
+      ON CONFLICT(name) DO UPDATE SET path = excluded.path
+    `).run({ $name: record.name, $path: record.path, $createdAt: record.createdAt });
+  }
+
+  listWorkspaces(): WorkspaceRecord[] {
+    return this.db.query<WorkspaceRow, []>("SELECT name, path, created_at FROM workspaces ORDER BY name").all().map(rowToWorkspace);
+  }
+
+  getWorkspace(name: string): WorkspaceRecord | undefined {
+    const row = this.db.query<WorkspaceRow, [string]>("SELECT name, path, created_at FROM workspaces WHERE name = ?").get(name);
+    return row ? rowToWorkspace(row) : undefined;
+  }
+
+  bindChat(chatId: ChatId, workspaceName: string, updatedAt = Date.now()): void {
+    this.db.query(`
+      INSERT INTO chat_bindings (chat_id, workspace_name, updated_at)
+      VALUES ($chatId, $workspaceName, $updatedAt)
+      ON CONFLICT(chat_id) DO UPDATE SET workspace_name = excluded.workspace_name, updated_at = excluded.updated_at
+    `).run({ $chatId: chatId, $workspaceName: workspaceName, $updatedAt: updatedAt });
+  }
+
+  getBinding(chatId: ChatId): ChatBinding | undefined {
+    const row = this.db.query<BindingRow, [number]>("SELECT chat_id, workspace_name, updated_at FROM chat_bindings WHERE chat_id = ?").get(chatId);
+    return row ? { chatId: row.chat_id, workspaceName: row.workspace_name, updatedAt: row.updated_at } : undefined;
+  }
+
+  markSessionStarted(sessionKey: string, chatId: ChatId, workspaceName: string, startedAt = Date.now()): void {
+    this.db.query(`
+      INSERT INTO agent_sessions (session_key, chat_id, workspace_name, status, started_at, stopped_at)
+      VALUES ($sessionKey, $chatId, $workspaceName, 'running', $startedAt, NULL)
+      ON CONFLICT(session_key) DO UPDATE SET status = 'running', started_at = excluded.started_at, stopped_at = NULL
+    `).run({ $sessionKey: sessionKey, $chatId: chatId, $workspaceName: workspaceName, $startedAt: startedAt });
+  }
+
+  markSessionStopped(sessionKey: string, stoppedAt = Date.now()): void {
+    this.db.query("UPDATE agent_sessions SET status = 'stopped', stopped_at = ? WHERE session_key = ?").run(stoppedAt, sessionKey);
+  }
+
+  appendTranscript(event: TranscriptEvent): void {
+    this.db.query(`
+      INSERT INTO transcript_events (chat_id, workspace_name, role, text, created_at)
+      VALUES ($chatId, $workspaceName, $role, $text, $createdAt)
+    `).run({
+      $chatId: event.chatId,
+      $workspaceName: event.workspaceName,
+      $role: event.role,
+      $text: event.text,
+      $createdAt: event.createdAt,
+    });
+  }
+
+  recentTranscript(chatId: ChatId, workspaceName: string, role: TranscriptRole | undefined, limit: number): string {
+    const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    const rows = role
+      ? this.db.query<TranscriptRow, [number, string, string, number]>(`
+          SELECT text FROM transcript_events
+          WHERE chat_id = ? AND workspace_name = ? AND role = ?
+          ORDER BY id DESC LIMIT ?
+        `).all(chatId, workspaceName, role, safeLimit)
+      : this.db.query<TranscriptRow, [number, string, number]>(`
+          SELECT text FROM transcript_events
+          WHERE chat_id = ? AND workspace_name = ?
+          ORDER BY id DESC LIMIT ?
+        `).all(chatId, workspaceName, safeLimit);
+    return rows.reverse().map((row) => row.text).join("");
+  }
+}
+
+function rowToWorkspace(row: WorkspaceRow): WorkspaceRecord {
+  return { name: row.name, path: row.path, createdAt: row.created_at };
+}
