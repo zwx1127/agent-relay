@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import { noopLogger, type Logger } from "./logger.ts";
-import type { ChatBinding, ChatId, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "./types.ts";
+import type { ChatBinding, ChatId, PendingPrompt, PendingPromptKind, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "./types.ts";
 
 interface WorkspaceRow {
   name: string;
@@ -18,6 +18,14 @@ interface BindingRow {
 
 interface TranscriptRow {
   text: string;
+  created_at?: number;
+}
+
+interface PendingPromptRow {
+  chat_id: number;
+  prompt_message_id: number;
+  kind: string;
+  created_at: number;
 }
 
 export class Store {
@@ -70,6 +78,15 @@ export class Store {
         role TEXT NOT NULL,
         text TEXT NOT NULL,
         created_at INTEGER NOT NULL
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS pending_prompts (
+        chat_id INTEGER NOT NULL,
+        prompt_message_id INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, prompt_message_id)
       )
     `);
     this.logger.debug("store.migrated");
@@ -147,8 +164,58 @@ export class Store {
         `).all(chatId, workspaceName, safeLimit);
     return rows.reverse().map((row) => row.text).join("");
   }
+
+  latestTranscriptEvent(chatId: ChatId, workspaceName: string, role: TranscriptRole): TranscriptEvent | undefined {
+    const row = this.db.query<TranscriptRow, [number, string, string]>(`
+      SELECT text, created_at FROM transcript_events
+      WHERE chat_id = ? AND workspace_name = ? AND role = ?
+      ORDER BY id DESC LIMIT 1
+    `).get(chatId, workspaceName, role);
+    return row
+      ? { chatId, workspaceName, role, text: row.text, createdAt: row.created_at ?? 0 }
+      : undefined;
+  }
+
+  setPendingPrompt(prompt: PendingPrompt): void {
+    this.db.query(`
+      INSERT INTO pending_prompts (chat_id, prompt_message_id, kind, created_at)
+      VALUES ($chatId, $promptMessageId, $kind, $createdAt)
+      ON CONFLICT(chat_id, prompt_message_id) DO UPDATE SET kind = excluded.kind, created_at = excluded.created_at
+    `).run({
+      $chatId: prompt.chatId,
+      $promptMessageId: prompt.promptMessageId,
+      $kind: prompt.kind,
+      $createdAt: prompt.createdAt,
+    });
+  }
+
+  getPendingPrompt(chatId: ChatId, promptMessageId: number): PendingPrompt | undefined {
+    const row = this.db.query<PendingPromptRow, [number, number]>(`
+      SELECT chat_id, prompt_message_id, kind, created_at
+      FROM pending_prompts
+      WHERE chat_id = ? AND prompt_message_id = ?
+    `).get(chatId, promptMessageId);
+    return row ? rowToPendingPrompt(row) : undefined;
+  }
+
+  deletePendingPrompt(chatId: ChatId, promptMessageId: number): void {
+    this.db.query("DELETE FROM pending_prompts WHERE chat_id = ? AND prompt_message_id = ?").run(chatId, promptMessageId);
+  }
+
+  prunePendingPrompts(olderThan: number): void {
+    this.db.query("DELETE FROM pending_prompts WHERE created_at < ?").run(olderThan);
+  }
 }
 
 function rowToWorkspace(row: WorkspaceRow): WorkspaceRecord {
   return { name: row.name, path: row.path, createdAt: row.created_at };
+}
+
+function rowToPendingPrompt(row: PendingPromptRow): PendingPrompt {
+  return {
+    chatId: row.chat_id,
+    promptMessageId: row.prompt_message_id,
+    kind: row.kind as PendingPromptKind,
+    createdAt: row.created_at,
+  };
 }

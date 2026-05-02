@@ -3,6 +3,22 @@ export type UserId = number;
 
 export type TelegramParseMode = "HTML";
 
+export type TelegramMessageEntityType =
+  | "bold"
+  | "italic"
+  | "code"
+  | "pre"
+  | "text_link"
+  | "blockquote";
+
+export interface TelegramMessageEntity {
+  type: TelegramMessageEntityType;
+  offset: number;
+  length: number;
+  url?: string;
+  language?: string;
+}
+
 export interface InlineKeyboardMarkup {
   inline_keyboard: InlineKeyboardButton[][];
 }
@@ -14,11 +30,18 @@ export interface InlineKeyboardButton {
 
 export interface SendMessageOptions {
   parseMode?: TelegramParseMode;
+  entities?: TelegramMessageEntity[];
   replyMarkup?: InlineKeyboardMarkup;
+  forceReply?: boolean;
+  disableWebPagePreview?: boolean;
 }
 
 export interface EditMessageTextOptions extends SendMessageOptions {
   messageId: number;
+}
+
+export interface SendMessageResult {
+  messageId?: number;
 }
 
 export interface TextInboundMessage {
@@ -27,6 +50,7 @@ export interface TextInboundMessage {
   chatId: ChatId;
   userId: UserId;
   text: string;
+  replyToMessageId?: number;
   date?: number;
 }
 
@@ -45,9 +69,10 @@ export type InboundMessage = TextInboundMessage | CallbackInboundMessage;
 
 export interface IMAdapter {
   start(onMessage: (message: InboundMessage) => Promise<void>): Promise<void>;
-  sendMessage(chatId: ChatId, text: string, options?: SendMessageOptions): Promise<void>;
+  sendMessage(chatId: ChatId, text: string, options?: SendMessageOptions): Promise<SendMessageResult>;
   editMessageText(chatId: ChatId, text: string, options: EditMessageTextOptions): Promise<void>;
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void>;
+  sendChatAction(chatId: ChatId, action?: "typing"): Promise<void>;
 }
 
 export type AgentOutputHandler = (event: AgentOutputEvent) => void | Promise<void>;
@@ -105,5 +130,14 @@ export interface TranscriptEvent {
   workspaceName: string;
   role: TranscriptRole;
   text: string;
+  createdAt: number;
+}
+
+export type PendingPromptKind = "workspace_name";
+
+export interface PendingPrompt {
+  chatId: ChatId;
+  promptMessageId: number;
+  kind: PendingPromptKind;
   createdAt: number;
 }

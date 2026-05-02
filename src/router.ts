@@ -2,20 +2,23 @@ import { existsSync } from "node:fs";
 import type { AppConfig } from "./config.ts";
 import { isAuthorized } from "./config.ts";
 import { sessionKey } from "./agent.ts";
-import type { AgentDriver, ChatId, IMAdapter, InboundMessage, InlineKeyboardMarkup, WorkspaceRecord } from "./types.ts";
+import type { AgentDriver, ChatId, IMAdapter, InboundMessage, InlineKeyboardMarkup, SendMessageResult, WorkspaceRecord } from "./types.ts";
 import type { Store } from "./store.ts";
 import { createWorkspace, resolveWorkspacePath, validateWorkspaceName } from "./workspace.ts";
-import { formatAgentMarkdownForTelegramHtml, formatError, formatHelp, formatStatus, formatWorkspaces, htmlEscape, tailLines } from "./text.ts";
+import { formatError, formatStatus, formatWorkspaces, htmlEscape, renderCodexMarkdownForTelegram, splitRenderedForTelegram, tailLines } from "./text.ts";
 import { noopLogger, type Logger } from "./logger.ts";
 
 const CALLBACK_PREFIX = "ar:";
 const CALLBACK_LIMIT_BYTES = 64;
 const HTML = { parseMode: "HTML" as const };
+const STREAM_QUIET_MS = 800;
+const STREAM_MAX_MS = 3000;
+const STREAM_FLUSH_CHARS = 3400;
 
 export interface RouterDeps {
   config: AppConfig;
   store: Store;
-  adapter: Pick<IMAdapter, "sendMessage" | "editMessageText" | "answerCallbackQuery">;
+  adapter: Pick<IMAdapter, "sendMessage" | "editMessageText" | "answerCallbackQuery" | "sendChatAction">;
   agent: AgentDriver;
   logger?: Logger;
 }
@@ -60,8 +63,13 @@ export class MessageRouter {
     }
 
     try {
-      if (text.startsWith("/")) {
-        await this.handleCommand(message.chatId, text);
+      const pending = message.replyToMessageId
+        ? this.deps.store.getPendingPrompt(message.chatId, message.replyToMessageId)
+        : undefined;
+      if (pending?.kind === "workspace_name") {
+        await this.createWorkspaceFromPrompt(message.chatId, message.replyToMessageId!, text);
+      } else if (command === "/relay" || command === "/start") {
+        await this.renderConsole(message.chatId);
       } else {
         await this.forwardToAgent(message.chatId, text);
       }
@@ -99,7 +107,7 @@ export class MessageRouter {
       text: session.chunk,
       createdAt: Date.now(),
     });
-    await this.debouncedSend(parsed.chatId, session.chunk);
+    await this.bufferAgentOutput(session.sessionKey, parsed.chatId, session.chunk);
   }
 
   async handleAgentExit(sessionKeyValue: string, exitText: string): Promise<void> {
@@ -114,114 +122,26 @@ export class MessageRouter {
       workspace: parsed.workspaceName,
     });
     this.deps.store.markSessionStopped(sessionKeyValue);
+    await this.flushSessionOutput(sessionKeyValue);
+    this.liveOutput.delete(sessionKeyValue);
     await this.deps.adapter.sendMessage(parsed.chatId, `<b>${htmlEscape(exitText)}</b>`, HTML);
-  }
-
-  private async handleCommand(chatId: ChatId, text: string): Promise<void> {
-    const [command = "", ...rest] = text.split(/\s+/);
-    const normalizedCommand = command.split("@")[0];
-    const argText = text.slice(command.length).trim();
-    this.logger.info("router.command_received", {
-      chat_id: chatId,
-      command: normalizedCommand,
-      arg_len: argText.length,
-    });
-    this.logger.debug("router.command_text", {
-      chat_id: chatId,
-      command: normalizedCommand,
-      command_text: text,
-    });
-    switch (normalizedCommand) {
-      case "/help":
-        await this.deps.adapter.sendMessage(chatId, formatHelp(), { ...HTML, replyMarkup: mainMenuKeyboard() });
-        return;
-      case "/workspaces":
-        await this.listWorkspaces(chatId);
-        return;
-      case "/new":
-        await this.newWorkspace(chatId, rest[0]);
-        return;
-      case "/use":
-        await this.useWorkspace(chatId, rest[0]);
-        return;
-      case "/status":
-        await this.status(chatId);
-        return;
-      case "/tail":
-        await this.tail(chatId, rest[0]);
-        return;
-      case "/exit":
-        await this.exit(chatId);
-        return;
-      case "/send":
-        if (!argText) throw new Error("Usage: /send <text>");
-        await this.forwardToAgent(chatId, argText);
-        return;
-      default:
-        throw new Error(`Unknown command: ${command}`);
-    }
-  }
-
-  private async listWorkspaces(chatId: ChatId): Promise<void> {
-    const workspaces = this.deps.store.listWorkspaces();
-    const selected = this.currentWorkspace(chatId)?.name;
-    this.logger.info("router.workspaces_listed", { chat_id: chatId, count: workspaces.length });
-    await this.deps.adapter.sendMessage(chatId, formatWorkspaces(workspaces.map((workspace) => ({
-      name: workspace.name,
-      selected: workspace.name === selected,
-    }))), { ...HTML, replyMarkup: workspacesKeyboard(workspaces, selected) });
-  }
-
-  private async newWorkspace(chatId: ChatId, name?: string): Promise<void> {
-    if (!name) throw new Error("Usage: /new <name>");
-    validateWorkspaceName(name);
-    const path = await createWorkspace(this.deps.config.workspaceRoot, name);
-    this.deps.store.upsertWorkspace({ name, path, createdAt: Date.now() });
-    this.deps.store.bindChat(chatId, name);
-    this.logger.info("router.workspace_created", { chat_id: chatId, workspace: name, path });
-    await this.deps.adapter.sendMessage(chatId, `Workspace <code>${htmlEscape(name)}</code> created and selected.`, {
-      ...HTML,
-      replyMarkup: statusKeyboard(),
-    });
-  }
-
-  private async useWorkspace(chatId: ChatId, name?: string): Promise<void> {
-    if (!name) throw new Error("Usage: /use <name>");
-    const workspace = this.requireWorkspace(name);
-    this.deps.store.bindChat(chatId, workspace.name);
-    this.logger.info("router.workspace_selected", { chat_id: chatId, workspace: workspace.name, path: workspace.path });
-    await this.deps.adapter.sendMessage(chatId, `Using workspace <code>${htmlEscape(workspace.name)}</code>.`, {
-      ...HTML,
-      replyMarkup: statusKeyboard(),
-    });
-  }
-
-  private async status(chatId: ChatId): Promise<void> {
-    const status = this.statusView(chatId);
-    this.logger.info("router.status_reported", {
-      chat_id: chatId,
-      workspace: status.workspaceName,
-      running: Boolean(status.running),
-    });
-    await this.deps.adapter.sendMessage(chatId, formatStatus(status), { ...HTML, replyMarkup: statusKeyboard() });
   }
 
   private async tail(chatId: ChatId, rawCount?: string): Promise<void> {
     const workspace = this.requireCurrentWorkspace(chatId);
     const count = rawCount ? Number(rawCount) : 50;
-    if (!Number.isInteger(count) || count < 1) throw new Error("Usage: /tail [positive integer]");
+    if (!Number.isInteger(count) || count < 1) throw new Error("Tail count must be a positive integer.");
     const text = this.deps.store.recentTranscript(chatId, workspace.name, "agent", 500);
     this.logger.info("router.tail_reported", { chat_id: chatId, workspace: workspace.name, count, text_len: text.length });
-    await this.deps.adapter.sendMessage(chatId, text ? formatAgentMarkdownForTelegramHtml(tailLines(text, count)) : "No agent output yet.", HTML);
-  }
-
-  private async exit(chatId: ChatId): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(chatId);
-    const key = sessionKey(chatId, workspace.name);
-    await this.deps.agent.stop(key);
-    this.deps.store.markSessionStopped(key);
-    this.logger.info("router.session_stopped", { chat_id: chatId, workspace: workspace.name, session_key: key });
-    await this.deps.adapter.sendMessage(chatId, "<b>Codex session stopped.</b>", { ...HTML, replyMarkup: statusKeyboard() });
+    if (!text) {
+      await this.deps.adapter.sendMessage(chatId, "No agent output yet.");
+      return;
+    }
+    const rendered = renderCodexMarkdownForTelegram(tailLines(text, count));
+    await this.deps.adapter.sendMessage(chatId, rendered.text, {
+      entities: rendered.entities,
+      disableWebPagePreview: true,
+    });
   }
 
   private async handleCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
@@ -255,7 +175,7 @@ export class MessageRouter {
         error: error instanceof Error ? error : new Error(detail),
       });
       await this.answerCallback(message.callbackQueryId, detail.slice(0, 180));
-      await this.renderCallbackPage(message, formatError(detail), mainMenuKeyboard());
+      await this.renderCallbackPage(message, formatError(detail), consoleKeyboard(this.statusView(message.chatId)));
       this.appendSystem(message.chatId, `Error: ${detail}\n`);
     }
   }
@@ -264,23 +184,23 @@ export class MessageRouter {
     if (!message.data.startsWith(CALLBACK_PREFIX)) throw new Error("Unknown callback.");
     const payload = message.data.slice(CALLBACK_PREFIX.length);
 
-    if (payload === "help") {
-      await this.renderCallbackPage(message, formatHelp(), mainMenuKeyboard());
-      return;
-    }
-    if (payload === "status") {
+    if (payload === "s") {
       await this.renderStatusCallback(message);
       return;
     }
-    if (payload === "workspaces") {
+    if (payload === "w") {
       await this.renderWorkspacesCallback(message);
       return;
     }
-    if (payload === "tail:50") {
+    if (payload === "n") {
+      await this.promptForWorkspaceName(message.chatId);
+      return;
+    }
+    if (payload === "t50") {
       await this.tail(message.chatId, "50");
       return;
     }
-    if (payload === "exit:confirm") {
+    if (payload === "x?") {
       await this.renderCallbackPage(message, [
         "<b>Stop Codex session?</b>",
         "",
@@ -288,16 +208,16 @@ export class MessageRouter {
       ].join("\n"), exitConfirmKeyboard());
       return;
     }
-    if (payload === "exit:run") {
+    if (payload === "x!") {
       await this.stopFromCallback(message);
       return;
     }
-    if (payload === "cancel") {
+    if (payload === "c") {
       await this.renderStatusCallback(message);
       return;
     }
-    if (payload.startsWith("use:")) {
-      const name = payload.slice("use:".length);
+    if (payload.startsWith("u:")) {
+      const name = payload.slice("u:".length);
       const workspace = this.requireWorkspace(name);
       this.deps.store.bindChat(message.chatId, workspace.name);
       this.logger.info("router.workspace_selected", { chat_id: message.chatId, workspace: workspace.name, path: workspace.path });
@@ -309,7 +229,8 @@ export class MessageRouter {
   }
 
   private async renderStatusCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
-    await this.renderCallbackPage(message, formatStatus(this.statusView(message.chatId)), statusKeyboard());
+    const status = this.statusView(message.chatId);
+    await this.renderCallbackPage(message, formatStatus(status), consoleKeyboard(status));
   }
 
   private async renderWorkspacesCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
@@ -327,7 +248,7 @@ export class MessageRouter {
     await this.deps.agent.stop(key);
     this.deps.store.markSessionStopped(key);
     this.logger.info("router.session_stopped", { chat_id: message.chatId, workspace: workspace.name, session_key: key });
-    await this.renderCallbackPage(message, "<b>Codex session stopped.</b>", statusKeyboard());
+    await this.renderCallbackPage(message, "<b>Codex session stopped.</b>", consoleKeyboard(this.statusView(message.chatId)));
   }
 
   private async renderCallbackPage(
@@ -366,9 +287,54 @@ export class MessageRouter {
     }
   }
 
+  private async renderConsole(chatId: ChatId): Promise<void> {
+    const status = this.statusView(chatId);
+    this.logger.info("router.console_rendered", {
+      chat_id: chatId,
+      workspace: status.workspaceName,
+      running: Boolean(status.running),
+    });
+    await this.deps.adapter.sendMessage(chatId, formatStatus(status), { ...HTML, replyMarkup: consoleKeyboard(status) });
+  }
+
+  private async promptForWorkspaceName(chatId: ChatId): Promise<void> {
+    const result = await this.deps.adapter.sendMessage(chatId, "Reply with the new workspace name.", {
+      forceReply: true,
+      disableWebPagePreview: true,
+    });
+    if (!result.messageId) {
+      throw new Error("Telegram did not return a prompt message id.");
+    }
+    this.deps.store.setPendingPrompt({
+      chatId,
+      promptMessageId: result.messageId,
+      kind: "workspace_name",
+      createdAt: Date.now(),
+    });
+    this.logger.info("router.workspace_prompt_created", { chat_id: chatId, prompt_message_id: result.messageId });
+  }
+
+  private async createWorkspaceFromPrompt(chatId: ChatId, promptMessageId: number, name: string): Promise<void> {
+    validateWorkspaceName(name);
+    const path = await createWorkspace(this.deps.config.workspaceRoot, name);
+    this.deps.store.upsertWorkspace({ name, path, createdAt: Date.now() });
+    this.deps.store.bindChat(chatId, name);
+    this.deps.store.deletePendingPrompt(chatId, promptMessageId);
+    this.logger.info("router.workspace_created", { chat_id: chatId, workspace: name, path });
+    await this.deps.adapter.sendMessage(chatId, `Workspace <code>${htmlEscape(name)}</code> created and selected.`, {
+      ...HTML,
+      replyMarkup: consoleKeyboard(this.statusView(chatId)),
+    });
+  }
+
   private async forwardToAgent(chatId: ChatId, text: string): Promise<void> {
     if (!text) return;
-    const workspace = this.requireCurrentWorkspace(chatId);
+    const workspace = this.currentWorkspace(chatId);
+    if (!workspace) {
+      await this.renderConsole(chatId);
+      return;
+    }
+    if (!existsSync(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
     const key = sessionKey(chatId, workspace.name);
     if (!this.deps.agent.getStatus(key)) {
       this.logger.info("router.session_starting", { chat_id: chatId, workspace: workspace.name, session_key: key });
@@ -376,6 +342,12 @@ export class MessageRouter {
       this.deps.store.markSessionStarted(key, chatId, workspace.name);
       this.logger.info("router.session_started", { chat_id: chatId, workspace: workspace.name, session_key: key });
     }
+    await this.deps.adapter.sendChatAction(chatId, "typing").catch((error) => {
+      this.logger.debug("router.chat_action_failed", {
+        chat_id: chatId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    });
     this.logger.info("router.user_input_forwarded", {
       chat_id: chatId,
       workspace: workspace.name,
@@ -405,7 +377,7 @@ export class MessageRouter {
 
   private requireCurrentWorkspace(chatId: ChatId): WorkspaceRecord {
     const workspace = this.currentWorkspace(chatId);
-    if (!workspace) throw new Error("No workspace selected. Use /new <name> or /use <name>.");
+    if (!workspace) throw new Error("No workspace selected. Open /relay to select or create one.");
     if (!existsSync(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
     return workspace;
   }
@@ -417,7 +389,7 @@ export class MessageRouter {
       path: resolveWorkspacePath(this.deps.config.workspaceRoot, name),
       createdAt: Date.now(),
     };
-    if (!existsSync(workspace.path)) throw new Error(`Workspace '${name}' does not exist. Use /new ${name} first.`);
+    if (!existsSync(workspace.path)) throw new Error(`Workspace '${name}' does not exist. Create it from the relay console first.`);
     this.deps.store.upsertWorkspace(workspace);
     return workspace;
   }
@@ -428,54 +400,132 @@ export class MessageRouter {
     this.deps.store.appendTranscript({ chatId, workspaceName: workspace.name, role: "system", text, createdAt: Date.now() });
   }
 
-  private statusView(chatId: ChatId): { workspaceName?: string; workspacePath?: string; running?: boolean } {
+  private statusView(chatId: ChatId): { workspaceName?: string; workspacePath?: string; running?: boolean; recentOutputAt?: number; recentError?: string } {
     const workspace = this.currentWorkspace(chatId);
     if (!workspace) return {};
     const status = this.deps.agent.getStatus(sessionKey(chatId, workspace.name));
+    const recentOutput = this.deps.store.latestTranscriptEvent(chatId, workspace.name, "agent");
+    const recentError = this.deps.store.latestTranscriptEvent(chatId, workspace.name, "system");
     return {
       workspaceName: workspace.name,
       workspacePath: workspace.path,
       running: Boolean(status?.running),
+      recentOutputAt: recentOutput?.createdAt,
+      recentError: recentError?.text,
     };
   }
 
-  private readonly pendingOutput = new Map<ChatId, { text: string; timer: Timer }>();
+  private readonly liveOutput = new Map<string, {
+    chatId: ChatId;
+    text: string;
+    startedAt: number;
+    timer?: Timer;
+    messageId?: number;
+  }>();
 
-  private async debouncedSend(chatId: ChatId, chunk: string): Promise<void> {
-    const pending = this.pendingOutput.get(chatId);
-    if (pending) {
-      pending.text += chunk;
-      this.logger.debug("router.agent_output_buffered", { chat_id: chatId, chunk_len: chunk.length, buffered_len: pending.text.length });
-      return;
+  private async bufferAgentOutput(sessionKeyValue: string, chatId: ChatId, chunk: string): Promise<void> {
+    let state = this.liveOutput.get(sessionKeyValue);
+    if (!state) {
+      state = { chatId, text: "", startedAt: Date.now() };
+      this.liveOutput.set(sessionKeyValue, state);
     }
-    const state = {
-      text: chunk,
-      timer: setTimeout(() => {
-        this.pendingOutput.delete(chatId);
-        this.logger.debug("router.agent_output_flushed", { chat_id: chatId, text_len: state.text.length });
-        void this.sendAgentOutput(chatId, state.text).catch((error) => {
-          this.logger.error("router.agent_output_send_failed", {
-            chat_id: chatId,
-            text_len: state.text.length,
+
+    state.text += chunk;
+    this.logger.debug("router.agent_output_buffered", {
+      chat_id: chatId,
+      session_key: sessionKeyValue,
+      chunk_len: chunk.length,
+      buffered_len: state.text.length,
+    });
+
+    if (state.timer) clearTimeout(state.timer);
+    const elapsed = Date.now() - state.startedAt;
+    const delay = state.text.length >= STREAM_FLUSH_CHARS || elapsed >= STREAM_MAX_MS ? 0 : STREAM_QUIET_MS;
+    state.timer = setTimeout(() => {
+      void this.flushSessionOutput(sessionKeyValue).catch((error) => {
+        this.logger.error("router.agent_output_send_failed", {
+          chat_id: chatId,
+          session_key: sessionKeyValue,
+          text_len: state?.text.length ?? 0,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      });
+    }, delay);
+  }
+
+  private async flushSessionOutput(sessionKeyValue: string): Promise<void> {
+    const state = this.liveOutput.get(sessionKeyValue);
+    if (!state || state.text.length === 0) return;
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = undefined;
+    }
+
+    const rendered = renderCodexMarkdownForTelegram(state.text);
+    const chunks = splitRenderedForTelegram(rendered);
+    this.logger.debug("router.agent_output_flushed", {
+      chat_id: state.chatId,
+      session_key: sessionKeyValue,
+      text_len: state.text.length,
+      chunks: chunks.length,
+    });
+
+    if (chunks.length === 1 && rendered.text.length < STREAM_FLUSH_CHARS) {
+      const chunk = chunks[0]!;
+      if (state.messageId) {
+        try {
+          await this.deps.adapter.editMessageText(state.chatId, chunk.text, {
+            messageId: state.messageId,
+            entities: chunk.entities,
+            disableWebPagePreview: true,
+          });
+          return;
+        } catch (error) {
+          this.logger.warn("router.agent_output_edit_fallback", {
+            chat_id: state.chatId,
+            message_id: state.messageId,
             error: error instanceof Error ? error : new Error(String(error)),
           });
-        });
-      }, 800),
-    };
-    this.pendingOutput.set(chatId, state);
-  }
-
-  private async sendAgentOutput(chatId: ChatId, text: string): Promise<void> {
-    try {
-      await this.deps.adapter.sendMessage(chatId, formatAgentMarkdownForTelegramHtml(text), HTML);
-    } catch (error) {
-      this.logger.warn("router.agent_output_html_send_failed", {
-        chat_id: chatId,
-        text_len: text.length,
-        error: error instanceof Error ? error : new Error(String(error)),
+        }
+      }
+      const result = await this.deps.adapter.sendMessage(state.chatId, chunk.text, {
+        entities: chunk.entities,
+        disableWebPagePreview: true,
       });
-      await this.deps.adapter.sendMessage(chatId, text);
+      state.messageId = result.messageId;
+      return;
     }
+
+    if (state.messageId && chunks[0]) {
+      try {
+        await this.deps.adapter.editMessageText(state.chatId, chunks[0].text, {
+          messageId: state.messageId,
+          entities: chunks[0].entities,
+          disableWebPagePreview: true,
+        });
+      } catch {
+        await this.deps.adapter.sendMessage(state.chatId, chunks[0].text, {
+          entities: chunks[0].entities,
+          disableWebPagePreview: true,
+        });
+      }
+    } else if (chunks[0]) {
+      await this.deps.adapter.sendMessage(state.chatId, chunks[0].text, {
+        entities: chunks[0].entities,
+        disableWebPagePreview: true,
+      });
+    }
+
+    let lastResult: SendMessageResult | undefined;
+    for (const chunk of chunks.slice(1)) {
+      lastResult = await this.deps.adapter.sendMessage(state.chatId, chunk.text, {
+        entities: chunk.entities,
+        disableWebPagePreview: true,
+      });
+    }
+    state.text = "";
+    state.startedAt = Date.now();
+    state.messageId = lastResult?.messageId;
   }
 }
 
@@ -493,40 +543,29 @@ export function parseSessionKey(key: string): { chatId: ChatId; workspaceName: s
   return { chatId, workspaceName };
 }
 
-function mainMenuKeyboard(): InlineKeyboardMarkup {
-  return {
-    inline_keyboard: [
-      [
-        { text: "Workspaces", callback_data: "ar:workspaces" },
-        { text: "Status", callback_data: "ar:status" },
-      ],
-      [
-        { text: "Tail 50", callback_data: "ar:tail:50" },
-        { text: "Stop", callback_data: "ar:exit:confirm" },
-      ],
+function consoleKeyboard(status: { workspaceName?: string; running?: boolean }): InlineKeyboardMarkup {
+  const rows: InlineKeyboardMarkup["inline_keyboard"] = [
+    [
+      { text: "Workspaces", callback_data: "ar:w" },
+      { text: "New workspace", callback_data: "ar:n" },
     ],
-  };
-}
-
-function statusKeyboard(): InlineKeyboardMarkup {
+  ];
+  if (status.workspaceName) {
+    rows.push([
+      { text: "Tail 50", callback_data: "ar:t50" },
+      ...(status.running ? [{ text: "Stop", callback_data: "ar:x?" }] : []),
+    ]);
+  }
+  rows.push([{ text: "Refresh", callback_data: "ar:s" }]);
   return {
-    inline_keyboard: [
-      [
-        { text: "Refresh", callback_data: "ar:status" },
-        { text: "Workspaces", callback_data: "ar:workspaces" },
-      ],
-      [
-        { text: "Tail 50", callback_data: "ar:tail:50" },
-        { text: "Stop", callback_data: "ar:exit:confirm" },
-      ],
-    ],
+    inline_keyboard: rows,
   };
 }
 
 function workspacesKeyboard(workspaces: WorkspaceRecord[], selected?: string): InlineKeyboardMarkup {
   const rows = workspaces
     .map((workspace) => {
-      const callbackData = `ar:use:${workspace.name}`;
+      const callbackData = `ar:u:${workspace.name}`;
       if (new TextEncoder().encode(callbackData).length > CALLBACK_LIMIT_BYTES) return undefined;
       return [{
         text: `${workspace.name === selected ? "Current: " : "Use: "}${workspace.name}`,
@@ -538,7 +577,10 @@ function workspacesKeyboard(workspaces: WorkspaceRecord[], selected?: string): I
   return {
     inline_keyboard: [
       ...rows,
-      [{ text: "Status", callback_data: "ar:status" }],
+      [
+        { text: "New workspace", callback_data: "ar:n" },
+        { text: "Refresh", callback_data: "ar:s" },
+      ],
     ],
   };
 }
@@ -547,8 +589,8 @@ function exitConfirmKeyboard(): InlineKeyboardMarkup {
   return {
     inline_keyboard: [
       [
-        { text: "Stop session", callback_data: "ar:exit:run" },
-        { text: "Cancel", callback_data: "ar:cancel" },
+        { text: "Stop session", callback_data: "ar:x!" },
+        { text: "Cancel", callback_data: "ar:c" },
       ],
     ],
   };

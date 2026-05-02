@@ -6,8 +6,10 @@ import {
   formatStatus,
   formatWorkspaces,
   htmlEscape,
+  renderCodexMarkdownForTelegram,
   splitForTelegram,
   splitHtmlForTelegram,
+  splitRenderedForTelegram,
 } from "../src/text.ts";
 
 describe("text utilities", () => {
@@ -57,5 +59,44 @@ describe("text utilities", () => {
 
   test("escapes raw html in agent markdown", () => {
     expect(formatAgentMarkdownForTelegramHtml("Use <script>alert('&')</script>")).toBe("Use &lt;script&gt;alert('&amp;')&lt;/script&gt;");
+  });
+
+  test("renders codex markdown as telegram entities", () => {
+    const rendered = renderCodexMarkdownForTelegram([
+      "# Summary",
+      "- **Changed** `src/app.ts`",
+      "> quoted",
+      "See [docs](https://example.com/docs).",
+    ].join("\n"));
+
+    expect(rendered.text).toContain("Summary");
+    expect(rendered.text).toContain("• Changed src/app.ts");
+    expect(rendered.text).toContain("quoted");
+    expect(rendered.entities.map((entity) => entity.type)).toEqual(["bold", "bold", "code", "blockquote", "text_link"]);
+  });
+
+  test("renders fenced code blocks without fence marker spacing", () => {
+    const rendered = renderCodexMarkdownForTelegram([
+      "Before",
+      "```ts",
+      "const value = '<safe>';",
+      "```",
+      "After",
+    ].join("\n"));
+
+    expect(rendered.text).toBe("Before\nconst value = '<safe>';\nAfter");
+    expect(rendered.entities).toContainEqual({ type: "pre", offset: 7, length: 23, language: "ts" });
+  });
+
+  test("splits rendered text and recalculates entity offsets", () => {
+    const chunks = splitRenderedForTelegram({
+      text: "abcdef",
+      entities: [{ type: "bold", offset: 2, length: 3 }],
+    }, 3);
+
+    expect(chunks).toEqual([
+      { text: "abc", entities: [{ type: "bold", offset: 2, length: 1 }] },
+      { text: "def", entities: [{ type: "bold", offset: 0, length: 2 }] },
+    ]);
   });
 });

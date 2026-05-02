@@ -1,5 +1,12 @@
+import type { TelegramMessageEntity } from "./types.ts";
+
 const ANSI_PATTERN = /\x1B(?:\][^\x07\x1B]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g;
 const CONTROL_PATTERN = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+
+export interface RenderedTelegramText {
+  text: string;
+  entities: TelegramMessageEntity[];
+}
 
 export function cleanTerminalOutput(value: string): string {
   return value.replace(ANSI_PATTERN, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(CONTROL_PATTERN, "");
@@ -18,6 +25,17 @@ export function splitForTelegram(text: string, maxChars = 3500): string[] {
   }
   if (rest.length > 0) chunks.push(rest);
   return chunks;
+}
+
+export function splitRenderedForTelegram(rendered: RenderedTelegramText, maxChars = 3500): RenderedTelegramText[] {
+  if (rendered.text.length <= maxChars) return [rendered];
+  const ranges = splitRanges(rendered.text, maxChars);
+  return ranges.map(([start, end]) => ({
+    text: rendered.text.slice(start, end),
+    entities: rendered.entities
+      .map((entity) => clipEntity(entity, start, end))
+      .filter((entity): entity is TelegramMessageEntity => Boolean(entity)),
+  }));
 }
 
 export function splitHtmlForTelegram(text: string, maxChars = 3500): string[] {
@@ -40,6 +58,35 @@ export function splitHtmlForTelegram(text: string, maxChars = 3500): string[] {
 
   if (current.length > 0) chunks.push(current + closingTags(stack));
   return chunks.length > 0 ? chunks : [text];
+}
+
+function splitRanges(text: string, maxChars: number): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  let start = 0;
+  while (start < text.length) {
+    const hardEnd = Math.min(text.length, start + maxChars);
+    const window = text.slice(start, hardEnd);
+    const newlineIndex = window.lastIndexOf("\n");
+    const end = hardEnd < text.length && newlineIndex > Math.floor(maxChars * 0.6)
+      ? start + newlineIndex + 1
+      : hardEnd;
+    ranges.push([start, end]);
+    start = end;
+  }
+  return ranges.length > 0 ? ranges : [[0, 0]];
+}
+
+function clipEntity(entity: TelegramMessageEntity, start: number, end: number): TelegramMessageEntity | undefined {
+  const entityStart = entity.offset;
+  const entityEnd = entity.offset + entity.length;
+  const clippedStart = Math.max(entityStart, start);
+  const clippedEnd = Math.min(entityEnd, end);
+  if (clippedEnd <= clippedStart) return undefined;
+  return {
+    ...entity,
+    offset: clippedStart - start,
+    length: clippedEnd - clippedStart,
+  };
 }
 
 export function tailLines(text: string, count: number): string {
@@ -81,6 +128,185 @@ export function formatAgentMarkdownForTelegramHtml(text: string): string {
 
   if (codeBlock) output.push(`<pre>${htmlEscape(codeBlock.join("\n"))}</pre>`);
   return output.join("\n");
+}
+
+export function renderCodexMarkdownForTelegram(text: string): RenderedTelegramText {
+  const output = new TelegramTextBuilder();
+  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  let codeBlock: { language?: string; lines: string[] } | undefined;
+  let firstRenderedLine = true;
+
+  const beginRenderedLine = (): void => {
+    if (firstRenderedLine) {
+      firstRenderedLine = false;
+      return;
+    }
+    output.newline();
+  };
+
+  const renderCodeBlock = (): void => {
+    if (!codeBlock) return;
+    beginRenderedLine();
+    const start = output.length;
+    output.append(codeBlock.lines.join("\n"));
+    if (output.length > start) {
+      output.entity({
+        type: "pre",
+        offset: start,
+        length: output.length - start,
+        ...(codeBlock.language ? { language: codeBlock.language } : {}),
+      });
+    }
+    codeBlock = undefined;
+  };
+
+  for (const line of lines) {
+    const fence = /^\s*```([A-Za-z0-9_+.-]+)?\s*$/.exec(line);
+    if (fence) {
+      if (codeBlock) {
+        renderCodeBlock();
+      } else {
+        codeBlock = { language: fence[1], lines: [] };
+      }
+      continue;
+    }
+
+    if (codeBlock) {
+      codeBlock.lines.push(line);
+      continue;
+    }
+
+    beginRenderedLine();
+    renderMarkdownLine(output, line);
+  }
+
+  renderCodeBlock();
+
+  return output.rendered();
+}
+
+class TelegramTextBuilder {
+  private value = "";
+  private readonly entityList: TelegramMessageEntity[] = [];
+
+  get length(): number {
+    return this.value.length;
+  }
+
+  append(text: string): void {
+    this.value += text;
+  }
+
+  newline(): void {
+    this.value += "\n";
+  }
+
+  entity(entity: TelegramMessageEntity): void {
+    if (entity.length > 0) this.entityList.push(entity);
+  }
+
+  rendered(): RenderedTelegramText {
+    return { text: this.value, entities: this.entityList };
+  }
+}
+
+function renderMarkdownLine(output: TelegramTextBuilder, line: string): void {
+  if (line.trim().length === 0) return;
+
+  const heading = /^(#{1,6})\s+(.+)$/.exec(line);
+  if (heading) {
+    const start = output.length;
+    renderInlineMarkdown(output, heading[2] ?? "");
+    output.entity({ type: "bold", offset: start, length: output.length - start });
+    return;
+  }
+
+  const blockquote = /^\s*>\s?(.+)$/.exec(line);
+  if (blockquote) {
+    const start = output.length;
+    renderInlineMarkdown(output, blockquote[1] ?? "");
+    output.entity({ type: "blockquote", offset: start, length: output.length - start });
+    return;
+  }
+
+  const task = /^(\s*)[-*+]\s+\[([ xX])\]\s+(.+)$/.exec(line);
+  if (task) {
+    output.append(task[1] ?? "");
+    output.append(task[2]?.toLowerCase() === "x" ? "[x] " : "[ ] ");
+    renderInlineMarkdown(output, task[3] ?? "");
+    return;
+  }
+
+  const unordered = /^(\s*)[-*+]\s+(.+)$/.exec(line);
+  if (unordered) {
+    output.append(unordered[1] ?? "");
+    output.append("• ");
+    renderInlineMarkdown(output, unordered[2] ?? "");
+    return;
+  }
+
+  const ordered = /^(\s*)(\d+)[.)]\s+(.+)$/.exec(line);
+  if (ordered) {
+    output.append(ordered[1] ?? "");
+    output.append(`${ordered[2]}. `);
+    renderInlineMarkdown(output, ordered[3] ?? "");
+    return;
+  }
+
+  renderInlineMarkdown(output, line);
+}
+
+function renderInlineMarkdown(output: TelegramTextBuilder, value: string): void {
+  let index = 0;
+
+  while (index < value.length) {
+    if (value[index] === "`") {
+      const end = value.indexOf("`", index + 1);
+      if (end > index + 1) {
+        const start = output.length;
+        output.append(value.slice(index + 1, end));
+        output.entity({ type: "code", offset: start, length: output.length - start });
+        index = end + 1;
+        continue;
+      }
+    }
+
+    const link = tryParseMarkdownLink(value, index);
+    if (link) {
+      const start = output.length;
+      renderInlineMarkdown(output, link.label);
+      output.entity({ type: "text_link", offset: start, length: output.length - start, url: link.url });
+      index = link.end;
+      continue;
+    }
+
+    const boldMarker = value.startsWith("**", index) ? "**" : value.startsWith("__", index) ? "__" : undefined;
+    if (boldMarker) {
+      const end = value.indexOf(boldMarker, index + boldMarker.length);
+      if (end > index + boldMarker.length) {
+        const start = output.length;
+        renderInlineMarkdown(output, value.slice(index + boldMarker.length, end));
+        output.entity({ type: "bold", offset: start, length: output.length - start });
+        index = end + boldMarker.length;
+        continue;
+      }
+    }
+
+    const italicMarker = value[index] === "*" ? "*" : value[index] === "_" ? "_" : undefined;
+    if (italicMarker) {
+      const end = value.indexOf(italicMarker, index + 1);
+      if (end > index + 1) {
+        const start = output.length;
+        renderInlineMarkdown(output, value.slice(index + 1, end));
+        output.entity({ type: "italic", offset: start, length: output.length - start });
+        index = end + 1;
+        continue;
+      }
+    }
+
+    output.append(value[index] ?? "");
+    index += 1;
+  }
 }
 
 function formatMarkdownLine(line: string): string {
@@ -211,27 +437,13 @@ export interface StatusView {
   workspaceName?: string;
   workspacePath?: string;
   running?: boolean;
+  recentOutputAt?: number;
+  recentError?: string;
 }
 
 export interface WorkspaceView {
   name: string;
   selected: boolean;
-}
-
-export function formatHelp(): string {
-  return [
-    "<b>Agent Relay</b>",
-    "",
-    "<b>Commands</b>",
-    "<code>/help</code> - show this help",
-    "<code>/workspaces</code> - list workspaces",
-    "<code>/new &lt;name&gt;</code> - create workspace under WORKSPACE_ROOT",
-    "<code>/use &lt;name&gt;</code> - switch this chat to a workspace",
-    "<code>/status</code> - show current workspace and Codex session",
-    "<code>/tail [n]</code> - show recent agent output, default 50 entries",
-    "<code>/exit</code> - stop the current Codex session",
-    "<code>/send &lt;text&gt;</code> - send text that starts with / to Codex",
-  ].join("\n");
 }
 
 export function formatStatus(status: StatusView): string {
@@ -240,16 +452,19 @@ export function formatStatus(status: StatusView): string {
       "<b>Status</b>",
       "",
       "No workspace selected.",
-      "Use <code>/new &lt;name&gt;</code> or <code>/use &lt;name&gt;</code>.",
+      "Use the console buttons to select or create one.",
     ].join("\n");
   }
-  return [
+  const lines = [
     "<b>Status</b>",
     "",
     `<b>Workspace:</b> <code>${htmlEscape(status.workspaceName)}</code>`,
     `<b>Path:</b> <code>${htmlEscape(status.workspacePath)}</code>`,
     `<b>Codex:</b> ${status.running ? "running" : "stopped"}`,
-  ].join("\n");
+    `<b>Recent output:</b> ${status.recentOutputAt ? htmlEscape(new Date(status.recentOutputAt).toISOString()) : "none"}`,
+  ];
+  if (status.recentError) lines.push(`<b>Recent error:</b> ${htmlEscape(status.recentError.trim().slice(0, 500))}`);
+  return lines.join("\n");
 }
 
 export function formatWorkspaces(workspaces: WorkspaceView[]): string {
@@ -258,7 +473,7 @@ export function formatWorkspaces(workspaces: WorkspaceView[]): string {
       "<b>Workspaces</b>",
       "",
       "No workspaces.",
-      "Use <code>/new &lt;name&gt;</code>.",
+      "Use New workspace to create one.",
     ].join("\n");
   }
   return [

@@ -1,5 +1,5 @@
 import type { ChatId, EditMessageTextOptions, IMAdapter, InboundMessage, SendMessageOptions } from "./types.ts";
-import { splitForTelegram, splitHtmlForTelegram } from "./text.ts";
+import { splitForTelegram, splitHtmlForTelegram, splitRenderedForTelegram } from "./text.ts";
 import { noopLogger, type Logger } from "./logger.ts";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit | BunFetchRequestInit) => Promise<Response>;
@@ -33,6 +33,7 @@ interface TelegramUpdate {
     text?: string;
     chat: { id: number };
     from?: { id: number };
+    reply_to_message?: { message_id: number };
   };
   callback_query?: {
     id: string;
@@ -126,19 +127,22 @@ export class TelegramAdapter implements IMAdapter {
     this.logger.info("telegram.pending_updates_skipped", { offset: this.offset });
   }
 
-  async sendMessage(chatId: ChatId, text: string, options: SendMessageOptions = {}): Promise<void> {
+  async sendMessage(chatId: ChatId, text: string, options: SendMessageOptions = {}): Promise<{ messageId?: number }> {
     const messageText = text.length > 0 ? text : "(empty)";
-    const chunks = options.parseMode === "HTML" ? splitHtmlForTelegram(messageText) : splitForTelegram(messageText);
+    const chunks = outboundChunks(messageText, options);
     this.logger.debug("telegram.send_message_started", { chat_id: chatId, text_len: text.length, chunks: chunks.length });
+    let lastMessageId: number | undefined;
     for (const [index, chunk] of chunks.entries()) {
       try {
-        await this.request("sendMessage", {
+        const result = await this.request<{ message_id?: number }>("sendMessage", {
           chat_id: chatId,
-          text: chunk,
-          disable_web_page_preview: true,
+          text: chunk.text,
+          disable_web_page_preview: options.disableWebPagePreview ?? true,
           ...(options.parseMode ? { parse_mode: options.parseMode } : {}),
-          ...(options.replyMarkup && index === chunks.length - 1 ? { reply_markup: options.replyMarkup } : {}),
+          ...(chunk.entities.length > 0 ? { entities: chunk.entities } : {}),
+          ...(replyMarkupForOptions(options, index === chunks.length - 1)),
         });
+        lastMessageId = result?.message_id ?? lastMessageId;
       } catch (error) {
         this.logger.error("telegram.send_message_failed", {
           chat_id: chatId,
@@ -150,6 +154,7 @@ export class TelegramAdapter implements IMAdapter {
       }
     }
     this.logger.debug("telegram.send_message_completed", { chat_id: chatId, text_len: text.length, chunks: chunks.length });
+    return { messageId: lastMessageId };
   }
 
   async editMessageText(chatId: ChatId, text: string, options: EditMessageTextOptions): Promise<void> {
@@ -158,9 +163,10 @@ export class TelegramAdapter implements IMAdapter {
         chat_id: chatId,
         message_id: options.messageId,
         text: text.length > 0 ? text : "(empty)",
-        disable_web_page_preview: true,
+        disable_web_page_preview: options.disableWebPagePreview ?? true,
         ...(options.parseMode ? { parse_mode: options.parseMode } : {}),
-        ...(options.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
+        ...(options.entities && options.entities.length > 0 ? { entities: options.entities } : {}),
+        ...(replyMarkupForOptions(options, true)),
       });
     } catch (error) {
       if (isMessageNotModifiedError(error)) {
@@ -184,6 +190,13 @@ export class TelegramAdapter implements IMAdapter {
     });
   }
 
+  async sendChatAction(chatId: ChatId, action: "typing" = "typing"): Promise<void> {
+    await this.request("sendChatAction", {
+      chat_id: chatId,
+      action,
+    });
+  }
+
   private toInboundMessage(update: TelegramUpdate): InboundMessage | undefined {
     const message = update.message;
     if (message?.text && message.from) {
@@ -193,6 +206,7 @@ export class TelegramAdapter implements IMAdapter {
         chatId: message.chat.id,
         userId: message.from.id,
         text: message.text,
+        ...(message.reply_to_message ? { replyToMessageId: message.reply_to_message.message_id } : {}),
         date: message.date,
       };
     }
@@ -251,4 +265,19 @@ function isMessageNotModifiedError(error: unknown): boolean {
     return true;
   }
   return error instanceof Error && error.message.toLowerCase().includes("message is not modified");
+}
+
+function outboundChunks(text: string, options: SendMessageOptions): Array<{ text: string; entities: NonNullable<SendMessageOptions["entities"]> }> {
+  if (options.entities && options.entities.length > 0 && !options.parseMode) {
+    return splitRenderedForTelegram({ text, entities: options.entities });
+  }
+  const chunks = options.parseMode === "HTML" ? splitHtmlForTelegram(text) : splitForTelegram(text);
+  return chunks.map((chunk) => ({ text: chunk, entities: [] }));
+}
+
+function replyMarkupForOptions(options: SendMessageOptions, include: boolean): { reply_markup?: unknown } {
+  if (!include) return {};
+  if (options.forceReply) return { reply_markup: { force_reply: true, selective: true } };
+  if (options.replyMarkup) return { reply_markup: options.replyMarkup };
+  return {};
 }

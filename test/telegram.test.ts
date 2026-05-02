@@ -63,7 +63,7 @@ describe("telegram adapter", () => {
             update_id: 5,
             callback_query: {
               id: "cb1",
-              data: "ar:status",
+              data: "ar:s",
               from: { id: 3 },
               message: { message_id: 9, date: 1, chat: { id: 2 } },
             },
@@ -85,7 +85,7 @@ describe("telegram adapter", () => {
       chatId: 2,
       userId: 3,
       messageId: 9,
-      data: "ar:status",
+      data: "ar:s",
       date: 1,
     }]);
   });
@@ -106,20 +106,48 @@ describe("telegram adapter", () => {
     const sentBodies: unknown[] = [];
     const adapter = new TelegramAdapter("token", async (_url, init) => {
       sentBodies.push(JSON.parse(String(init?.body)));
-      return Response.json({ ok: true, result: true });
+      return Response.json({ ok: true, result: { message_id: 77 } });
     });
 
-    await adapter.sendMessage(1, "<b>Help</b>", {
+    const result = await adapter.sendMessage(1, "<b>Help</b>", {
       parseMode: "HTML",
-      replyMarkup: { inline_keyboard: [[{ text: "Status", callback_data: "ar:status" }]] },
+      replyMarkup: { inline_keyboard: [[{ text: "Status", callback_data: "ar:s" }]] },
     });
 
+    expect(result).toEqual({ messageId: 77 });
     expect(sentBodies.at(-1)).toEqual({
       chat_id: 1,
       text: "<b>Help</b>",
       disable_web_page_preview: true,
       parse_mode: "HTML",
-      reply_markup: { inline_keyboard: [[{ text: "Status", callback_data: "ar:status" }]] },
+      reply_markup: { inline_keyboard: [[{ text: "Status", callback_data: "ar:s" }]] },
+    });
+  });
+
+  test("sends entities and ForceReply markup", async () => {
+    const sentBodies: unknown[] = [];
+    const adapter = new TelegramAdapter("token", async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ ok: true, result: { message_id: 12 } });
+    });
+
+    await adapter.sendMessage(1, "Done src/app.ts", {
+      entities: [
+        { type: "bold", offset: 0, length: 4 },
+        { type: "code", offset: 5, length: 10 },
+      ],
+      forceReply: true,
+    });
+
+    expect(sentBodies.at(-1)).toEqual({
+      chat_id: 1,
+      text: "Done src/app.ts",
+      disable_web_page_preview: true,
+      entities: [
+        { type: "bold", offset: 0, length: 4 },
+        { type: "code", offset: 5, length: 10 },
+      ],
+      reply_markup: { force_reply: true, selective: true },
     });
   });
 
@@ -132,7 +160,7 @@ describe("telegram adapter", () => {
 
     await adapter.sendMessage(1, `<pre>${"x".repeat(3600)}</pre>`, {
       parseMode: "HTML",
-      replyMarkup: { inline_keyboard: [[{ text: "Status", callback_data: "ar:status" }]] },
+      replyMarkup: { inline_keyboard: [[{ text: "Status", callback_data: "ar:s" }]] },
     });
 
     expect(sentBodies.length).toBeGreaterThan(1);
@@ -152,9 +180,10 @@ describe("telegram adapter", () => {
     await adapter.editMessageText(1, "<b>Status</b>", {
       messageId: 2,
       parseMode: "HTML",
-      replyMarkup: { inline_keyboard: [[{ text: "Refresh", callback_data: "ar:status" }]] },
+      replyMarkup: { inline_keyboard: [[{ text: "Refresh", callback_data: "ar:s" }]] },
     });
     await adapter.answerCallbackQuery("cb1", "Done");
+    await adapter.sendChatAction(1);
 
     expect(requests).toEqual([
       {
@@ -165,7 +194,7 @@ describe("telegram adapter", () => {
           text: "<b>Status</b>",
           disable_web_page_preview: true,
           parse_mode: "HTML",
-          reply_markup: { inline_keyboard: [[{ text: "Refresh", callback_data: "ar:status" }]] },
+          reply_markup: { inline_keyboard: [[{ text: "Refresh", callback_data: "ar:s" }]] },
         },
       },
       {
@@ -173,6 +202,13 @@ describe("telegram adapter", () => {
         body: {
           callback_query_id: "cb1",
           text: "Done",
+        },
+      },
+      {
+        method: "sendChatAction",
+        body: {
+          chat_id: 1,
+          action: "typing",
         },
       },
     ]);

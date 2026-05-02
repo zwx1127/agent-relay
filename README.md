@@ -54,30 +54,30 @@ bun run dev
 
 ## Telegram Commands
 
-- `/help` shows commands and an inline menu for common actions.
-- `/workspaces` lists known workspaces and shows clickable workspace buttons when callback data fits Telegram limits.
-- `/new <name>` creates a workspace under `WORKSPACE_ROOT` and runs `git init`.
-- `/use <name>` switches the chat to an existing workspace.
-- `/status` shows the current workspace and Codex session state with refresh, workspace, tail, and stop buttons.
-- `/tail [n]` returns recent agent output, defaulting to 50 lines.
-- `/exit` stops the current Codex PTY.
-- `/send <text>` forwards text that starts with `/` to Codex.
+Relay exposes one daily command:
 
-Plain text is sent to the current workspace's Codex session. If that session is not running, the relay starts it automatically.
+- `/relay` opens the relay control console.
+
+Telegram `/start` is kept as a first-use alias for `/relay`.
+
+Everything else you type is sent directly to Codex in the current workspace, including slash-style text such as `/status`, `/help`, `/model`, and `/review`. This keeps the Telegram chat Codex-first and avoids collisions with Codex's own slash commands.
+
+If no workspace is selected, user input is not forwarded. Relay opens the console so you can select or create a workspace first.
 
 ## Telegram Interaction
 
-System and command responses use Telegram HTML formatting. Dynamic values such as workspace names, paths, and error details are escaped before rendering.
-
-Agent output and `/tail` responses render common Codex Markdown as Telegram HTML, including headings, lists, emphasis, inline code, code blocks, and HTTP/HTTPS links. Dynamic agent text is escaped before rendering; unsupported Markdown is left readable as text.
-
-Inline buttons use callback queries for common actions:
+The relay console shows the selected workspace, Codex running/stopped state, recent output time, and recent relay error. Its inline buttons cover relay-specific actions:
 
 - `Workspaces` opens the workspace list.
-- `Status` refreshes the current status view.
-- `Tail 50` sends the latest 50 lines of agent output as a new plain-text message.
+- `New workspace` asks for a workspace name with Telegram ForceReply, then creates and selects it.
+- `Tail 50` sends recent Codex output.
 - `Stop` opens a confirmation view before stopping the current Codex session.
-- Workspace buttons switch the chat binding and edit the menu message into the updated status view.
+- `Refresh` redraws the console.
+- Workspace buttons switch the chat binding and edit the console into the updated status view.
+
+System and console responses use Telegram HTML formatting. Dynamic values such as workspace names, paths, and error details are escaped before rendering.
+
+Codex output and tail responses render common Markdown into Telegram text plus message entities, including headings, lists, task lists, blockquotes, emphasis, inline code, code blocks, and HTTP/HTTPS links. Unsupported Markdown is left readable as plain text.
 
 If Telegram rejects a menu edit, the relay logs a warning and sends a new message instead. Telegram's `message is not modified` edit response is treated as harmless, including the HTTP 400 form returned when an edit would leave both text and buttons unchanged. Other edit failures still fall back to sending a new message.
 
@@ -88,7 +88,7 @@ If Telegram rejects a menu edit, the relay logs a warning and sends a new messag
 - Long polling subscribes to Telegram `message` and `callback_query` updates.
 - Workspace names are limited to letters, numbers, dots, underscores, and dashes.
 - Workspaces are resolved under `WORKSPACE_ROOT`; path traversal and absolute workspace names are rejected.
-- `/new <name>` creates the workspace directory and runs `git init`.
+- `New workspace` creates the workspace directory and runs `git init`.
 - Codex starts with:
 
 ```bash
@@ -96,9 +96,9 @@ codex --no-alt-screen -C <workspace> -s <CODEX_SANDBOX> -a <CODEX_APPROVAL>
 ```
 
 - PTY output is stripped of ANSI/control sequences, stored in SQLite, debounced, and split into Telegram-sized messages.
-- Agent output is formatted from common Markdown into Telegram HTML before sending, with safe escaping and tag-aware splitting for long messages.
-- `/exit` sends Ctrl-C first, then kills the process if it is still alive after 5 seconds.
-- The `Stop` inline button uses the same session stop behavior as `/exit`, but requires a second confirmation tap.
+- Agent output is aggregated per session, flushed after a short quiet period or size/time limit, and usually edits one live Telegram message for the current response.
+- Long Codex output is split into continuation messages with Telegram entity offsets recalculated for each chunk.
+- The `Stop` inline button sends Ctrl-C first, then kills the process if it is still alive after 5 seconds. It requires a second confirmation tap.
 
 ## Logging
 
@@ -119,10 +119,10 @@ src/
   config.ts      Environment parsing and allowlist checks
   logger.ts      Text stdout logger and log level parsing
   main.ts        Runtime wiring
-  router.ts      Telegram command and message routing
+  router.ts      Telegram console and message routing
   store.ts       SQLite schema and persistence
   telegram.ts    Telegram long polling adapter and Bot API calls
-  text.ts        Output cleanup, message splitting, and HTML rendering helpers
+  text.ts        Output cleanup, message splitting, and Telegram text rendering helpers
   workspace.ts   Workspace validation and creation
 test/
   *.test.ts      Unit, routing, adapter, store, and PTY smoke tests
@@ -136,6 +136,7 @@ SQLite stores:
 - chat-to-workspace bindings
 - agent session status
 - transcript events for user, agent, and system messages
+- pending ForceReply prompts for workspace creation
 
 The default database path is `.data/agent-relay.sqlite`.
 

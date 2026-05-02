@@ -33,6 +33,22 @@ describe("store", () => {
     expect(store.getBinding(123)).toEqual({ chatId: 123, workspaceName: "demo", updatedAt: 2 });
     store.appendTranscript({ chatId: 123, workspaceName: "demo", role: "agent", text: "hello\n", createdAt: 3 });
     expect(store.recentTranscript(123, "demo", "agent", 50)).toBe("hello\n");
+    expect(store.latestTranscriptEvent(123, "demo", "agent")).toEqual({
+      chatId: 123,
+      workspaceName: "demo",
+      role: "agent",
+      text: "hello\n",
+      createdAt: 3,
+    });
+    store.close();
+  });
+
+  test("stores pending prompts", () => {
+    const store = tempStore();
+    store.setPendingPrompt({ chatId: 123, promptMessageId: 9, kind: "workspace_name", createdAt: 3 });
+    expect(store.getPendingPrompt(123, 9)).toEqual({ chatId: 123, promptMessageId: 9, kind: "workspace_name", createdAt: 3 });
+    store.deletePendingPrompt(123, 9);
+    expect(store.getPendingPrompt(123, 9)).toBeUndefined();
     store.close();
   });
 });

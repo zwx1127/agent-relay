@@ -13,9 +13,12 @@ class FakeAdapter {
   sent: Array<{ chatId: ChatId; text: string; options?: SendMessageOptions }> = [];
   edited: Array<{ chatId: ChatId; text: string; options: EditMessageTextOptions }> = [];
   answered: Array<{ callbackQueryId: string; text?: string }> = [];
+  chatActions: Array<{ chatId: ChatId; action?: "typing" }> = [];
+  nextMessageId = 100;
 
-  async sendMessage(chatId: ChatId, text: string, options?: SendMessageOptions): Promise<void> {
+  async sendMessage(chatId: ChatId, text: string, options?: SendMessageOptions): Promise<{ messageId?: number }> {
     this.sent.push({ chatId, text, options });
+    return { messageId: this.nextMessageId++ };
   }
 
   async editMessageText(chatId: ChatId, text: string, options: EditMessageTextOptions): Promise<void> {
@@ -24,6 +27,10 @@ class FakeAdapter {
 
   async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
     this.answered.push({ callbackQueryId, text });
+  }
+
+  async sendChatAction(chatId: ChatId, action?: "typing"): Promise<void> {
+    this.chatActions.push({ chatId, action });
   }
 }
 
@@ -98,7 +105,7 @@ describe("router", () => {
 
   test("rejects unauthorized callbacks with callback answer only", async () => {
     const { router, adapter } = fixture();
-    await router.handle(callbackMessage("ar:status", 99));
+    await router.handle(callbackMessage("ar:s", 99));
     expect(adapter.answered).toEqual([{ callbackQueryId: "cb1", text: "Unauthorized." }]);
     expect(adapter.sent).toEqual([]);
     expect(adapter.edited).toEqual([]);
@@ -144,19 +151,19 @@ describe("router", () => {
     expect(logLines.join("\n")).toContain('message_text="secret prompt"');
   });
 
-  test("/send forwards command-like text", async () => {
+  test("non-reserved slash text is forwarded to codex", async () => {
     const { router, store, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
     store.bindChat(1, "demo");
 
-    await router.handle(textMessage("/send /status"));
+    await router.handle(textMessage("/status"));
 
     expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "/status" });
   });
 
-  test("/tail returns agent transcript", async () => {
+  test("tail callback returns agent transcript with entities", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -164,10 +171,10 @@ describe("router", () => {
     store.bindChat(1, "demo");
     store.appendTranscript({ chatId: 1, workspaceName: "demo", role: "agent", text: "one\n", createdAt: 1 });
 
-    await router.handle(textMessage("/tail"));
+    await router.handle(callbackMessage("ar:t50"));
 
     expect(adapter.sent.at(-1)?.text).toBe("one\n");
-    expect(adapter.sent.at(-1)?.options?.parseMode).toBe("HTML");
+    expect(adapter.sent.at(-1)?.options?.entities).toEqual([]);
   });
 
   test("formats realtime agent output as telegram html", async () => {
@@ -180,41 +187,58 @@ describe("router", () => {
     await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "**Done** `src/app.ts`\n" });
     await sleep(850);
 
-    expect(adapter.sent.at(-1)?.text).toBe("<b>Done</b> <code>src/app.ts</code>\n");
-    expect(adapter.sent.at(-1)?.options?.parseMode).toBe("HTML");
+    expect(adapter.sent.at(-1)?.text).toBe("Done src/app.ts\n");
+    expect(adapter.sent.at(-1)?.options?.entities?.map((entity) => entity.type)).toEqual(["bold", "code"]);
   });
 
-  test("/exit stops current session", async () => {
-    const { router, store, agent, root } = fixture();
-    const path = join(root, "demo");
-    mkdirSync(path);
-    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
-    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
-
-    await router.handle(textMessage("/exit"));
-
-    expect(agent.stopped).toEqual(["1:demo"]);
-  });
-
-  test("/help sends formatted HTML menu", async () => {
+  test("/relay sends formatted HTML console", async () => {
     const { router, adapter } = fixture();
-    await router.handle(textMessage("/help"));
+    await router.handle(textMessage("/relay"));
 
-    expect(adapter.sent.at(-1)?.text).toContain("<b>Agent Relay</b>");
+    expect(adapter.sent.at(-1)?.text).toContain("<b>Status</b>");
     expect(adapter.sent.at(-1)?.options?.parseMode).toBe("HTML");
-    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toContain("ar:workspaces");
+    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toContain("ar:w");
   });
 
-  test("/status escapes dynamic workspace values", async () => {
+  test("/start opens the same console", async () => {
+    const { router, adapter } = fixture();
+    await router.handle(textMessage("/start"));
+
+    expect(adapter.sent.at(-1)?.text).toContain("<b>Status</b>");
+    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toContain("ar:n");
+  });
+
+  test("console escapes dynamic workspace values", async () => {
     const { router, store, adapter } = fixture();
     store.upsertWorkspace({ name: "demo", path: "/tmp/<demo>&", createdAt: 1 });
     store.bindChat(1, "demo");
 
-    await router.handle(textMessage("/status"));
+    await router.handle(textMessage("/relay"));
 
     expect(adapter.sent.at(-1)?.text).toContain("/tmp/&lt;demo&gt;&amp;");
     expect(adapter.sent.at(-1)?.options?.parseMode).toBe("HTML");
+  });
+
+  test("input without a workspace opens the relay console", async () => {
+    const { router, adapter, agent } = fixture();
+
+    await router.handle(textMessage("hello"));
+
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("No workspace selected.");
+  });
+
+  test("new workspace callback uses ForceReply and reply creates binding", async () => {
+    const { router, store, adapter } = fixture();
+
+    await router.handle(callbackMessage("ar:n"));
+    expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
+    const promptId = adapter.sent.length + 99;
+
+    await router.handle(textMessage("demo", 7, promptId));
+
+    expect(store.getBinding(1)?.workspaceName).toBe("demo");
+    expect(adapter.sent.at(-1)?.text).toContain("created and selected");
   });
 
   test("workspace callback switches binding and edits status", async () => {
@@ -227,7 +251,7 @@ describe("router", () => {
     store.upsertWorkspace({ name: "second", path: second, createdAt: 1 });
     store.bindChat(1, "first");
 
-    await router.handle(callbackMessage("ar:use:second"));
+    await router.handle(callbackMessage("ar:u:second"));
 
     expect(store.getBinding(1)?.workspaceName).toBe("second");
     expect(adapter.edited.at(-1)?.text).toContain("<code>second</code>");
@@ -245,12 +269,12 @@ describe("router", () => {
     store.upsertWorkspace({ name: "demo", path: normal, createdAt: 1 });
     store.upsertWorkspace({ name: longName, path: longPath, createdAt: 1 });
 
-    await router.handle(callbackMessage("ar:workspaces"));
+    await router.handle(callbackMessage("ar:w"));
 
     expect(adapter.edited.at(-1)?.text).toContain(`<code>${longName}</code>`);
     const callbackData = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data);
-    expect(callbackData).toContain("ar:use:demo");
-    expect(callbackData).not.toContain(`ar:use:${longName}`);
+    expect(callbackData).toContain("ar:u:demo");
+    expect(callbackData).not.toContain(`ar:u:${longName}`);
   });
 
   test("stop callback requires confirmation before stopping", async () => {
@@ -261,11 +285,11 @@ describe("router", () => {
     store.bindChat(1, "demo");
     await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
 
-    await router.handle(callbackMessage("ar:exit:confirm"));
+    await router.handle(callbackMessage("ar:x?"));
     expect(agent.stopped).toEqual([]);
     expect(adapter.edited.at(-1)?.text).toContain("Stop Codex session?");
 
-    await router.handle(callbackMessage("ar:exit:run", 7, "cb2"));
+    await router.handle(callbackMessage("ar:x!", 7, "cb2"));
     expect(agent.stopped).toEqual(["1:demo"]);
     expect(adapter.edited.at(-1)?.text).toContain("Codex session stopped.");
   });
@@ -280,8 +304,8 @@ describe("router", () => {
   });
 });
 
-function textMessage(text: string, userId = 7) {
-  return { kind: "message" as const, id: "1", chatId: 1, userId, text };
+function textMessage(text: string, userId = 7, replyToMessageId?: number) {
+  return { kind: "message" as const, id: "1", chatId: 1, userId, text, replyToMessageId };
 }
 
 function callbackMessage(data: string, userId = 7, callbackQueryId = "cb1") {
