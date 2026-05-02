@@ -69,7 +69,7 @@ If no workspace is selected, user input is not forwarded. Relay opens the consol
 The relay console shows the selected workspace, Codex running/stopped state, recent output time, and recent relay error. Its inline buttons cover relay-specific actions:
 
 - `Workspaces` opens the workspace list.
-- `New workspace` asks for a workspace name with Telegram ForceReply, then creates and selects it.
+- `New workspace` asks for a workspace name with Telegram ForceReply, then selects an existing directory under `WORKSPACE_ROOT` or creates and selects a new one.
 - `Stop` opens a confirmation view before stopping the current Codex session.
 - `Refresh` redraws the console.
 - Workspace buttons switch the chat binding and edit the console into the updated status view.
@@ -96,9 +96,10 @@ If Telegram rejects a menu edit, the relay logs a warning and sends a new messag
 - Authorization requires `TELEGRAM_ALLOWED_USER_IDS`; if `TELEGRAM_ALLOWED_CHAT_IDS` is set, both user and chat must match.
 - On startup, pending Telegram updates are skipped before polling begins, so messages sent while the relay was offline are intentionally ignored.
 - Long polling subscribes to Telegram `message` and `callback_query` updates.
-- Workspace names are limited to letters, numbers, dots, underscores, and dashes.
+- Workspace names cannot be empty, `.`, `..`, or contain slashes, backslashes, NUL, or control characters.
 - Workspaces are resolved under `WORKSPACE_ROOT`; path traversal and absolute workspace names are rejected.
-- `New workspace` creates the workspace directory and runs `git init`.
+- `Workspaces` discovers existing first-level directories under `WORKSPACE_ROOT`; symlinked directories are ignored.
+- `New workspace` creates the workspace directory and runs `git init` only when the directory does not already exist.
 - Codex starts one app-server process:
 
 ```bash
@@ -136,7 +137,7 @@ src/
   store.ts       SQLite schema and persistence
   telegram.ts    Telegram long polling adapter and Bot API calls
   text.ts        Output cleanup, message splitting, and Telegram text rendering helpers
-  workspace.ts   Workspace validation and creation
+  workspace.ts   Workspace validation, discovery, and creation
 test/
   *.test.ts      Unit, routing, adapter, store, app-server protocol, and smoke tests
 ```

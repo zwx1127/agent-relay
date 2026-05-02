@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import type { AppConfig } from "./config.ts";
 import { isAuthorized } from "./config.ts";
 import { sessionKey } from "./agent.ts";
@@ -16,7 +16,7 @@ import type {
   WorkspaceRecord,
 } from "./types.ts";
 import type { Store } from "./store.ts";
-import { createWorkspace, resolveWorkspacePath, validateWorkspaceName } from "./workspace.ts";
+import { createWorkspace, discoverWorkspaceDirectories, isRealDirectory, resolveWorkspacePath, validateWorkspaceName, workspaceDirectoryExists } from "./workspace.ts";
 import { formatError, formatStatus, formatWorkspaces, htmlEscape, renderCodexMarkdownForTelegram, splitRenderedForTelegram, type RenderedTelegramText } from "./text.ts";
 import { noopLogger, type Logger } from "./logger.ts";
 
@@ -237,6 +237,15 @@ export class MessageRouter {
       await this.renderStatusCallback(message);
       return;
     }
+    if (payload.startsWith("uh:")) {
+      const token = payload.slice("uh:".length);
+      const name = await this.workspaceNameForToken(token);
+      const workspace = this.requireWorkspace(name);
+      this.deps.store.bindChat(message.chatId, workspace.name);
+      this.logger.info("router.workspace_selected", { chat_id: message.chatId, workspace: workspace.name, path: workspace.path });
+      await this.renderStatusCallback(message);
+      return;
+    }
     if (payload.startsWith("u:")) {
       const name = payload.slice("u:".length);
       const workspace = this.requireWorkspace(name);
@@ -255,7 +264,7 @@ export class MessageRouter {
   }
 
   private async renderWorkspacesCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
-    const workspaces = this.deps.store.listWorkspaces();
+    const workspaces = await this.listAvailableWorkspaces();
     const selected = this.currentWorkspace(message.chatId)?.name;
     await this.renderCallbackPage(message, formatWorkspaces(workspaces.map((workspace) => ({
       name: workspace.name,
@@ -320,7 +329,7 @@ export class MessageRouter {
   }
 
   private async promptForWorkspaceName(chatId: ChatId): Promise<void> {
-    const result = await this.deps.adapter.sendMessage(chatId, "Reply with the new workspace name.", {
+    const result = await this.deps.adapter.sendMessage(chatId, "Reply with a workspace name. Existing directories under WORKSPACE_ROOT will be selected; missing names will be created.", {
       forceReply: true,
       disableWebPagePreview: true,
     });
@@ -338,12 +347,15 @@ export class MessageRouter {
 
   private async createWorkspaceFromPrompt(chatId: ChatId, promptMessageId: number, name: string): Promise<void> {
     validateWorkspaceName(name);
-    const path = await createWorkspace(this.deps.config.workspaceRoot, name);
+    const existed = workspaceDirectoryExists(this.deps.config.workspaceRoot, name);
+    const path = existed
+      ? resolveWorkspacePath(this.deps.config.workspaceRoot, name)
+      : await createWorkspace(this.deps.config.workspaceRoot, name);
     this.deps.store.upsertWorkspace({ name, path, createdAt: Date.now() });
     this.deps.store.bindChat(chatId, name);
     this.deps.store.deletePendingPrompt(chatId, promptMessageId);
-    this.logger.info("router.workspace_created", { chat_id: chatId, workspace: name, path });
-    await this.deps.adapter.sendMessage(chatId, `Workspace <code>${htmlEscape(name)}</code> created and selected.`, {
+    this.logger.info(existed ? "router.workspace_existing_selected" : "router.workspace_created", { chat_id: chatId, workspace: name, path });
+    await this.deps.adapter.sendMessage(chatId, `Workspace <code>${htmlEscape(name)}</code> ${existed ? "selected" : "created and selected"}.`, {
       ...HTML,
       replyMarkup: consoleKeyboard(this.statusView(chatId)),
     });
@@ -356,7 +368,7 @@ export class MessageRouter {
       await this.renderConsole(chatId);
       return;
     }
-    if (!existsSync(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
+    if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
     const key = sessionKey(chatId, workspace.name);
     if (!this.deps.agent.getStatus(key)) {
       this.logger.info("router.session_starting", { chat_id: chatId, workspace: workspace.name, session_key: key });
@@ -402,7 +414,7 @@ export class MessageRouter {
   private requireCurrentWorkspace(chatId: ChatId): WorkspaceRecord {
     const workspace = this.currentWorkspace(chatId);
     if (!workspace) throw new Error("No workspace selected. Open /relay to select or create one.");
-    if (!existsSync(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
+    if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
     return workspace;
   }
 
@@ -413,9 +425,24 @@ export class MessageRouter {
       path: resolveWorkspacePath(this.deps.config.workspaceRoot, name),
       createdAt: Date.now(),
     };
-    if (!existsSync(workspace.path)) throw new Error(`Workspace '${name}' does not exist. Create it from the relay console first.`);
+    if (!isRealDirectory(workspace.path)) throw new Error(`Workspace '${name}' does not exist. Create it from the relay console first.`);
     this.deps.store.upsertWorkspace(workspace);
     return workspace;
+  }
+
+  private async listAvailableWorkspaces(): Promise<WorkspaceRecord[]> {
+    const now = Date.now();
+    for (const workspace of await discoverWorkspaceDirectories(this.deps.config.workspaceRoot)) {
+      this.deps.store.upsertWorkspace({ ...workspace, createdAt: now });
+    }
+    return this.deps.store.listWorkspaces();
+  }
+
+  private async workspaceNameForToken(token: string): Promise<string> {
+    const matches = (await this.listAvailableWorkspaces()).filter((workspace) => workspaceCallbackToken(workspace.name) === token);
+    if (matches.length === 1) return matches[0]!.name;
+    if (matches.length > 1) throw new Error("Workspace selection token is ambiguous. Refresh Workspaces and try again.");
+    throw new Error("Workspace selection expired. Refresh Workspaces and try again.");
   }
 
   private appendSystem(chatId: ChatId, text: string): void {
@@ -942,16 +969,10 @@ function consoleKeyboard(status: { workspaceName?: string; running?: boolean }):
 }
 
 function workspacesKeyboard(workspaces: WorkspaceRecord[], selected?: string): InlineKeyboardMarkup {
-  const rows = workspaces
-    .map((workspace) => {
-      const callbackData = `ar:u:${workspace.name}`;
-      if (new TextEncoder().encode(callbackData).length > CALLBACK_LIMIT_BYTES) return undefined;
-      return [{
-        text: `${workspace.name === selected ? "Current: " : "Use: "}${workspace.name}`,
-        callback_data: callbackData,
-      }];
-    })
-    .filter((row): row is Array<{ text: string; callback_data: string }> => Boolean(row));
+  const rows = workspaces.map((workspace) => [{
+    text: `${workspace.name === selected ? "Current: " : "Use: "}${workspace.name}`,
+    callback_data: workspaceCallbackData(workspace.name),
+  }]);
 
   return {
     inline_keyboard: [
@@ -962,6 +983,18 @@ function workspacesKeyboard(workspaces: WorkspaceRecord[], selected?: string): I
       ],
     ],
   };
+}
+
+function workspaceCallbackData(name: string): string {
+  const callbackData = `ar:uh:${workspaceCallbackToken(name)}`;
+  if (new TextEncoder().encode(callbackData).length > CALLBACK_LIMIT_BYTES) {
+    throw new Error("Workspace callback data is too long.");
+  }
+  return callbackData;
+}
+
+function workspaceCallbackToken(name: string): string {
+  return createHash("sha256").update(name).digest("hex").slice(0, 16);
 }
 
 function exitConfirmKeyboard(): InlineKeyboardMarkup {

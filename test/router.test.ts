@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sessionKey } from "../src/agent.ts";
@@ -323,7 +323,7 @@ describe("router", () => {
   });
 
   test("new workspace callback uses ForceReply and reply creates binding", async () => {
-    const { router, store, adapter } = fixture();
+    const { router, store, adapter, root } = fixture();
 
     await router.handle(callbackMessage("ar:n"));
     expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
@@ -333,6 +333,23 @@ describe("router", () => {
 
     expect(store.getBinding(1)?.workspaceName).toBe("demo");
     expect(adapter.sent.at(-1)?.text).toContain("created and selected");
+    expect(existsSync(join(root, "demo", ".git"))).toBe(true);
+  });
+
+  test("new workspace prompt selects an existing directory without git init", async () => {
+    const { router, store, adapter, root } = fixture();
+    const workspaceName = "客户 repo";
+    mkdirSync(join(root, workspaceName));
+
+    await router.handle(callbackMessage("ar:n"));
+    const promptId = adapter.sent.length + 99;
+    await router.handle(textMessage(workspaceName, 7, promptId));
+
+    expect(store.getBinding(1)?.workspaceName).toBe(workspaceName);
+    expect(store.getWorkspace(workspaceName)?.path).toBe(join(root, workspaceName));
+    expect(adapter.sent.at(-1)?.text).toContain("selected");
+    expect(adapter.sent.at(-1)?.text).not.toContain("created and selected");
+    expect(existsSync(join(root, workspaceName, ".git"))).toBe(false);
   });
 
   test("workspace callback switches binding and edits status", async () => {
@@ -353,22 +370,37 @@ describe("router", () => {
     expect(adapter.answered).toEqual([{ callbackQueryId: "cb1", text: undefined }]);
   });
 
-  test("workspaces callback renders safe buttons and text fallback for long names", async () => {
+  test("workspaces callback discovers existing directories and uses short buttons", async () => {
     const { router, store, adapter, root } = fixture();
     const normal = join(root, "demo");
-    const longName = "a".repeat(60);
+    const longName = `客户 repo ${"a".repeat(60)}`;
     const longPath = join(root, longName);
     mkdirSync(normal);
     mkdirSync(longPath);
     store.upsertWorkspace({ name: "demo", path: normal, createdAt: 1 });
-    store.upsertWorkspace({ name: longName, path: longPath, createdAt: 1 });
 
     await router.handle(callbackMessage("ar:w"));
 
     expect(adapter.edited.at(-1)?.text).toContain(`<code>${longName}</code>`);
+    expect(store.getWorkspace(longName)?.path).toBe(longPath);
     const callbackData = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data);
-    expect(callbackData).toContain("ar:u:demo");
-    expect(callbackData).not.toContain(`ar:u:${longName}`);
+    expect(callbackData?.filter((data) => data.startsWith("ar:uh:"))).toHaveLength(2);
+    expect(callbackData?.every((data) => new TextEncoder().encode(data).length <= 64)).toBe(true);
+  });
+
+  test("hashed workspace callback selects long unicode names", async () => {
+    const { router, store, adapter, root } = fixture();
+    const workspaceName = `客户 repo ${"a".repeat(60)}`;
+    mkdirSync(join(root, workspaceName));
+
+    await router.handle(callbackMessage("ar:w"));
+    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((candidate) => candidate.text.includes(workspaceName));
+    expect(button?.callback_data).toMatch(/^ar:uh:/);
+
+    await router.handle(callbackMessage(button!.callback_data, 7, "cb2"));
+
+    expect(store.getBinding(1)?.workspaceName).toBe(workspaceName);
+    expect(adapter.edited.at(-1)?.text).toContain(`<code>${workspaceName}</code>`);
   });
 
   test("stop callback requires confirmation before stopping", async () => {
