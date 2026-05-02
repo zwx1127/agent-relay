@@ -79,7 +79,7 @@ Inline buttons use callback queries for common actions:
 - `Stop` opens a confirmation view before stopping the current Codex session.
 - Workspace buttons switch the chat binding and edit the menu message into the updated status view.
 
-If Telegram rejects a menu edit, the relay logs a warning and sends a new message instead. Telegram's `message is not modified` edit response is treated as harmless.
+If Telegram rejects a menu edit, the relay logs a warning and sends a new message instead. Telegram's `message is not modified` edit response is treated as harmless, including the HTTP 400 form returned when an edit would leave both text and buttons unchanged. Other edit failures still fall back to sending a new message.
 
 ## Runtime Behavior
 
@@ -106,6 +106,8 @@ Runtime logs are written to stdout as text lines. Set `LOG_LEVEL` to `debug`, `i
 At `info` and above, logs include operational metadata such as chat ID, user ID, workspace, command name, text length, session key, and process exit status. They do not include the Telegram bot token, Telegram message text, or Codex output.
 
 At `debug`, logs also include raw Telegram messages and Codex input/output chunks. Use it only in environments where those logs are protected.
+
+Telegram Bot API HTTP errors include Telegram's `description` field when the response body provides one. This makes 400 errors such as malformed HTML, non-editable messages, or other Bot API validation failures visible in `telegram.api_http_error` logs.
 
 ## Project Structure
 

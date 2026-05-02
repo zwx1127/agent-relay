@@ -10,6 +10,21 @@ interface TelegramApiResponse<T> {
   description?: string;
 }
 
+class TelegramApiError extends Error {
+  constructor(
+    readonly method: string,
+    readonly status: number,
+    readonly description: string | undefined,
+  ) {
+    super(
+      description
+        ? `Telegram ${method} failed with HTTP ${status}: ${description}`
+        : `Telegram ${method} failed with HTTP ${status}`,
+    );
+    this.name = "TelegramApiError";
+  }
+}
+
 interface TelegramUpdate {
   update_id: number;
   message?: {
@@ -204,19 +219,35 @@ export class TelegramAdapter implements IMAdapter {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!response.ok) {
-      this.logger.error("telegram.api_http_error", { method, status: response.status });
-      throw new Error(`Telegram ${method} failed with HTTP ${response.status}`);
+    let payload: TelegramApiResponse<T> | undefined;
+    try {
+      payload = (await response.json()) as TelegramApiResponse<T>;
+    } catch (error) {
+      if (response.ok) throw error;
     }
-    const payload = (await response.json()) as TelegramApiResponse<T>;
+    if (!response.ok) {
+      const description = payload?.description;
+      this.logger.error("telegram.api_http_error", {
+        method,
+        status: response.status,
+        description: description || "unknown HTTP error",
+      });
+      throw new TelegramApiError(method, response.status, description);
+    }
+    if (!payload) {
+      throw new Error(`Telegram ${method} returned an empty response`);
+    }
     if (!payload.ok) {
       this.logger.error("telegram.api_error", { method, description: payload.description || "unknown API error" });
-      throw new Error(`Telegram ${method} failed: ${payload.description || "unknown API error"}`);
+      throw new TelegramApiError(method, response.status, payload.description || "unknown API error");
     }
     return payload.result as T;
   }
 }
 
 function isMessageNotModifiedError(error: unknown): boolean {
+  if (error instanceof TelegramApiError && error.description?.toLowerCase().includes("message is not modified")) {
+    return true;
+  }
   return error instanceof Error && error.message.toLowerCase().includes("message is not modified");
 }

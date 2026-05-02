@@ -168,6 +168,28 @@ describe("telegram adapter", () => {
     await expect(adapter.editMessageText(1, "same", { messageId: 2 })).resolves.toBeUndefined();
   });
 
+  test("ignores HTTP 400 message is not modified edit errors", async () => {
+    const adapter = new TelegramAdapter("token", async () => Response.json({
+      ok: false,
+      description: "Bad Request: message is not modified",
+    }, { status: 400 }));
+
+    await expect(adapter.editMessageText(1, "same", { messageId: 2 })).resolves.toBeUndefined();
+  });
+
+  test("includes Telegram HTTP error descriptions", async () => {
+    const lines: string[] = [];
+    const logger = new TextLogger("error", (line) => lines.push(line), () => new Date("2026-05-02T08:00:00.000Z"));
+    const adapter = new TelegramAdapter("token", async () => Response.json({
+      ok: false,
+      description: "Bad Request: can't parse entities",
+    }, { status: 400 }), logger);
+
+    await expect(adapter.editMessageText(1, "<b>broken", { messageId: 2 }))
+      .rejects.toThrow("Bad Request: can't parse entities");
+    expect(lines.join("\n")).toContain('telegram.api_http_error method="editMessageText" status=400 description="Bad Request: can\'t parse entities"');
+  });
+
   test("debug logs raw inbound message text", async () => {
     const lines: string[] = [];
     const logger = new TextLogger("debug", (line) => lines.push(line), () => new Date("2026-05-02T08:00:00.000Z"));
