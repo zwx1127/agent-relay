@@ -135,7 +135,9 @@ export class CodexDriver extends BaseAgentDriver {
       text_len: text.length,
     });
     this.logger.debug("codex.input_text", { session_key: key, message_text: text });
-    running.terminal.write(`${text}\n`);
+    running.terminal.write(text);
+    await Bun.sleep(25);
+    running.terminal.write("\r");
   }
 
   async stop(key: string): Promise<void> {
