@@ -196,6 +196,95 @@ describe("router", () => {
     expect(adapter.sent.at(-1)?.options?.entities?.map((entity) => entity.type)).toEqual(["bold", "code"]);
   });
 
+  test("starts a new telegram message after a completed turn", async () => {
+    const { router, adapter } = fixture();
+
+    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "first", turnId: "turn-1" });
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-1" });
+    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "second", turnId: "turn-2" });
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-2" });
+
+    expect(adapter.sent.map((message) => message.text)).toEqual(["first", "second"]);
+    expect(adapter.edited).toEqual([]);
+  });
+
+  test("user steer finalizes the current live output before later deltas", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+
+    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "before", turnId: "turn-1" });
+    await sleep(850);
+    await router.handle(textMessage("follow up"));
+    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "after", turnId: "turn-1" });
+    await sleep(850);
+
+    expect(adapter.sent.map((message) => message.text)).toEqual(["before", "after"]);
+    expect(adapter.edited).toEqual([]);
+    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "follow up" });
+  });
+
+  test("long agent output is paged in one telegram message", async () => {
+    const { router, adapter } = fixture();
+    const longText = Array.from({ length: 900 }, (_, index) => `line ${index}`).join("\n");
+
+    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: longText, turnId: "turn-1" });
+    await sleep(50);
+
+    const paged = adapter.sent.at(-1)!;
+    expect(adapter.sent).toHaveLength(1);
+    expect(paged.text).toMatch(/Page \d+\/\d+$/);
+    expect(paged.options?.replyMarkup?.inline_keyboard[0]?.[0]?.text).toBe("Previous");
+
+    const previous = paged.options!.replyMarkup!.inline_keyboard[0]![0]!;
+    await router.handle(callbackMessage(previous.callback_data, 7, "cb-page", paged.messageId));
+
+    expect(adapter.edited.at(-1)?.options.messageId).toBe(paged.messageId);
+    expect(adapter.edited.at(-1)?.text).toMatch(/Page \d+\/\d+$/);
+    expect(adapter.sent).toHaveLength(1);
+  });
+
+  test("approval boundary prevents follow-up output from editing the previous assistant message", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "before approval", turnId: "turn-1" });
+    await sleep(850);
+    const firstMessageId = adapter.sent.at(-1)?.messageId;
+    await router.handleAgentOutput({
+      type: "approval_request",
+      sessionKey: "1:demo",
+      requestId: 91,
+      method: "item/commandExecution/requestApproval",
+      approvalKind: "command",
+      title: "Approve command?",
+      body: "bun test",
+      params: { command: "bun test" },
+      turnId: "turn-1",
+      itemId: "approval-1",
+    });
+    const prompt = adapter.sent.at(-1)!;
+    const approve = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
+
+    await router.handle(callbackMessage(approve.callback_data, 7, "cba", prompt.messageId));
+    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "after approval", turnId: "turn-1" });
+    await sleep(850);
+
+    expect(agent.responses).toEqual([{ key: "1:demo", requestId: 91, result: { decision: "accept" } }]);
+    expect(adapter.edited.some((message) => message.options.messageId === firstMessageId && message.text.includes("after approval"))).toBe(false);
+    expect(adapter.sent.map((message) => message.text)).toEqual([
+      "before approval",
+      "<b>Approve command?</b>\n\nbun test",
+      "after approval",
+    ]);
+  });
+
   test("/relay sends formatted HTML console", async () => {
     const { router, adapter } = fixture();
     await router.handle(textMessage("/relay"));

@@ -88,11 +88,14 @@ export interface AgentMessageOutputEvent {
   type?: "message";
   sessionKey: string;
   chunk: string;
+  turnId?: string;
+  itemId?: string;
 }
 
 export interface AgentTurnCompletedEvent {
   type: "turn_completed";
   sessionKey: string;
+  turnId?: string;
 }
 
 export interface AgentUserInputOption {
@@ -114,6 +117,8 @@ export interface AgentUserInputRequestEvent {
   sessionKey: string;
   requestId: string | number;
   questions: AgentUserInputQuestion[];
+  turnId?: string;
+  itemId?: string;
 }
 
 export type AgentApprovalKind =
@@ -132,6 +137,8 @@ export interface AgentApprovalRequestEvent {
   title: string;
   body: string;
   params: unknown;
+  turnId?: string;
+  itemId?: string;
 }
 
 export interface AgentExitEvent {

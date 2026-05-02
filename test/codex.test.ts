@@ -28,9 +28,9 @@ describe("CodexDriver app-server protocol", () => {
     await driver.send(status.sessionKey, "say hello");
     await sleep(100);
 
-    expect(events).toContainEqual({ type: "message", sessionKey: "1:demo", chunk: "hello " });
-    expect(events).toContainEqual({ type: "message", sessionKey: "1:demo", chunk: "world" });
-    expect(events).toContainEqual({ type: "turn_completed", sessionKey: "1:demo" });
+    expect(events).toContainEqual({ type: "message", sessionKey: "1:demo", chunk: "hello ", turnId: "turn-1", itemId: "m1" });
+    expect(events).toContainEqual({ type: "message", sessionKey: "1:demo", chunk: "world", turnId: "turn-1", itemId: "m1" });
+    expect(events).toContainEqual({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-1" });
     expect(JSON.stringify(events)).not.toContain("raw stdout");
     await driver.stop(status.sessionKey);
   });
@@ -54,6 +54,8 @@ describe("CodexDriver app-server protocol", () => {
       type: "user_input_request",
       sessionKey: "1:demo",
       requestId: 900,
+      turnId: "turn-1",
+      itemId: "item-1",
       questions: [{
         id: "mode",
         header: "Mode",

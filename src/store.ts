@@ -41,6 +41,24 @@ interface AgentSessionRow {
   thread_id?: string | null;
 }
 
+interface PagedOutputRow {
+  token: string;
+  chat_id: number;
+  session_key: string;
+  text: string;
+  created_at: number;
+  expires_at: number;
+}
+
+export interface PagedOutput {
+  token: string;
+  chatId: ChatId;
+  sessionKey: string;
+  text: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
 export class Store {
   readonly db: Database;
 
@@ -100,6 +118,16 @@ export class Store {
         kind TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         PRIMARY KEY (chat_id, prompt_message_id)
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS paged_outputs (
+        token TEXT PRIMARY KEY,
+        chat_id INTEGER NOT NULL,
+        session_key TEXT NOT NULL,
+        text TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
       )
     `);
     this.addColumnIfMissing("agent_sessions", "thread_id", "TEXT");
@@ -249,6 +277,44 @@ export class Store {
   prunePendingPrompts(olderThan: number): void {
     this.db.query("DELETE FROM pending_prompts WHERE created_at < ? OR (expires_at IS NOT NULL AND expires_at < ?)").run(olderThan, Date.now());
   }
+
+  setPagedOutput(output: PagedOutput): void {
+    this.prunePagedOutputs(Date.now());
+    this.db.query(`
+      INSERT INTO paged_outputs (token, chat_id, session_key, text, created_at, expires_at)
+      VALUES ($token, $chatId, $sessionKey, $text, $createdAt, $expiresAt)
+      ON CONFLICT(token) DO UPDATE SET
+        chat_id = excluded.chat_id,
+        session_key = excluded.session_key,
+        text = excluded.text,
+        created_at = excluded.created_at,
+        expires_at = excluded.expires_at
+    `).run({
+      $token: output.token,
+      $chatId: output.chatId,
+      $sessionKey: output.sessionKey,
+      $text: output.text,
+      $createdAt: output.createdAt,
+      $expiresAt: output.expiresAt,
+    });
+  }
+
+  getPagedOutput(token: string): PagedOutput | undefined {
+    const row = this.db.query<PagedOutputRow, [string]>(`
+      SELECT token, chat_id, session_key, text, created_at, expires_at
+      FROM paged_outputs
+      WHERE token = ?
+    `).get(token);
+    return row ? rowToPagedOutput(row) : undefined;
+  }
+
+  deletePagedOutput(token: string): void {
+    this.db.query("DELETE FROM paged_outputs WHERE token = ?").run(token);
+  }
+
+  prunePagedOutputs(now = Date.now()): void {
+    this.db.query("DELETE FROM paged_outputs WHERE expires_at < ?").run(now);
+  }
 }
 
 function rowToWorkspace(row: WorkspaceRow): WorkspaceRecord {
@@ -264,5 +330,16 @@ function rowToPendingPrompt(row: PendingPromptRow): PendingPrompt {
     ...(row.session_key ? { sessionKey: row.session_key } : {}),
     ...(row.payload_json ? { payloadJson: row.payload_json } : {}),
     ...(row.expires_at ? { expiresAt: row.expires_at } : {}),
+  };
+}
+
+function rowToPagedOutput(row: PagedOutputRow): PagedOutput {
+  return {
+    token: row.token,
+    chatId: row.chat_id,
+    sessionKey: row.session_key,
+    text: row.text,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
   };
 }

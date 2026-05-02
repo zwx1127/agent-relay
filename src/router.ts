@@ -13,12 +13,11 @@ import type {
   IMAdapter,
   InboundMessage,
   InlineKeyboardMarkup,
-  SendMessageResult,
   WorkspaceRecord,
 } from "./types.ts";
 import type { Store } from "./store.ts";
 import { createWorkspace, resolveWorkspacePath, validateWorkspaceName } from "./workspace.ts";
-import { formatError, formatStatus, formatWorkspaces, htmlEscape, renderCodexMarkdownForTelegram, splitRenderedForTelegram } from "./text.ts";
+import { formatError, formatStatus, formatWorkspaces, htmlEscape, renderCodexMarkdownForTelegram, splitRenderedForTelegram, type RenderedTelegramText } from "./text.ts";
 import { noopLogger, type Logger } from "./logger.ts";
 
 const CALLBACK_PREFIX = "ar:";
@@ -28,6 +27,8 @@ const STREAM_QUIET_MS = 800;
 const STREAM_MAX_MS = 3000;
 const STREAM_FLUSH_CHARS = 3400;
 const CODEX_PROMPT_TTL_MS = 30 * 60 * 1000;
+const PAGE_MAX_CHARS = 3200;
+const PAGED_OUTPUT_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface RouterDeps {
   config: AppConfig;
@@ -105,14 +106,16 @@ export class MessageRouter {
 
   async handleAgentOutput(session: AgentOutputEvent): Promise<void> {
     if (session.type === "turn_completed") {
-      await this.flushSessionOutput(session.sessionKey);
+      await this.finalizeSessionOutput(session.sessionKey);
       return;
     }
     if (session.type === "user_input_request") {
+      await this.finalizeSessionOutput(session.sessionKey);
       await this.handleCodexUserInputRequest(session);
       return;
     }
     if (session.type === "approval_request") {
+      await this.finalizeSessionOutput(session.sessionKey);
       await this.handleCodexApprovalRequest(session);
       return;
     }
@@ -135,7 +138,7 @@ export class MessageRouter {
       text: session.chunk,
       createdAt: Date.now(),
     });
-    await this.bufferAgentOutput(session.sessionKey, parsed.chatId, session.chunk);
+    await this.bufferAgentOutput(session.sessionKey, parsed.chatId, session.chunk, session.turnId);
   }
 
   async handleAgentExit(sessionKeyValue: string, exitText: string): Promise<void> {
@@ -150,8 +153,7 @@ export class MessageRouter {
       workspace: parsed.workspaceName,
     });
     this.deps.store.markSessionStopped(sessionKeyValue);
-    await this.flushSessionOutput(sessionKeyValue);
-    this.liveOutput.delete(sessionKeyValue);
+    await this.finalizeSessionOutput(sessionKeyValue);
     await this.deps.adapter.sendMessage(parsed.chatId, `<b>${htmlEscape(exitText)}</b>`, HTML);
   }
 
@@ -215,6 +217,10 @@ export class MessageRouter {
       await this.answerCodexApproval(message, payload);
       return;
     }
+    if (payload.startsWith("p:")) {
+      await this.renderPagedOutputCallback(message, payload);
+      return;
+    }
     if (payload === "x?") {
       await this.renderCallbackPage(message, [
         "<b>Stop Codex session?</b>",
@@ -260,6 +266,7 @@ export class MessageRouter {
   private async stopFromCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     const workspace = this.requireCurrentWorkspace(message.chatId);
     const key = sessionKey(message.chatId, workspace.name);
+    await this.finalizeSessionOutput(key);
     await this.deps.agent.stop(key);
     this.deps.store.markSessionStopped(key);
     this.logger.info("router.session_stopped", { chat_id: message.chatId, workspace: workspace.name, session_key: key });
@@ -358,6 +365,7 @@ export class MessageRouter {
       this.deps.store.markSessionStarted(key, chatId, workspace.name, Date.now(), status.threadId);
       this.logger.info("router.session_started", { chat_id: chatId, workspace: workspace.name, session_key: key });
     }
+    await this.finalizeSessionOutput(key);
     await this.deps.adapter.sendChatAction(chatId, "typing").catch((error) => {
       this.logger.debug("router.chat_action_failed", {
         chat_id: chatId,
@@ -435,9 +443,15 @@ export class MessageRouter {
     chatId: ChatId;
     text: string;
     startedAt: number;
+    segmentId: number;
+    turnId?: string;
     timer?: Timer;
     messageId?: number;
+    pageToken?: string;
+    lastFlushedText?: string;
   }>();
+
+  private nextOutputSegmentId = 1;
 
   private readonly codexRequests = new Map<string, {
     sessionKey: string;
@@ -552,8 +566,10 @@ export class MessageRouter {
 
     const option = options[optionIndex] as { label?: unknown } | undefined;
     if (!option || typeof option.label !== "string") throw new Error("Invalid question option.");
-    await this.recordCodexAnswer(pending, data, option.label);
+    const response = await this.recordCodexAnswer(pending, data, option.label);
+    if (response === "expired") return;
     await this.renderCallbackPage(message, `<b>Answered:</b> ${htmlEscape(option.label)}`, { inline_keyboard: [] });
+    if (response) await this.respondToCodexPrompt(response);
   }
 
   private async answerCodexFreeText(chatId: ChatId, promptMessageId: number, text: string): Promise<void> {
@@ -564,12 +580,17 @@ export class MessageRouter {
       await this.deps.adapter.sendMessage(chatId, "Question expired.");
       return;
     }
-    await this.recordCodexAnswer(pending, data, text);
-    this.deps.store.deletePendingPrompt(chatId, promptMessageId);
+    const response = await this.recordCodexAnswer(pending, data, text);
+    if (response === "expired") return;
     await this.deps.adapter.sendMessage(chatId, data.isSecret ? "<b>Answered.</b>" : `<b>Answered:</b> ${htmlEscape(text)}`, HTML);
+    if (response) await this.respondToCodexPrompt(response);
   }
 
-  private async recordCodexAnswer(pending: NonNullable<ReturnType<Store["getPendingPrompt"]>>, data: Record<string, unknown>, answer: string): Promise<void> {
+  private async recordCodexAnswer(
+    pending: NonNullable<ReturnType<Store["getPendingPrompt"]>>,
+    data: Record<string, unknown>,
+    answer: string,
+  ): Promise<{ sessionKey: string; requestId: string | number; result: unknown } | "expired" | undefined> {
     if (!pending.sessionKey) throw new Error("Question session is missing.");
     const requestId = data.requestId as string | number | undefined;
     const questionId = typeof data.questionId === "string" ? data.questionId : undefined;
@@ -579,15 +600,19 @@ export class MessageRouter {
     if (!request) {
       this.deps.store.deletePendingPrompt(pending.chatId, pending.promptMessageId);
       await this.deps.adapter.sendMessage(pending.chatId, "Question expired.");
-      return;
+      return "expired";
     }
 
     request.answers[questionId] = { answers: [answer] };
     this.deps.store.deletePendingPrompt(pending.chatId, pending.promptMessageId);
-    if (Object.keys(request.answers).length !== request.questions.length) return;
+    if (Object.keys(request.answers).length !== request.questions.length) return undefined;
     this.codexRequests.delete(codexRequestKey(pending.sessionKey, requestId));
+    return { sessionKey: pending.sessionKey, requestId, result: { answers: request.answers } };
+  }
+
+  private async respondToCodexPrompt(response: { sessionKey: string; requestId: string | number; result: unknown }): Promise<void> {
     if (!this.deps.agent.respond) throw new Error("Agent driver cannot answer Codex prompts.");
-    await this.deps.agent.respond(pending.sessionKey, requestId, { answers: request.answers });
+    await this.deps.agent.respond(response.sessionKey, response.requestId, response.result);
   }
 
   private async answerCodexApproval(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
@@ -601,9 +626,9 @@ export class MessageRouter {
     }
     if (!pending.sessionKey || !this.deps.agent.respond) throw new Error("Approval session is missing.");
     const approved = decision === "y";
-    await this.deps.agent.respond(pending.sessionKey, data.requestId as string | number, approvalResponse(data.approvalKind as AgentApprovalKind, approved, data.params));
     this.deps.store.deletePendingPrompt(message.chatId, pending.promptMessageId);
     await this.renderCallbackPage(message, approved ? "<b>Approved.</b>" : "<b>Denied.</b>", { inline_keyboard: [] });
+    await this.deps.agent.respond(pending.sessionKey, data.requestId as string | number, approvalResponse(data.approvalKind as AgentApprovalKind, approved, data.params));
   }
 
   private async expireCallbackPrompt(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
@@ -611,11 +636,17 @@ export class MessageRouter {
     await this.renderCallbackPage(message, "<b>Question expired.</b>", { inline_keyboard: [] });
   }
 
-  private async bufferAgentOutput(sessionKeyValue: string, chatId: ChatId, chunk: string): Promise<void> {
+  private async bufferAgentOutput(sessionKeyValue: string, chatId: ChatId, chunk: string, turnId?: string): Promise<void> {
     let state = this.liveOutput.get(sessionKeyValue);
+    if (state?.turnId && turnId && state.turnId !== turnId) {
+      await this.finalizeSessionOutput(sessionKeyValue);
+      state = undefined;
+    }
     if (!state) {
-      state = { chatId, text: "", startedAt: Date.now() };
+      state = { chatId, text: "", startedAt: Date.now(), segmentId: this.nextOutputSegmentId++, turnId };
       this.liveOutput.set(sessionKeyValue, state);
+    } else if (!state.turnId && turnId) {
+      state.turnId = turnId;
     }
 
     state.text += chunk;
@@ -629,8 +660,9 @@ export class MessageRouter {
     if (state.timer) clearTimeout(state.timer);
     const elapsed = Date.now() - state.startedAt;
     const delay = state.text.length >= STREAM_FLUSH_CHARS || elapsed >= STREAM_MAX_MS ? 0 : STREAM_QUIET_MS;
+    const segmentId = state.segmentId;
     state.timer = setTimeout(() => {
-      void this.flushSessionOutput(sessionKeyValue).catch((error) => {
+      void this.flushSessionOutput(sessionKeyValue, segmentId).catch((error) => {
         this.logger.error("router.agent_output_send_failed", {
           chat_id: chatId,
           session_key: sessionKeyValue,
@@ -641,16 +673,31 @@ export class MessageRouter {
     }, delay);
   }
 
-  private async flushSessionOutput(sessionKeyValue: string): Promise<void> {
+  private async finalizeSessionOutput(sessionKeyValue: string): Promise<void> {
+    const state = this.liveOutput.get(sessionKeyValue);
+    if (state && state.text !== state.lastFlushedText) {
+      await this.flushSessionOutput(sessionKeyValue);
+    }
+    const current = this.liveOutput.get(sessionKeyValue);
+    if (current?.timer) clearTimeout(current.timer);
+    this.liveOutput.delete(sessionKeyValue);
+    if (state?.timer) clearTimeout(state.timer);
+  }
+
+  private markFlushed(sessionKeyValue: string, text: string): void {
+    const state = this.liveOutput.get(sessionKeyValue);
+    if (state) state.lastFlushedText = text;
+  }
+
+  private async flushSessionOutput(sessionKeyValue: string, expectedSegmentId?: number): Promise<void> {
     const state = this.liveOutput.get(sessionKeyValue);
     if (!state || state.text.length === 0) return;
-    if (state.timer) {
-      clearTimeout(state.timer);
-      state.timer = undefined;
-    }
+    if (expectedSegmentId !== undefined && state.segmentId !== expectedSegmentId) return;
+    if (state?.timer) clearTimeout(state.timer);
+    state.timer = undefined;
 
     const rendered = renderCodexMarkdownForTelegram(state.text);
-    const chunks = splitRenderedForTelegram(rendered);
+    const chunks = splitRenderedForTelegram(rendered, PAGE_MAX_CHARS);
     this.logger.debug("router.agent_output_flushed", {
       chat_id: state.chatId,
       session_key: sessionKeyValue,
@@ -667,6 +714,7 @@ export class MessageRouter {
             entities: chunk.entities,
             disableWebPagePreview: true,
           });
+          this.markFlushed(sessionKeyValue, state.text);
           return;
         } catch (error) {
           this.logger.warn("router.agent_output_edit_fallback", {
@@ -681,45 +729,119 @@ export class MessageRouter {
         disableWebPagePreview: true,
       });
       state.messageId = result.messageId;
+      this.markFlushed(sessionKeyValue, state.text);
       return;
     }
 
-    if (state.messageId && chunks[0]) {
-      try {
-        await this.deps.adapter.editMessageText(state.chatId, chunks[0].text, {
-          messageId: state.messageId,
-          entities: chunks[0].entities,
-          disableWebPagePreview: true,
-        });
-      } catch {
-        await this.deps.adapter.sendMessage(state.chatId, chunks[0].text, {
-          entities: chunks[0].entities,
-          disableWebPagePreview: true,
-        });
+    if (chunks.length > 1) {
+      const token = state.pageToken ?? shortToken();
+      state.pageToken = token;
+      this.deps.store.setPagedOutput({
+        token,
+        chatId: state.chatId,
+        sessionKey: sessionKeyValue,
+        text: state.text,
+        createdAt: state.startedAt,
+        expiresAt: Date.now() + PAGED_OUTPUT_TTL_MS,
+      });
+      const pageIndex = chunks.length - 1;
+      const page = decoratePagedOutput(chunks[pageIndex]!, pageIndex, chunks.length);
+      const replyMarkup = pagedOutputKeyboard(token, pageIndex, chunks.length);
+      if (state.messageId) {
+        try {
+          await this.deps.adapter.editMessageText(state.chatId, page.text, {
+            messageId: state.messageId,
+            entities: page.entities,
+            replyMarkup,
+            disableWebPagePreview: true,
+          });
+          this.markFlushed(sessionKeyValue, state.text);
+          return;
+        } catch (error) {
+          this.logger.warn("router.agent_output_edit_fallback", {
+            chat_id: state.chatId,
+            message_id: state.messageId,
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+        }
       }
-    } else if (chunks[0]) {
-      await this.deps.adapter.sendMessage(state.chatId, chunks[0].text, {
-        entities: chunks[0].entities,
+      const result = await this.deps.adapter.sendMessage(state.chatId, page.text, {
+        entities: page.entities,
+        replyMarkup,
         disableWebPagePreview: true,
       });
+      state.messageId = result.messageId;
+      this.markFlushed(sessionKeyValue, state.text);
+      return;
     }
+  }
 
-    let lastResult: SendMessageResult | undefined;
-    for (const chunk of chunks.slice(1)) {
-      lastResult = await this.deps.adapter.sendMessage(state.chatId, chunk.text, {
-        entities: chunk.entities,
+  private async renderPagedOutputCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
+    const [, token, rawPage] = payload.split(":");
+    const pageIndex = Number(rawPage);
+    const output = token ? this.deps.store.getPagedOutput(token) : undefined;
+    if (!output || output.chatId !== message.chatId || output.expiresAt < Date.now()) {
+      if (token) this.deps.store.deletePagedOutput(token);
+      await this.renderCallbackPage(message, "<b>Page expired.</b>", { inline_keyboard: [] });
+      return;
+    }
+    const pageToken = output.token;
+    const rendered = renderCodexMarkdownForTelegram(output.text);
+    const pages = splitRenderedForTelegram(rendered, PAGE_MAX_CHARS);
+    if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= pages.length) {
+      await this.renderCallbackPage(message, "<b>Page unavailable.</b>", pagedOutputKeyboard(pageToken, pages.length - 1, pages.length));
+      return;
+    }
+    const page = decoratePagedOutput(pages[pageIndex]!, pageIndex, pages.length);
+    const replyMarkup = pagedOutputKeyboard(pageToken, pageIndex, pages.length);
+    if (!message.messageId) {
+      await this.deps.adapter.sendMessage(message.chatId, page.text, {
+        entities: page.entities,
+        replyMarkup,
+        disableWebPagePreview: true,
+      });
+      return;
+    }
+    try {
+      await this.deps.adapter.editMessageText(message.chatId, page.text, {
+        messageId: message.messageId,
+        entities: page.entities,
+        replyMarkup,
+        disableWebPagePreview: true,
+      });
+    } catch (error) {
+      this.logger.warn("router.paged_output_edit_fallback", {
+        chat_id: message.chatId,
+        message_id: message.messageId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+      await this.deps.adapter.sendMessage(message.chatId, page.text, {
+        entities: page.entities,
+        replyMarkup,
         disableWebPagePreview: true,
       });
     }
-    state.text = "";
-    state.startedAt = Date.now();
-    state.messageId = lastResult?.messageId;
   }
 }
 
 function commandName(text: string): string | undefined {
   const [command = ""] = text.split(/\s+/);
   return command.split("@")[0] || undefined;
+}
+
+function decoratePagedOutput(page: RenderedTelegramText, pageIndex: number, totalPages: number): RenderedTelegramText {
+  const footer = `\n\nPage ${pageIndex + 1}/${totalPages}`;
+  return {
+    text: `${page.text}${footer}`,
+    entities: page.entities,
+  };
+}
+
+function pagedOutputKeyboard(token: string, pageIndex: number, totalPages: number): InlineKeyboardMarkup {
+  const row: InlineKeyboardMarkup["inline_keyboard"][number] = [];
+  if (pageIndex > 0) row.push({ text: "Previous", callback_data: `ar:p:${token}:${pageIndex - 1}` });
+  if (pageIndex < totalPages - 1) row.push({ text: "Next", callback_data: `ar:p:${token}:${pageIndex + 1}` });
+  return { inline_keyboard: row.length > 0 ? [row] : [] };
 }
 
 export function parseSessionKey(key: string): { chatId: ChatId; workspaceName: string } | undefined {

@@ -281,7 +281,9 @@ export class CodexDriver extends BaseAgentDriver {
 
     if (message.method === "item/agentMessage/delta") {
       const delta = typeof params?.delta === "string" ? params.delta : "";
-      if (delta) await this.onOutput({ type: "message", sessionKey: key, chunk: delta });
+      const turnId = getTurnId(params);
+      const itemId = typeof params?.itemId === "string" ? params.itemId : undefined;
+      if (delta) await this.onOutput({ type: "message", sessionKey: key, chunk: delta, turnId, itemId });
       return;
     }
 
@@ -292,8 +294,9 @@ export class CodexDriver extends BaseAgentDriver {
     }
 
     if (message.method === "turn/completed") {
+      const turnId = getTurnId(params);
       running.status.activeTurnId = undefined;
-      await this.onOutput({ type: "turn_completed", sessionKey: key });
+      await this.onOutput({ type: "turn_completed", sessionKey: key, turnId });
       return;
     }
   }
@@ -313,7 +316,14 @@ export class CodexDriver extends BaseAgentDriver {
 
     if (message.method === "item/tool/requestUserInput") {
       const questions = Array.isArray(params?.questions) ? params.questions.map(toQuestion).filter(Boolean) as AgentUserInputQuestion[] : [];
-      await this.onOutput({ type: "user_input_request", sessionKey: key, requestId: message.id, questions });
+      await this.onOutput({
+        type: "user_input_request",
+        sessionKey: key,
+        requestId: message.id,
+        questions,
+        turnId: getTurnId(params),
+        itemId: typeof params?.itemId === "string" ? params.itemId : undefined,
+      });
       return;
     }
 
@@ -329,6 +339,8 @@ export class CodexDriver extends BaseAgentDriver {
         title,
         body,
         params: message.params,
+        turnId: getTurnId(params),
+        itemId: typeof params?.itemId === "string" ? params.itemId : undefined,
       });
       return;
     }

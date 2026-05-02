@@ -107,9 +107,10 @@ codex app-server --listen stdio://
 
 - Each `chat + workspace` starts or resumes a Codex thread with the workspace `cwd`, `CODEX_SANDBOX`, and `CODEX_APPROVAL`.
 - User messages start a new turn with `turn/start`; messages sent while a turn is active are sent with `turn/steer`.
-- Assistant message deltas from `item/agentMessage/delta` are stored in SQLite, debounced, and split into Telegram-sized messages.
-- Agent output is aggregated per session, flushed after a short quiet period, size/time limit, or `turn/completed`, and usually edits one live Telegram message for the current response.
-- Long Codex output is split into continuation messages with Telegram entity offsets recalculated for each chunk.
+- Assistant message deltas from `item/agentMessage/delta` are stored in SQLite, debounced, and rendered into Telegram-sized output pages.
+- Agent output is aggregated per visible interaction segment, flushed after a short quiet period, size/time limit, or `turn/completed`, and usually edits one live Telegram message for the current response.
+- User input, Codex approval prompts, and Codex question prompts close the current output segment before later assistant output is shown.
+- Long Codex output is rendered as a paged Telegram message with Previous/Next buttons instead of flooding the chat with continuation messages.
 - The `Stop` inline button sends `turn/interrupt` for the active turn. It requires a second confirmation tap.
 
 ## Logging

@@ -76,4 +76,27 @@ describe("store", () => {
     expect(store.getSession("123:demo")?.thread_id).toBe("thread-1");
     store.close();
   });
+
+  test("stores and prunes paged outputs", () => {
+    const store = tempStore();
+    store.setPagedOutput({
+      token: "tok",
+      chatId: 123,
+      sessionKey: "123:demo",
+      text: "long output",
+      createdAt: 4,
+      expiresAt: 10,
+    });
+    expect(store.getPagedOutput("tok")).toEqual({
+      token: "tok",
+      chatId: 123,
+      sessionKey: "123:demo",
+      text: "long output",
+      createdAt: 4,
+      expiresAt: 10,
+    });
+    store.prunePagedOutputs(11);
+    expect(store.getPagedOutput("tok")).toBeUndefined();
+    store.close();
+  });
 });
