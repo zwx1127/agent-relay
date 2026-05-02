@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 export interface AppConfig {
   telegramBotToken: string;
   telegramAllowedUserIds: Set<number>;
@@ -7,6 +10,48 @@ export interface AppConfig {
   codexBin: string;
   codexSandbox: string;
   codexApproval: string;
+}
+
+export type Env = Record<string, string | undefined>;
+
+export function loadDotEnvFile(path = ".env"): Env {
+  const resolvedPath = resolve(path);
+  if (!existsSync(resolvedPath)) return {};
+
+  const env: Env = {};
+  const text = readFileSync(resolvedPath, "utf8");
+  for (const [index, rawLine] of text.split(/\r?\n/).entries()) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const normalized = line.startsWith("export ") ? line.slice("export ".length).trim() : line;
+    const equalsIndex = normalized.indexOf("=");
+    if (equalsIndex < 1) {
+      throw new Error(`${path}:${index + 1} is not a valid KEY=value entry`);
+    }
+
+    const key = normalized.slice(0, equalsIndex).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new Error(`${path}:${index + 1} contains an invalid environment key: ${key}`);
+    }
+
+    env[key] = parseDotEnvValue(normalized.slice(equalsIndex + 1).trim());
+  }
+
+  return env;
+}
+
+function parseDotEnvValue(value: string): string {
+  if (!value) return "";
+
+  const quote = value[0];
+  if ((quote === `"` || quote === "'") && value.endsWith(quote)) {
+    const inner = value.slice(1, -1);
+    return quote === `"` ? inner.replace(/\\n/g, "\n").replace(/\\r/g, "\r").replace(/\\t/g, "\t").replace(/\\"/g, `"`) : inner;
+  }
+
+  const commentIndex = value.search(/\s#/);
+  return (commentIndex >= 0 ? value.slice(0, commentIndex) : value).trim();
 }
 
 export function parseIdSet(value: string, name: string): Set<number> {
@@ -25,7 +70,7 @@ export function parseIdSet(value: string, name: string): Set<number> {
   return ids;
 }
 
-function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
+function requireEnv(env: Env, name: string): string {
   const value = env[name]?.trim();
   if (!value) {
     throw new Error(`${name} is required`);
@@ -33,17 +78,18 @@ function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
   return value;
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
-  const allowedChats = env.TELEGRAM_ALLOWED_CHAT_IDS?.trim();
+export function loadConfig(env?: Env): AppConfig {
+  const effectiveEnv = env ?? { ...loadDotEnvFile(), ...process.env };
+  const allowedChats = effectiveEnv.TELEGRAM_ALLOWED_CHAT_IDS?.trim();
   return {
-    telegramBotToken: requireEnv(env, "TELEGRAM_BOT_TOKEN"),
-    telegramAllowedUserIds: parseIdSet(requireEnv(env, "TELEGRAM_ALLOWED_USER_IDS"), "TELEGRAM_ALLOWED_USER_IDS"),
+    telegramBotToken: requireEnv(effectiveEnv, "TELEGRAM_BOT_TOKEN"),
+    telegramAllowedUserIds: parseIdSet(requireEnv(effectiveEnv, "TELEGRAM_ALLOWED_USER_IDS"), "TELEGRAM_ALLOWED_USER_IDS"),
     telegramAllowedChatIds: allowedChats ? parseIdSet(allowedChats, "TELEGRAM_ALLOWED_CHAT_IDS") : undefined,
-    workspaceRoot: requireEnv(env, "WORKSPACE_ROOT"),
-    sqlitePath: env.SQLITE_PATH?.trim() || ".data/agent-relay.sqlite",
-    codexBin: env.CODEX_BIN?.trim() || "codex",
-    codexSandbox: env.CODEX_SANDBOX?.trim() || "workspace-write",
-    codexApproval: env.CODEX_APPROVAL?.trim() || "on-request",
+    workspaceRoot: requireEnv(effectiveEnv, "WORKSPACE_ROOT"),
+    sqlitePath: effectiveEnv.SQLITE_PATH?.trim() || ".data/agent-relay.sqlite",
+    codexBin: effectiveEnv.CODEX_BIN?.trim() || "codex",
+    codexSandbox: effectiveEnv.CODEX_SANDBOX?.trim() || "workspace-write",
+    codexApproval: effectiveEnv.CODEX_APPROVAL?.trim() || "on-request",
   };
 }
 

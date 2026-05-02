@@ -15,23 +15,29 @@ Telegram-to-Codex CLI relay built with Bun, TypeScript, SQLite, and Bun's PTY su
 bun install
 ```
 
-Required environment:
+Create a local `.env` file:
 
 ```bash
-export TELEGRAM_BOT_TOKEN="123:abc"
-export TELEGRAM_ALLOWED_USER_IDS="123456"
-export WORKSPACE_ROOT="/absolute/path/to/workspaces"
+cp .env.example .env
 ```
 
-Optional environment:
+Then edit `.env`:
 
-```bash
-export TELEGRAM_ALLOWED_CHAT_IDS="-100123456"
-export SQLITE_PATH=".data/agent-relay.sqlite"
-export CODEX_BIN="codex"
-export CODEX_SANDBOX="workspace-write"
-export CODEX_APPROVAL="on-request"
+```dotenv
+TELEGRAM_BOT_TOKEN=123:abc
+TELEGRAM_ALLOWED_USER_IDS=123456
+WORKSPACE_ROOT=/absolute/path/to/workspaces
+
+# Optional: restrict the bot to one or more chats, comma-separated.
+# TELEGRAM_ALLOWED_CHAT_IDS=-100123456
+
+SQLITE_PATH=.data/agent-relay.sqlite
+CODEX_BIN=codex
+CODEX_SANDBOX=workspace-write
+CODEX_APPROVAL=on-request
 ```
+
+Shell environment variables still override values from `.env`.
 
 ## Run
 

@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { isAuthorized, loadConfig, parseIdSet } from "../src/config.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { isAuthorized, loadConfig, loadDotEnvFile, parseIdSet } from "../src/config.ts";
 
 describe("config", () => {
   test("parses comma separated ids", () => {
@@ -19,6 +22,28 @@ describe("config", () => {
     expect(config.sqlitePath).toBe(".data/agent-relay.sqlite");
     expect(config.codexBin).toBe("codex");
     expect(config.telegramAllowedUserIds.has(10)).toBe(true);
+  });
+
+  test("loads values from dotenv files", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-relay-config-"));
+    const path = join(dir, ".env");
+    try {
+      writeFileSync(path, [
+        "TELEGRAM_BOT_TOKEN=token",
+        "TELEGRAM_ALLOWED_USER_IDS=10, 20",
+        "WORKSPACE_ROOT=/tmp/workspaces # trailing comment",
+        'CODEX_BIN="custom codex"',
+      ].join("\n"));
+
+      const env = loadDotEnvFile(path);
+      const config = loadConfig(env);
+      expect(config.telegramBotToken).toBe("token");
+      expect([...config.telegramAllowedUserIds]).toEqual([10, 20]);
+      expect(config.workspaceRoot).toBe("/tmp/workspaces");
+      expect(config.codexBin).toBe("custom codex");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("requires user and optional chat allowlist", () => {
