@@ -68,6 +68,7 @@ Plain text is sent to the current workspace's Codex session. If that session is 
 ## Runtime Behavior
 
 - Authorization requires `TELEGRAM_ALLOWED_USER_IDS`; if `TELEGRAM_ALLOWED_CHAT_IDS` is set, both user and chat must match.
+- On startup, pending Telegram updates are skipped before polling begins, so messages sent while the relay was offline are intentionally ignored.
 - Workspace names are limited to letters, numbers, dots, underscores, and dashes.
 - Workspaces are resolved under `WORKSPACE_ROOT`; path traversal and absolute workspace names are rejected.
 - `/new <name>` creates the workspace directory and runs `git init`.

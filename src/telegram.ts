@@ -41,6 +41,7 @@ export class TelegramAdapter implements IMAdapter {
 
   async start(onMessage: (message: InboundMessage) => Promise<void>): Promise<void> {
     this.logger.info("telegram.polling_started");
+    await this.skipPendingUpdates();
     while (!this.stopped) {
       let updates: TelegramUpdate[];
       try {
@@ -86,6 +87,19 @@ export class TelegramAdapter implements IMAdapter {
       }
     }
     this.logger.info("telegram.polling_stopped");
+  }
+
+  private async skipPendingUpdates(): Promise<void> {
+    const updates = await this.request<TelegramUpdate[]>("getUpdates", {
+      offset: -1,
+      timeout: 0,
+      allowed_updates: ["message"],
+    });
+    const lastUpdate = updates.at(-1);
+    if (!lastUpdate) return;
+
+    this.offset = lastUpdate.update_id + 1;
+    this.logger.info("telegram.pending_updates_skipped", { offset: this.offset });
   }
 
   async sendMessage(chatId: ChatId, text: string): Promise<void> {
