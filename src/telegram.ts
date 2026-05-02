@@ -1,4 +1,4 @@
-import type { ChatId, IMAdapter, InboundMessage } from "./types.ts";
+import type { ChatId, EditMessageTextOptions, IMAdapter, InboundMessage, SendMessageOptions } from "./types.ts";
 import { splitForTelegram } from "./text.ts";
 import { noopLogger, type Logger } from "./logger.ts";
 
@@ -19,7 +19,19 @@ interface TelegramUpdate {
     chat: { id: number };
     from?: { id: number };
   };
+  callback_query?: {
+    id: string;
+    from: { id: number };
+    data?: string;
+    message?: {
+      message_id: number;
+      date?: number;
+      chat: { id: number };
+    };
+  };
 }
+
+const ALLOWED_UPDATES = ["message", "callback_query"] as const;
 
 export class TelegramAdapter implements IMAdapter {
   private offset = 0;
@@ -48,7 +60,7 @@ export class TelegramAdapter implements IMAdapter {
         updates = await this.request<TelegramUpdate[]>("getUpdates", {
           offset: this.offset,
           timeout: 30,
-          allowed_updates: ["message"],
+          allowed_updates: ALLOWED_UPDATES,
         });
       } catch (error) {
         this.logger.error("telegram.polling_failed", { error: error instanceof Error ? error : new Error(String(error)) });
@@ -59,31 +71,28 @@ export class TelegramAdapter implements IMAdapter {
       }
       for (const update of updates) {
         this.offset = Math.max(this.offset, update.update_id + 1);
-        const message = update.message;
-        if (!message?.text || !message.from) {
+        const inbound = this.toInboundMessage(update);
+        if (!inbound) {
           this.logger.debug("telegram.update_ignored", {
             update_id: update.update_id,
-            has_message: Boolean(message),
-            has_text: Boolean(message?.text),
-            has_from: Boolean(message?.from),
+            has_message: Boolean(update.message),
+            has_text: Boolean(update.message?.text),
+            has_from: Boolean(update.message?.from || update.callback_query?.from),
+            has_callback_query: Boolean(update.callback_query),
+            has_callback_data: Boolean(update.callback_query?.data),
           });
           continue;
         }
-        this.logger.debug("telegram.message_received", {
+        this.logger.debug(inbound.kind === "message" ? "telegram.message_received" : "telegram.callback_query_received", {
           update_id: update.update_id,
-          message_id: message.message_id,
-          chat_id: message.chat.id,
-          user_id: message.from.id,
-          text_len: message.text.length,
-          message_text: message.text,
+          message_id: inbound.kind === "message" ? inbound.id : inbound.messageId,
+          chat_id: inbound.chatId,
+          user_id: inbound.userId,
+          kind: inbound.kind,
+          text_len: inbound.kind === "message" ? inbound.text.length : inbound.data.length,
+          message_text: inbound.kind === "message" ? inbound.text : inbound.data,
         });
-        await onMessage({
-          id: String(message.message_id),
-          chatId: message.chat.id,
-          userId: message.from.id,
-          text: message.text,
-          date: message.date,
-        });
+        await onMessage(inbound);
       }
     }
     this.logger.info("telegram.polling_stopped");
@@ -93,7 +102,7 @@ export class TelegramAdapter implements IMAdapter {
     const updates = await this.request<TelegramUpdate[]>("getUpdates", {
       offset: -1,
       timeout: 0,
-      allowed_updates: ["message"],
+      allowed_updates: ALLOWED_UPDATES,
     });
     const lastUpdate = updates.at(-1);
     if (!lastUpdate) return;
@@ -102,15 +111,17 @@ export class TelegramAdapter implements IMAdapter {
     this.logger.info("telegram.pending_updates_skipped", { offset: this.offset });
   }
 
-  async sendMessage(chatId: ChatId, text: string): Promise<void> {
+  async sendMessage(chatId: ChatId, text: string, options: SendMessageOptions = {}): Promise<void> {
     const chunks = splitForTelegram(text.length > 0 ? text : "(empty)");
     this.logger.debug("telegram.send_message_started", { chat_id: chatId, text_len: text.length, chunks: chunks.length });
-    for (const chunk of chunks) {
+    for (const [index, chunk] of chunks.entries()) {
       try {
         await this.request("sendMessage", {
           chat_id: chatId,
           text: chunk,
           disable_web_page_preview: true,
+          ...(options.parseMode ? { parse_mode: options.parseMode } : {}),
+          ...(options.replyMarkup && index === chunks.length - 1 ? { reply_markup: options.replyMarkup } : {}),
         });
       } catch (error) {
         this.logger.error("telegram.send_message_failed", {
@@ -123,6 +134,68 @@ export class TelegramAdapter implements IMAdapter {
       }
     }
     this.logger.debug("telegram.send_message_completed", { chat_id: chatId, text_len: text.length, chunks: chunks.length });
+  }
+
+  async editMessageText(chatId: ChatId, text: string, options: EditMessageTextOptions): Promise<void> {
+    try {
+      await this.request("editMessageText", {
+        chat_id: chatId,
+        message_id: options.messageId,
+        text: text.length > 0 ? text : "(empty)",
+        disable_web_page_preview: true,
+        ...(options.parseMode ? { parse_mode: options.parseMode } : {}),
+        ...(options.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
+      });
+    } catch (error) {
+      if (isMessageNotModifiedError(error)) {
+        this.logger.debug("telegram.edit_message_not_modified", { chat_id: chatId, message_id: options.messageId });
+        return;
+      }
+      this.logger.error("telegram.edit_message_failed", {
+        chat_id: chatId,
+        message_id: options.messageId,
+        text_len: text.length,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+      throw error;
+    }
+  }
+
+  async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+    await this.request("answerCallbackQuery", {
+      callback_query_id: callbackQueryId,
+      ...(text ? { text } : {}),
+    });
+  }
+
+  private toInboundMessage(update: TelegramUpdate): InboundMessage | undefined {
+    const message = update.message;
+    if (message?.text && message.from) {
+      return {
+        kind: "message",
+        id: String(message.message_id),
+        chatId: message.chat.id,
+        userId: message.from.id,
+        text: message.text,
+        date: message.date,
+      };
+    }
+
+    const callback = update.callback_query;
+    if (callback?.data && callback.message) {
+      return {
+        kind: "callback_query",
+        id: callback.id,
+        callbackQueryId: callback.id,
+        chatId: callback.message.chat.id,
+        userId: callback.from.id,
+        messageId: callback.message.message_id,
+        data: callback.data,
+        date: callback.message.date,
+      };
+    }
+
+    return undefined;
   }
 
   private async request<T>(method: string, body: unknown): Promise<T> {
@@ -142,4 +215,8 @@ export class TelegramAdapter implements IMAdapter {
     }
     return payload.result as T;
   }
+}
+
+function isMessageNotModifiedError(error: unknown): boolean {
+  return error instanceof Error && error.message.toLowerCase().includes("message is not modified");
 }

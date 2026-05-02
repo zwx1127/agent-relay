@@ -22,7 +22,7 @@ describe("telegram adapter", () => {
     });
     await done;
 
-    expect(received).toEqual([{ id: "9", chatId: 2, userId: 3, text: "hi", date: 1 }]);
+    expect(received).toEqual([{ kind: "message", id: "9", chatId: 2, userId: 3, text: "hi", date: 1 }]);
   });
 
   test("skips pending messages before polling", async () => {
@@ -46,10 +46,48 @@ describe("telegram adapter", () => {
     });
 
     expect(requestBodies).toEqual([
-      { offset: -1, timeout: 0, allowed_updates: ["message"] },
-      { offset: 6, timeout: 30, allowed_updates: ["message"] },
+      { offset: -1, timeout: 0, allowed_updates: ["message", "callback_query"] },
+      { offset: 6, timeout: 30, allowed_updates: ["message", "callback_query"] },
     ]);
-    expect(received).toEqual([{ id: "10", chatId: 2, userId: 3, text: "new", date: 2 }]);
+    expect(received).toEqual([{ kind: "message", id: "10", chatId: 2, userId: 3, text: "new", date: 2 }]);
+  });
+
+  test("routes long polling callback queries", async () => {
+    let calls = 0;
+    const adapter = new TelegramAdapter("token", async () => {
+      calls += 1;
+      return Response.json({
+        ok: true,
+        result: calls === 2
+          ? [{
+            update_id: 5,
+            callback_query: {
+              id: "cb1",
+              data: "ar:status",
+              from: { id: 3 },
+              message: { message_id: 9, date: 1, chat: { id: 2 } },
+            },
+          }]
+          : [],
+      });
+    });
+
+    const received: unknown[] = [];
+    await adapter.start(async (message) => {
+      received.push(message);
+      adapter.stop();
+    });
+
+    expect(received).toEqual([{
+      kind: "callback_query",
+      id: "cb1",
+      callbackQueryId: "cb1",
+      chatId: 2,
+      userId: 3,
+      messageId: 9,
+      data: "ar:status",
+      date: 1,
+    }]);
   });
 
   test("splits outbound messages", async () => {
@@ -62,6 +100,72 @@ describe("telegram adapter", () => {
     await adapter.sendMessage(1, "x".repeat(3600));
 
     expect(sentBodies).toHaveLength(2);
+  });
+
+  test("sends parse mode and reply markup", async () => {
+    const sentBodies: unknown[] = [];
+    const adapter = new TelegramAdapter("token", async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ ok: true, result: true });
+    });
+
+    await adapter.sendMessage(1, "<b>Help</b>", {
+      parseMode: "HTML",
+      replyMarkup: { inline_keyboard: [[{ text: "Status", callback_data: "ar:status" }]] },
+    });
+
+    expect(sentBodies.at(-1)).toEqual({
+      chat_id: 1,
+      text: "<b>Help</b>",
+      disable_web_page_preview: true,
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [[{ text: "Status", callback_data: "ar:status" }]] },
+    });
+  });
+
+  test("edits messages and answers callback queries", async () => {
+    const requests: Array<{ method: string; body: unknown }> = [];
+    const adapter = new TelegramAdapter("token", async (url, init) => {
+      requests.push({ method: String(url).split("/").at(-1) || "", body: JSON.parse(String(init?.body)) });
+      return Response.json({ ok: true, result: true });
+    });
+
+    await adapter.editMessageText(1, "<b>Status</b>", {
+      messageId: 2,
+      parseMode: "HTML",
+      replyMarkup: { inline_keyboard: [[{ text: "Refresh", callback_data: "ar:status" }]] },
+    });
+    await adapter.answerCallbackQuery("cb1", "Done");
+
+    expect(requests).toEqual([
+      {
+        method: "editMessageText",
+        body: {
+          chat_id: 1,
+          message_id: 2,
+          text: "<b>Status</b>",
+          disable_web_page_preview: true,
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: [[{ text: "Refresh", callback_data: "ar:status" }]] },
+        },
+      },
+      {
+        method: "answerCallbackQuery",
+        body: {
+          callback_query_id: "cb1",
+          text: "Done",
+        },
+      },
+    ]);
+  });
+
+  test("ignores message is not modified edit errors", async () => {
+    const adapter = new TelegramAdapter("token", async () => Response.json({
+      ok: false,
+      description: "Bad Request: message is not modified",
+    }));
+
+    await expect(adapter.editMessageText(1, "same", { messageId: 2 })).resolves.toBeUndefined();
   });
 
   test("debug logs raw inbound message text", async () => {

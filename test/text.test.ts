@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cleanTerminalOutput, splitForTelegram } from "../src/text.ts";
+import { cleanTerminalOutput, formatError, formatStatus, formatWorkspaces, htmlEscape, splitForTelegram } from "../src/text.ts";
 
 describe("text utilities", () => {
   test("removes ansi and control sequences", () => {
@@ -13,5 +13,15 @@ describe("text utilities", () => {
   test("splits messages by max length", () => {
     const chunks = splitForTelegram("a".repeat(10), 4);
     expect(chunks).toEqual(["aaaa", "aaaa", "aa"]);
+  });
+
+  test("escapes html special characters", () => {
+    expect(htmlEscape("<demo>&\"")).toBe("&lt;demo&gt;&amp;&quot;");
+  });
+
+  test("formats dynamic html safely", () => {
+    expect(formatStatus({ workspaceName: "<ws>&", workspacePath: "/tmp/<ws>&", running: false })).toContain("&lt;ws&gt;&amp;");
+    expect(formatWorkspaces([{ name: "<ws>&", selected: true }])).toContain("&lt;ws&gt;&amp;");
+    expect(formatError("bad <value>&")).toBe("<b>Error:</b> bad &lt;value&gt;&amp;");
   });
 });

@@ -7,12 +7,23 @@ import type { AppConfig } from "../src/config.ts";
 import { MessageRouter } from "../src/router.ts";
 import { Store } from "../src/store.ts";
 import { TextLogger, type LogLevel } from "../src/logger.ts";
-import type { AgentDriver, AgentSessionStatus, ChatId } from "../src/types.ts";
+import type { AgentDriver, AgentSessionStatus, ChatId, EditMessageTextOptions, SendMessageOptions } from "../src/types.ts";
 
 class FakeAdapter {
-  sent: Array<{ chatId: ChatId; text: string }> = [];
-  async sendMessage(chatId: ChatId, text: string): Promise<void> {
-    this.sent.push({ chatId, text });
+  sent: Array<{ chatId: ChatId; text: string; options?: SendMessageOptions }> = [];
+  edited: Array<{ chatId: ChatId; text: string; options: EditMessageTextOptions }> = [];
+  answered: Array<{ callbackQueryId: string; text?: string }> = [];
+
+  async sendMessage(chatId: ChatId, text: string, options?: SendMessageOptions): Promise<void> {
+    this.sent.push({ chatId, text, options });
+  }
+
+  async editMessageText(chatId: ChatId, text: string, options: EditMessageTextOptions): Promise<void> {
+    this.edited.push({ chatId, text, options });
+  }
+
+  async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+    this.answered.push({ callbackQueryId, text });
   }
 }
 
@@ -81,8 +92,16 @@ afterEach(() => {
 describe("router", () => {
   test("rejects unauthorized users", async () => {
     const { router, adapter } = fixture();
-    await router.handle({ id: "1", chatId: 1, userId: 99, text: "/help" });
+    await router.handle(textMessage("/help", 99));
     expect(adapter.sent.at(-1)?.text).toBe("Unauthorized.");
+  });
+
+  test("rejects unauthorized callbacks with callback answer only", async () => {
+    const { router, adapter } = fixture();
+    await router.handle(callbackMessage("ar:status", 99));
+    expect(adapter.answered).toEqual([{ callbackQueryId: "cb1", text: "Unauthorized." }]);
+    expect(adapter.sent).toEqual([]);
+    expect(adapter.edited).toEqual([]);
   });
 
   test("uses existing workspace and auto-starts session for text", async () => {
@@ -92,7 +111,7 @@ describe("router", () => {
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
     store.bindChat(1, "demo");
 
-    await router.handle({ id: "1", chatId: 1, userId: 7, text: "hello codex" });
+    await router.handle(textMessage("hello codex"));
 
     expect(agent.sent).toEqual([{ key: "1:demo", text: "hello codex" }]);
     expect(agent.getStatus("1:demo")?.running).toBe(true);
@@ -105,7 +124,7 @@ describe("router", () => {
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
     store.bindChat(1, "demo");
 
-    await router.handle({ id: "1", chatId: 1, userId: 7, text: "secret prompt" });
+    await router.handle(textMessage("secret prompt"));
 
     const logs = logLines.join("\n");
     expect(logs).toContain("router.message_received");
@@ -120,7 +139,7 @@ describe("router", () => {
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
     store.bindChat(1, "demo");
 
-    await router.handle({ id: "1", chatId: 1, userId: 7, text: "secret prompt" });
+    await router.handle(textMessage("secret prompt"));
 
     expect(logLines.join("\n")).toContain('message_text="secret prompt"');
   });
@@ -132,7 +151,7 @@ describe("router", () => {
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
     store.bindChat(1, "demo");
 
-    await router.handle({ id: "1", chatId: 1, userId: 7, text: "/send /status" });
+    await router.handle(textMessage("/send /status"));
 
     expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "/status" });
   });
@@ -145,9 +164,10 @@ describe("router", () => {
     store.bindChat(1, "demo");
     store.appendTranscript({ chatId: 1, workspaceName: "demo", role: "agent", text: "one\n", createdAt: 1 });
 
-    await router.handle({ id: "1", chatId: 1, userId: 7, text: "/tail" });
+    await router.handle(textMessage("/tail"));
 
     expect(adapter.sent.at(-1)?.text).toBe("one\n");
+    expect(adapter.sent.at(-1)?.options?.parseMode).toBeUndefined();
   });
 
   test("/exit stops current session", async () => {
@@ -158,8 +178,106 @@ describe("router", () => {
     store.bindChat(1, "demo");
     await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
 
-    await router.handle({ id: "1", chatId: 1, userId: 7, text: "/exit" });
+    await router.handle(textMessage("/exit"));
 
     expect(agent.stopped).toEqual(["1:demo"]);
   });
+
+  test("/help sends formatted HTML menu", async () => {
+    const { router, adapter } = fixture();
+    await router.handle(textMessage("/help"));
+
+    expect(adapter.sent.at(-1)?.text).toContain("<b>Agent Relay</b>");
+    expect(adapter.sent.at(-1)?.options?.parseMode).toBe("HTML");
+    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toContain("ar:workspaces");
+  });
+
+  test("/status escapes dynamic workspace values", async () => {
+    const { router, store, adapter } = fixture();
+    store.upsertWorkspace({ name: "demo", path: "/tmp/<demo>&", createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await router.handle(textMessage("/status"));
+
+    expect(adapter.sent.at(-1)?.text).toContain("/tmp/&lt;demo&gt;&amp;");
+    expect(adapter.sent.at(-1)?.options?.parseMode).toBe("HTML");
+  });
+
+  test("workspace callback switches binding and edits status", async () => {
+    const { router, store, adapter, root } = fixture();
+    const first = join(root, "first");
+    const second = join(root, "second");
+    mkdirSync(first);
+    mkdirSync(second);
+    store.upsertWorkspace({ name: "first", path: first, createdAt: 1 });
+    store.upsertWorkspace({ name: "second", path: second, createdAt: 1 });
+    store.bindChat(1, "first");
+
+    await router.handle(callbackMessage("ar:use:second"));
+
+    expect(store.getBinding(1)?.workspaceName).toBe("second");
+    expect(adapter.edited.at(-1)?.text).toContain("<code>second</code>");
+    expect(adapter.edited.at(-1)?.options.messageId).toBe(42);
+    expect(adapter.answered).toEqual([{ callbackQueryId: "cb1", text: undefined }]);
+  });
+
+  test("workspaces callback renders safe buttons and text fallback for long names", async () => {
+    const { router, store, adapter, root } = fixture();
+    const normal = join(root, "demo");
+    const longName = "a".repeat(60);
+    const longPath = join(root, longName);
+    mkdirSync(normal);
+    mkdirSync(longPath);
+    store.upsertWorkspace({ name: "demo", path: normal, createdAt: 1 });
+    store.upsertWorkspace({ name: longName, path: longPath, createdAt: 1 });
+
+    await router.handle(callbackMessage("ar:workspaces"));
+
+    expect(adapter.edited.at(-1)?.text).toContain(`<code>${longName}</code>`);
+    const callbackData = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data);
+    expect(callbackData).toContain("ar:use:demo");
+    expect(callbackData).not.toContain(`ar:use:${longName}`);
+  });
+
+  test("stop callback requires confirmation before stopping", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+
+    await router.handle(callbackMessage("ar:exit:confirm"));
+    expect(agent.stopped).toEqual([]);
+    expect(adapter.edited.at(-1)?.text).toContain("Stop Codex session?");
+
+    await router.handle(callbackMessage("ar:exit:run", 7, "cb2"));
+    expect(agent.stopped).toEqual(["1:demo"]);
+    expect(adapter.edited.at(-1)?.text).toContain("Codex session stopped.");
+  });
+
+  test("unknown callback answers and renders formatted error", async () => {
+    const { router, adapter } = fixture();
+    await router.handle(callbackMessage("ar:nope"));
+
+    expect(adapter.answered).toEqual([{ callbackQueryId: "cb1", text: "Unknown callback." }]);
+    expect(adapter.edited.at(-1)?.text).toContain("<b>Error:</b> Unknown callback.");
+    expect(adapter.edited.at(-1)?.options.parseMode).toBe("HTML");
+  });
 });
+
+function textMessage(text: string, userId = 7) {
+  return { kind: "message" as const, id: "1", chatId: 1, userId, text };
+}
+
+function callbackMessage(data: string, userId = 7, callbackQueryId = "cb1") {
+  return {
+    kind: "callback_query" as const,
+    id: callbackQueryId,
+    chatId: 1,
+    userId,
+    callbackQueryId,
+    messageId: 42,
+    data,
+  };
+}

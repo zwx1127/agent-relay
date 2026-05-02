@@ -54,21 +54,38 @@ bun run dev
 
 ## Telegram Commands
 
-- `/help` shows commands.
-- `/workspaces` lists known workspaces.
+- `/help` shows commands and an inline menu for common actions.
+- `/workspaces` lists known workspaces and shows clickable workspace buttons when callback data fits Telegram limits.
 - `/new <name>` creates a workspace under `WORKSPACE_ROOT` and runs `git init`.
 - `/use <name>` switches the chat to an existing workspace.
-- `/status` shows the current workspace and Codex session state.
+- `/status` shows the current workspace and Codex session state with refresh, workspace, tail, and stop buttons.
 - `/tail [n]` returns recent agent output, defaulting to 50 lines.
 - `/exit` stops the current Codex PTY.
 - `/send <text>` forwards text that starts with `/` to Codex.
 
 Plain text is sent to the current workspace's Codex session. If that session is not running, the relay starts it automatically.
 
+## Telegram Interaction
+
+System and command responses use Telegram HTML formatting. Dynamic values such as workspace names, paths, and error details are escaped before rendering.
+
+Agent output and `/tail` responses are sent as plain text, without Telegram Markdown or HTML parsing, so terminal output is not reformatted by the Telegram client.
+
+Inline buttons use callback queries for common actions:
+
+- `Workspaces` opens the workspace list.
+- `Status` refreshes the current status view.
+- `Tail 50` sends the latest 50 lines of agent output as a new plain-text message.
+- `Stop` opens a confirmation view before stopping the current Codex session.
+- Workspace buttons switch the chat binding and edit the menu message into the updated status view.
+
+If Telegram rejects a menu edit, the relay logs a warning and sends a new message instead. Telegram's `message is not modified` edit response is treated as harmless.
+
 ## Runtime Behavior
 
 - Authorization requires `TELEGRAM_ALLOWED_USER_IDS`; if `TELEGRAM_ALLOWED_CHAT_IDS` is set, both user and chat must match.
 - On startup, pending Telegram updates are skipped before polling begins, so messages sent while the relay was offline are intentionally ignored.
+- Long polling subscribes to Telegram `message` and `callback_query` updates.
 - Workspace names are limited to letters, numbers, dots, underscores, and dashes.
 - Workspaces are resolved under `WORKSPACE_ROOT`; path traversal and absolute workspace names are rejected.
 - `/new <name>` creates the workspace directory and runs `git init`.
@@ -80,6 +97,7 @@ codex --no-alt-screen -C <workspace> -s <CODEX_SANDBOX> -a <CODEX_APPROVAL>
 
 - PTY output is stripped of ANSI/control sequences, stored in SQLite, debounced, and split into Telegram-sized messages.
 - `/exit` sends Ctrl-C first, then kills the process if it is still alive after 5 seconds.
+- The `Stop` inline button uses the same session stop behavior as `/exit`, but requires a second confirmation tap.
 
 ## Logging
 
@@ -100,8 +118,8 @@ src/
   main.ts        Runtime wiring
   router.ts      Telegram command and message routing
   store.ts       SQLite schema and persistence
-  telegram.ts    Telegram long polling adapter
-  text.ts        Output cleanup and message splitting
+  telegram.ts    Telegram long polling adapter and Bot API calls
+  text.ts        Output cleanup, message splitting, and HTML rendering helpers
   workspace.ts   Workspace validation and creation
 test/
   *.test.ts      Unit, routing, adapter, store, and PTY smoke tests
