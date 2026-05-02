@@ -47,6 +47,21 @@ export interface RouterDeps {
   logger?: Logger;
 }
 
+interface LiveOutputState {
+  chatId: ChatId;
+  text: string;
+  startedAt: number;
+  segmentId: number;
+  turnId?: string;
+  replyToMessageId?: number;
+  timer?: Timer;
+  messageId?: number;
+  pageToken?: string;
+  lastFlushedText?: string;
+  flushPromise?: Promise<void>;
+  finalPageRendered?: boolean;
+}
+
 export class MessageRouter {
   private readonly logger: Logger;
 
@@ -670,18 +685,7 @@ export class MessageRouter {
     return statusViewFromParts(workspace, status, recentOutput?.createdAt, recentError?.text);
   }
 
-  private readonly liveOutput = new Map<string, {
-    chatId: ChatId;
-    text: string;
-    startedAt: number;
-    segmentId: number;
-    turnId?: string;
-    replyToMessageId?: number;
-    timer?: Timer;
-    messageId?: number;
-    pageToken?: string;
-    lastFlushedText?: string;
-  }>();
+  private readonly liveOutput = new Map<string, LiveOutputState>();
 
   private readonly lastUserMessageIds = new Map<string, number>();
   private nextOutputSegmentId = 1;
@@ -947,6 +951,10 @@ export class MessageRouter {
 
   private async finalizeSessionOutput(sessionKeyValue: string): Promise<void> {
     const state = this.liveOutput.get(sessionKeyValue);
+    if (state?.timer) {
+      clearTimeout(state.timer);
+      state.timer = undefined;
+    }
     if (state && (state.text !== state.lastFlushedText || state.pageToken)) {
       await this.flushSessionOutput(sessionKeyValue, undefined, true);
     }
@@ -962,18 +970,46 @@ export class MessageRouter {
   }
 
   private async flushSessionOutput(sessionKeyValue: string, expectedSegmentId?: number, final = false): Promise<void> {
-    const state = this.liveOutput.get(sessionKeyValue);
+    let state = this.liveOutput.get(sessionKeyValue);
     if (!state || state.text.length === 0) return;
     if (expectedSegmentId !== undefined && state.segmentId !== expectedSegmentId) return;
+
+    if (state.flushPromise) {
+      await state.flushPromise;
+      state = this.liveOutput.get(sessionKeyValue);
+      if (!state || state.text.length === 0) return;
+      if (expectedSegmentId !== undefined && state.segmentId !== expectedSegmentId) return;
+      if (state.text === state.lastFlushedText && !(final && state.pageToken && !state.finalPageRendered)) return;
+      await this.flushSessionOutput(sessionKeyValue, expectedSegmentId, final);
+      return;
+    }
+
+    if (state.text === state.lastFlushedText && !(final && state.pageToken && !state.finalPageRendered)) return;
+    const flushPromise = this.flushSessionOutputOnce(sessionKeyValue, state, final);
+    state.flushPromise = flushPromise;
+    try {
+      await flushPromise;
+    } finally {
+      const current = this.liveOutput.get(sessionKeyValue);
+      if (current?.flushPromise === flushPromise) current.flushPromise = undefined;
+    }
+  }
+
+  private async flushSessionOutputOnce(
+    sessionKeyValue: string,
+    state: LiveOutputState,
+    final: boolean,
+  ): Promise<void> {
     if (state?.timer) clearTimeout(state.timer);
     state.timer = undefined;
 
-    const rendered = renderCodexMarkdownForTelegram(state.text);
+    const snapshotText = state.text;
+    const rendered = renderCodexMarkdownForTelegram(snapshotText);
     const chunks = splitRenderedForTelegram(rendered, PAGE_MAX_CHARS);
     this.logger.debug("router.agent_output_flushed", {
       chat_id: state.chatId,
       session_key: sessionKeyValue,
-      text_len: state.text.length,
+      text_len: snapshotText.length,
       chunks: chunks.length,
     });
 
@@ -985,7 +1021,8 @@ export class MessageRouter {
             messageId: state.messageId,
             disableWebPagePreview: true,
           });
-          this.markFlushed(sessionKeyValue, state.text);
+          this.markFlushed(sessionKeyValue, snapshotText);
+          state.finalPageRendered = false;
           return;
         } catch (error) {
           this.logger.warn("router.agent_output_edit_fallback", {
@@ -1000,7 +1037,8 @@ export class MessageRouter {
         disableWebPagePreview: true,
       });
       state.messageId = result.messageId;
-      this.markFlushed(sessionKeyValue, state.text);
+      this.markFlushed(sessionKeyValue, snapshotText);
+      state.finalPageRendered = false;
       return;
     }
 
@@ -1011,7 +1049,7 @@ export class MessageRouter {
         token,
         chatId: state.chatId,
         sessionKey: sessionKeyValue,
-        text: state.text,
+        text: snapshotText,
         createdAt: state.startedAt,
         expiresAt: Date.now() + PAGED_OUTPUT_TTL_MS,
       });
@@ -1025,7 +1063,8 @@ export class MessageRouter {
             replyMarkup,
             disableWebPagePreview: true,
           });
-          this.markFlushed(sessionKeyValue, state.text);
+          this.markFlushed(sessionKeyValue, snapshotText);
+          state.finalPageRendered = final;
           return;
         } catch (error) {
           this.logger.warn("router.agent_output_edit_fallback", {
@@ -1041,7 +1080,8 @@ export class MessageRouter {
         disableWebPagePreview: true,
       });
       state.messageId = result.messageId;
-      this.markFlushed(sessionKeyValue, state.text);
+      this.markFlushed(sessionKeyValue, snapshotText);
+      state.finalPageRendered = final;
       return;
     }
   }

@@ -15,8 +15,10 @@ class FakeAdapter {
   answered: Array<{ callbackQueryId: string; text?: string }> = [];
   chatActions: Array<{ chatId: ChatId; action?: "typing" }> = [];
   nextMessageId = 100;
+  sendMessageDelayMs = 0;
 
   async sendMessage(chatId: ChatId, text: string, options?: SendMessageOptions): Promise<{ messageId?: number }> {
+    if (this.sendMessageDelayMs > 0) await sleep(this.sendMessageDelayMs);
     const messageId = this.nextMessageId++;
     this.sent.push({ chatId, text, options, messageId });
     return { messageId };
@@ -320,6 +322,44 @@ describe("router", () => {
       "Approve command?\n\nbun test",
       "after approval",
     ]);
+  });
+
+  test("approval boundary waits for an in-flight stream flush instead of duplicating it", async () => {
+    const { router, adapter } = fixture();
+    adapter.sendMessageDelayMs = 80;
+
+    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "before approval", turnId: "turn-1" });
+    await sleep(820);
+    await router.handleAgentOutput({
+      type: "approval_request",
+      sessionKey: "1:demo",
+      requestId: 91,
+      method: "item/commandExecution/requestApproval",
+      approvalKind: "command",
+      title: "Approve command?",
+      body: "bun test",
+      params: { command: "bun test" },
+      turnId: "turn-1",
+      itemId: "approval-1",
+    });
+
+    expect(adapter.sent.map((message) => message.text)).toEqual([
+      "before approval",
+      "Approve command?\n\nbun test",
+    ]);
+  });
+
+  test("turn completion preserves deltas that arrive during an in-flight stream flush", async () => {
+    const { router, adapter } = fixture();
+    adapter.sendMessageDelayMs = 80;
+
+    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "first", turnId: "turn-1" });
+    await sleep(820);
+    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: " second", turnId: "turn-1" });
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-1" });
+
+    expect(adapter.sent.map((message) => message.text)).toEqual(["first"]);
+    expect(adapter.edited.map((message) => message.text)).toEqual(["first second"]);
   });
 
   test("/relay sends formatted entity console", async () => {
