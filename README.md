@@ -79,17 +79,24 @@ If no workspace is selected, user input is not forwarded. Relay opens the consol
 
 ## Telegram Interaction
 
-The relay console shows the selected workspace, Codex running/stopped state, thread metadata, model, approval and sandbox policy, token/context usage, waiting state, recent output time, and recent relay error. Its inline buttons cover relay-specific actions:
+The relay console is a compact control panel. It shows the selected workspace, Codex running/stopped state, waiting state, model, token/context usage, recent output time, and recent relay error. The `Details` button expands lower-frequency metadata such as path, thread, provider, approval policy, and sandbox policy. Its inline buttons cover relay-specific actions:
 
-- `Workspaces` opens the workspace list.
-- `New workspace` asks for a workspace name with Telegram ForceReply, then selects an existing directory under `WORKSPACE_ROOT` or creates and selects a new one.
+- `Workspaces` opens a paged workspace list with the current workspace pinned first.
+- `Details` opens the expanded status view.
+- `Resume` opens a paged saved-thread picker for the current workspace.
+- `Review` starts a Codex review of uncommitted changes.
+- `Compact` starts Codex thread compaction.
+- `New` asks for a workspace name with Telegram ForceReply, then selects an existing directory under `WORKSPACE_ROOT` or creates and selects a new one.
+- `Clear` opens a confirmation view before replacing the current stored Codex thread binding.
 - `Stop` opens a confirmation view before stopping the current Codex session.
 - `Refresh` redraws the console.
 - Workspace buttons switch the chat binding, start or resume the workspace's Codex thread, and edit the console into the updated status view.
 
-System and console responses use Telegram HTML formatting. Dynamic values such as workspace names, paths, and error details are escaped before rendering.
+System, console, approval, question, and assistant responses are sent as Telegram text plus message entities instead of HTML parse mode. Dynamic values such as workspace names, paths, and errors are rendered as plain text or code entities, avoiding HTML parse failures while preserving readable formatting.
 
 Codex assistant replies render common Markdown into Telegram text plus message entities, including headings, lists, task lists, blockquotes, emphasis, inline code, code blocks, and HTTP/HTTPS links. Unsupported Markdown is left readable as plain text.
+
+Assistant replies are sent as Telegram replies to the user message that triggered the Codex turn or steering input. During streaming, relay edits one live assistant message for the current visible segment.
 
 Raw Codex terminal output is intentionally hidden from Telegram. Command stdout/stderr, terminal interaction events, app-server startup logs, TUI frames, status bars, and other low-level protocol noise are kept out of the chat. Operational debugging should use service logs instead of an in-chat raw tail.
 
@@ -97,10 +104,10 @@ When Codex asks the user a structured question via `request_user_input`, relay m
 
 - Questions with options are sent with inline keyboard buttons.
 - Free-text, secret, and `Other` answers use Telegram ForceReply.
-- Multi-question requests wait until all answers are collected before replying to Codex.
+- Multi-question requests are shown sequentially, one question at a time, and relay waits until all answers are collected before replying to Codex.
 - Expired prompt replies are marked expired and are not forwarded as normal Codex prompts.
 
-Codex approval requests for commands, file changes, and permissions are shown as short Telegram messages with `Approve` and `Deny` buttons. The underlying command output is not sent to Telegram.
+Codex approval requests for commands, file changes, and permissions are shown as concise Telegram messages with `Approve` and `Deny` buttons. The underlying command output is not sent to Telegram, and the approval card is edited to show the decision after a tap.
 
 If Telegram rejects a menu edit, the relay logs a warning and sends a new message instead. Telegram's `message is not modified` edit response is treated as harmless and is not logged as an error, including the HTTP 400 form returned when an edit would leave both text and buttons unchanged. Other edit failures still fall back to sending a new message.
 
@@ -121,11 +128,11 @@ codex app-server --listen stdio://
 ```
 
 - Each `chat + workspace` starts or resumes a Codex thread with the workspace `cwd`, `CODEX_SANDBOX`, and `CODEX_APPROVAL`.
-- User messages start a new turn with `turn/start`; messages sent while a turn is active are sent with `turn/steer`. If Codex reports that the locally cached active turn is no longer steerable, the relay clears that stale turn id and retries the same input once with `turn/start`.
+- User messages start a new turn with `turn/start`; messages sent while a turn is active are sent with `turn/steer`. Assistant output is visually linked back to the triggering Telegram message via reply metadata. If Codex reports that the locally cached active turn is no longer steerable, the relay clears that stale turn id and retries the same input once with `turn/start`.
 - Assistant message deltas from `item/agentMessage/delta` are stored in SQLite, debounced, and rendered into Telegram-sized output pages.
 - Agent output is aggregated per visible interaction segment, flushed after a short quiet period, size/time limit, or `turn/completed`, and usually edits one live Telegram message for the current response.
 - User input, Codex approval prompts, and Codex question prompts close the current output segment before later assistant output is shown.
-- Long Codex output is rendered as a paged Telegram message with Previous/Next buttons instead of flooding the chat with continuation messages.
+- Long Codex output is rendered as a paged Telegram message with First/Previous/Next/Last buttons instead of flooding the chat with continuation messages. While streaming, the live message follows the newest page; after `turn/completed`, it returns to page 1 for easier reading from the top.
 - The `Stop` inline button sends `turn/interrupt` for the active turn. It requires a second confirmation tap.
 
 ## Logging

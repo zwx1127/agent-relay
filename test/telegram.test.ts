@@ -22,7 +22,7 @@ describe("telegram adapter", () => {
     });
     await done;
 
-    expect(received).toEqual([{ kind: "message", id: "9", chatId: 2, userId: 3, text: "hi", date: 1 }]);
+    expect(received).toEqual([{ kind: "message", id: "9", messageId: 9, chatId: 2, userId: 3, text: "hi", date: 1 }]);
   });
 
   test("skips pending messages before polling", async () => {
@@ -49,7 +49,7 @@ describe("telegram adapter", () => {
       { offset: -1, timeout: 0, allowed_updates: ["message", "callback_query"] },
       { offset: 6, timeout: 30, allowed_updates: ["message", "callback_query"] },
     ]);
-    expect(received).toEqual([{ kind: "message", id: "10", chatId: 2, userId: 3, text: "new", date: 2 }]);
+    expect(received).toEqual([{ kind: "message", id: "10", messageId: 10, chatId: 2, userId: 3, text: "new", date: 2 }]);
   });
 
   test("routes long polling callback queries", async () => {
@@ -149,6 +149,25 @@ describe("telegram adapter", () => {
       ],
       reply_markup: { force_reply: true, selective: true },
     });
+  });
+
+  test("sends reply parameters only on the first outbound chunk", async () => {
+    const sentBodies: Array<{ text: string; reply_parameters?: unknown; reply_markup?: unknown }> = [];
+    const adapter = new TelegramAdapter("token", async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ ok: true, result: { message_id: 12 } });
+    });
+
+    await adapter.sendMessage(1, "x".repeat(3600), {
+      replyToMessageId: 99,
+      replyMarkup: { inline_keyboard: [[{ text: "Status", callback_data: "ar:s" }]] },
+    });
+
+    expect(sentBodies).toHaveLength(2);
+    expect(sentBodies[0]?.reply_parameters).toEqual({ message_id: 99, allow_sending_without_reply: true });
+    expect(sentBodies[1]?.reply_parameters).toBeUndefined();
+    expect(sentBodies[0]?.reply_markup).toBeUndefined();
+    expect(sentBodies[1]?.reply_markup).toEqual({ inline_keyboard: [[{ text: "Status", callback_data: "ar:s" }]] });
   });
 
   test("splits html outbound messages without dropping parse mode", async () => {

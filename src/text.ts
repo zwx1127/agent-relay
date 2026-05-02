@@ -8,6 +8,48 @@ export interface RenderedTelegramText {
   entities: TelegramMessageEntity[];
 }
 
+export type TelegramTextPart =
+  | string
+  | {
+    text: string;
+    entity?: TelegramMessageEntity["type"];
+    url?: string;
+    language?: string;
+  };
+
+export function renderTelegramText(parts: TelegramTextPart[]): RenderedTelegramText {
+  const output = new TelegramTextBuilder();
+  for (const part of parts) {
+    if (typeof part === "string") {
+      output.append(part);
+      continue;
+    }
+    const start = output.length;
+    output.append(part.text);
+    if (part.entity) {
+      output.entity({
+        type: part.entity,
+        offset: start,
+        length: output.length - start,
+        ...(part.url ? { url: part.url } : {}),
+        ...(part.language ? { language: part.language } : {}),
+      });
+    }
+  }
+  return output.rendered();
+}
+
+export function appendRendered(base: RenderedTelegramText, suffix: RenderedTelegramText): RenderedTelegramText {
+  const offset = base.text.length;
+  return {
+    text: `${base.text}${suffix.text}`,
+    entities: [
+      ...base.entities,
+      ...suffix.entities.map((entity) => ({ ...entity, offset: entity.offset + offset })),
+    ],
+  };
+}
+
 export function cleanTerminalOutput(value: string): string {
   return value.replace(ANSI_PATTERN, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(CONTROL_PATTERN, "");
 }
@@ -65,15 +107,27 @@ function splitRanges(text: string, maxChars: number): Array<[number, number]> {
   let start = 0;
   while (start < text.length) {
     const hardEnd = Math.min(text.length, start + maxChars);
-    const window = text.slice(start, hardEnd);
-    const newlineIndex = window.lastIndexOf("\n");
-    const end = hardEnd < text.length && newlineIndex > Math.floor(maxChars * 0.6)
-      ? start + newlineIndex + 1
-      : hardEnd;
+    const end = chooseSplitEnd(text, start, hardEnd, maxChars);
     ranges.push([start, end]);
     start = end;
   }
   return ranges.length > 0 ? ranges : [[0, 0]];
+}
+
+function chooseSplitEnd(text: string, start: number, hardEnd: number, maxChars: number): number {
+  if (hardEnd >= text.length) return hardEnd;
+  const window = text.slice(start, hardEnd);
+  const candidates: Array<{ index: number; minRatio: number; width: number }> = [
+    { index: window.lastIndexOf("\n\n"), minRatio: 0.45, width: 2 },
+    { index: window.lastIndexOf("\n"), minRatio: 0.6, width: 1 },
+    { index: window.lastIndexOf(" "), minRatio: 0.7, width: 1 },
+  ];
+  for (const candidate of candidates) {
+    if (candidate.index > Math.floor(maxChars * candidate.minRatio)) {
+      return start + candidate.index + candidate.width;
+    }
+  }
+  return hardEnd;
 }
 
 function clipEntity(entity: TelegramMessageEntity, start: number, end: number): TelegramMessageEntity | undefined {
@@ -92,42 +146,6 @@ function clipEntity(entity: TelegramMessageEntity, start: number, end: number): 
 export function tailLines(text: string, count: number): string {
   const lines = text.split("\n");
   return lines.slice(Math.max(0, lines.length - count)).join("\n");
-}
-
-export function htmlEscape(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-export function formatAgentMarkdownForTelegramHtml(text: string): string {
-  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-  const output: string[] = [];
-  let codeBlock: string[] | undefined;
-
-  for (const line of lines) {
-    if (line.trimStart().startsWith("```")) {
-      if (codeBlock) {
-        output.push(`<pre>${htmlEscape(codeBlock.join("\n"))}</pre>`);
-        codeBlock = undefined;
-      } else {
-        codeBlock = [];
-      }
-      continue;
-    }
-
-    if (codeBlock) {
-      codeBlock.push(line);
-      continue;
-    }
-
-    output.push(formatMarkdownLine(line));
-  }
-
-  if (codeBlock) output.push(`<pre>${htmlEscape(codeBlock.join("\n"))}</pre>`);
-  return output.join("\n");
 }
 
 export function renderCodexMarkdownForTelegram(text: string): RenderedTelegramText {
@@ -309,68 +327,6 @@ function renderInlineMarkdown(output: TelegramTextBuilder, value: string): void 
   }
 }
 
-function formatMarkdownLine(line: string): string {
-  if (line.trim().length === 0) return "";
-
-  const heading = /^(#{1,6})\s+(.+)$/.exec(line);
-  if (heading) return `<b>${formatInlineMarkdown(heading[2] ?? "")}</b>`;
-
-  const unordered = /^(\s*)[-*+]\s+(.+)$/.exec(line);
-  if (unordered) return `${htmlEscape(unordered[1] ?? "")}• ${formatInlineMarkdown(unordered[2] ?? "")}`;
-
-  const ordered = /^(\s*)(\d+)[.)]\s+(.+)$/.exec(line);
-  if (ordered) return `${htmlEscape(ordered[1] ?? "")}${ordered[2]}. ${formatInlineMarkdown(ordered[3] ?? "")}`;
-
-  return formatInlineMarkdown(line);
-}
-
-function formatInlineMarkdown(value: string): string {
-  let result = "";
-  let index = 0;
-
-  while (index < value.length) {
-    if (value[index] === "`") {
-      const end = value.indexOf("`", index + 1);
-      if (end > index + 1) {
-        result += `<code>${htmlEscape(value.slice(index + 1, end))}</code>`;
-        index = end + 1;
-        continue;
-      }
-    }
-
-    const link = tryParseMarkdownLink(value, index);
-    if (link) {
-      result += `<a href="${htmlEscape(link.url)}">${formatInlineMarkdown(link.label)}</a>`;
-      index = link.end;
-      continue;
-    }
-
-    const boldMarker = value.startsWith("**", index) ? "**" : value.startsWith("__", index) ? "__" : undefined;
-    if (boldMarker) {
-      const end = value.indexOf(boldMarker, index + boldMarker.length);
-      if (end > index + boldMarker.length) {
-        result += `<b>${formatInlineMarkdown(value.slice(index + boldMarker.length, end))}</b>`;
-        index = end + boldMarker.length;
-        continue;
-      }
-    }
-
-    if (value[index] === "*") {
-      const end = value.indexOf("*", index + 1);
-      if (end > index + 1) {
-        result += `<i>${formatInlineMarkdown(value.slice(index + 1, end))}</i>`;
-        index = end + 1;
-        continue;
-      }
-    }
-
-    result += htmlEscape(value[index] ?? "");
-    index += 1;
-  }
-
-  return result;
-}
-
 function tryParseMarkdownLink(value: string, index: number): { label: string; url: string; end: number } | undefined {
   if (value[index] !== "[") return undefined;
   const labelEnd = value.indexOf("]", index + 1);
@@ -452,90 +408,4 @@ export interface StatusView {
   contextWindow?: number;
   waitingForUserInput?: boolean;
   waitingForApproval?: boolean;
-}
-
-export interface WorkspaceView {
-  name: string;
-  selected: boolean;
-}
-
-export function formatStatus(status: StatusView): string {
-  if (!status.workspaceName || !status.workspacePath) {
-    return [
-      "<b>Status</b>",
-      "",
-      "No workspace selected.",
-      "Use the console buttons to select or create one.",
-    ].join("\n");
-  }
-  const lines = [
-    "<b>Status</b>",
-    "",
-    `<b>Workspace:</b> <code>${htmlEscape(status.workspaceName)}</code>`,
-    `<b>Path:</b> <code>${htmlEscape(status.workspacePath)}</code>`,
-    `<b>Codex:</b> ${status.running ? "running" : "stopped"}`,
-    `<b>Thread:</b> ${formatThreadLine(status)}`,
-    `<b>Model:</b> ${formatModelLine(status)}`,
-    `<b>Approval:</b> ${status.approvalPolicy ? htmlEscape(status.approvalPolicy) : "unknown"}`,
-    `<b>Sandbox:</b> ${status.sandboxPolicy ? htmlEscape(status.sandboxPolicy) : "unknown"}`,
-    `<b>Waiting:</b> ${formatWaiting(status)}`,
-    `<b>Tokens:</b> ${formatTokens(status)}`,
-    `<b>Recent output:</b> ${status.recentOutputAt ? htmlEscape(new Date(status.recentOutputAt).toISOString()) : "none"}`,
-  ];
-  if (status.recentError) lines.push(`<b>Recent error:</b> ${htmlEscape(status.recentError.trim().slice(0, 500))}`);
-  return lines.join("\n");
-}
-
-function formatThreadLine(status: StatusView): string {
-  if (!status.threadId && !status.threadName) return "none";
-  const label = status.threadName || status.threadId || "unknown";
-  const state = status.threadStatus ? ` (${status.threadStatus})` : "";
-  return `<code>${htmlEscape(label)}</code>${state}`;
-}
-
-function formatModelLine(status: StatusView): string {
-  if (!status.model) return "unknown";
-  const parts = [`<code>${htmlEscape(status.model)}</code>`];
-  if (status.reasoningEffort) parts.push(`reasoning ${htmlEscape(status.reasoningEffort)}`);
-  if (status.modelProvider) parts.push(htmlEscape(status.modelProvider));
-  return parts.join(" / ");
-}
-
-function formatWaiting(status: StatusView): string {
-  const waiting = [
-    status.waitingForUserInput ? "user input" : undefined,
-    status.waitingForApproval ? "approval" : undefined,
-  ].filter(Boolean);
-  return waiting.length > 0 ? waiting.join(", ") : "no";
-}
-
-function formatTokens(status: StatusView): string {
-  const total = status.tokenUsage?.total?.totalTokens;
-  const context = status.contextWindow;
-  if (typeof total !== "number" && typeof context !== "number") return "unknown";
-  if (typeof total === "number" && typeof context === "number" && context > 0) {
-    const percent = Math.round((total / context) * 100);
-    return `${total}/${context} (${percent}%)`;
-  }
-  return typeof total === "number" ? String(total) : `context ${context}`;
-}
-
-export function formatWorkspaces(workspaces: WorkspaceView[]): string {
-  if (workspaces.length === 0) {
-    return [
-      "<b>Workspaces</b>",
-      "",
-      "No workspaces.",
-      "Use New workspace to create one.",
-    ].join("\n");
-  }
-  return [
-    "<b>Workspaces</b>",
-    "",
-    ...workspaces.map((workspace) => `${workspace.selected ? "Selected:" : "-"} <code>${htmlEscape(workspace.name)}</code>`),
-  ].join("\n");
-}
-
-export function formatError(detail: string): string {
-  return `<b>Error:</b> ${htmlEscape(detail)}`;
 }

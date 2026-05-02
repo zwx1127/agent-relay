@@ -34,6 +34,7 @@ export interface SendMessageOptions {
   replyMarkup?: InlineKeyboardMarkup;
   forceReply?: boolean;
   disableWebPagePreview?: boolean;
+  replyToMessageId?: number;
 }
 
 export interface EditMessageTextOptions extends SendMessageOptions {
@@ -47,6 +48,7 @@ export interface SendMessageResult {
 export interface TextInboundMessage {
   kind: "message";
   id: string;
+  messageId: number;
   chatId: ChatId;
   userId: UserId;
   text: string;

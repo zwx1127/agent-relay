@@ -16,16 +16,16 @@ import type {
   IMAdapter,
   InboundMessage,
   InlineKeyboardMarkup,
+  SendMessageOptions,
   WorkspaceRecord,
 } from "./types.ts";
 import type { Store } from "./store.ts";
 import { createWorkspace, discoverWorkspaceDirectories, isRealDirectory, resolveWorkspacePath, validateWorkspaceName, workspaceDirectoryExists } from "./workspace.ts";
-import { formatError, formatStatus, formatWorkspaces, htmlEscape, renderCodexMarkdownForTelegram, splitRenderedForTelegram, type RenderedTelegramText, type StatusView } from "./text.ts";
+import { appendRendered, renderCodexMarkdownForTelegram, renderTelegramText, splitRenderedForTelegram, type RenderedTelegramText, type StatusView, type TelegramTextPart } from "./text.ts";
 import { noopLogger, type Logger } from "./logger.ts";
 
 const CALLBACK_PREFIX = "ar:";
 const CALLBACK_LIMIT_BYTES = 64;
-const HTML = { parseMode: "HTML" as const };
 const STREAM_QUIET_MS = 800;
 const STREAM_MAX_MS = 3000;
 const STREAM_FLUSH_CHARS = 3400;
@@ -33,6 +33,7 @@ const CODEX_PROMPT_TTL_MS = 30 * 60 * 1000;
 const PAGE_MAX_CHARS = 3200;
 const PAGED_OUTPUT_TTL_MS = 24 * 60 * 60 * 1000;
 const RESUME_THREAD_TTL_MS = 10 * 60 * 1000;
+const LIST_PAGE_SIZE = 8;
 const INIT_PROMPT = [
   "Create an AGENTS.md file for this workspace.",
   "Inspect the project structure first, then write concise, practical instructions that future Codex agents should follow in this repository.",
@@ -81,7 +82,7 @@ export class MessageRouter {
         user_id: message.userId,
         message_id: message.id,
       });
-      await this.deps.adapter.sendMessage(message.chatId, "Unauthorized.", HTML);
+      await this.sendRendered(message.chatId, textMessage("Unauthorized."));
       return;
     }
 
@@ -95,10 +96,10 @@ export class MessageRouter {
         await this.answerCodexFreeText(message.chatId, message.replyToMessageId!, text);
       } else if (command === "/relay" || command === "/start") {
         await this.renderConsole(message.chatId);
-      } else if (command && await this.handleSlashCommand(message.chatId, command, text)) {
+      } else if (command && await this.handleSlashCommand(message.chatId, command, text, message.messageId)) {
         return;
       } else {
-        await this.forwardToAgent(message.chatId, text);
+        await this.forwardToAgent(message.chatId, text, message.messageId);
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -109,7 +110,7 @@ export class MessageRouter {
         command,
         error: error instanceof Error ? error : new Error(detail),
       });
-      await this.deps.adapter.sendMessage(message.chatId, formatError(detail), HTML);
+      await this.sendRendered(message.chatId, formatErrorMessage(detail));
       this.appendSystem(message.chatId, `Error: ${detail}\n`);
     }
   }
@@ -164,7 +165,7 @@ export class MessageRouter {
     });
     this.deps.store.markSessionStopped(sessionKeyValue);
     await this.finalizeSessionOutput(sessionKeyValue);
-    await this.deps.adapter.sendMessage(parsed.chatId, `<b>${htmlEscape(exitText)}</b>`, HTML);
+    await this.sendRendered(parsed.chatId, messageWithTitle(exitText));
   }
 
   private async handleCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
@@ -198,7 +199,7 @@ export class MessageRouter {
         error: error instanceof Error ? error : new Error(detail),
       });
       await this.answerCallback(message.callbackQueryId, detail.slice(0, 180));
-      await this.renderCallbackPage(message, formatError(detail), consoleKeyboard(this.statusView(message.chatId)));
+      await this.renderCallbackPage(message, formatErrorMessage(detail), consoleKeyboard(this.statusView(message.chatId)));
       this.appendSystem(message.chatId, `Error: ${detail}\n`);
     }
   }
@@ -212,7 +213,7 @@ export class MessageRouter {
       return;
     }
     if (payload === "w") {
-      await this.renderWorkspacesCallback(message);
+      await this.renderWorkspacesCallback(message, 0);
       return;
     }
     if (payload === "n") {
@@ -235,12 +236,36 @@ export class MessageRouter {
       await this.resumeThreadCallback(message, payload);
       return;
     }
+    if (payload.startsWith("wl:")) {
+      await this.renderWorkspacesCallback(message, Number(payload.slice("wl:".length)));
+      return;
+    }
+    if (payload.startsWith("rl:")) {
+      await this.renderResumeThreadsCallback(message, Number(payload.slice("rl:".length)));
+      return;
+    }
+    if (payload === "d") {
+      await this.renderDetailsCallback(message);
+      return;
+    }
+    if (payload === "clear?") {
+      await this.renderCallbackPage(message, confirmMessage("Start a new Codex thread?", "The current thread binding for this workspace will be replaced."), clearConfirmKeyboard());
+      return;
+    }
+    if (payload === "clear!") {
+      await this.clearThread(message.chatId, message);
+      return;
+    }
+    if (payload === "review") {
+      await this.runBuiltin(message.chatId, "review");
+      return;
+    }
+    if (payload === "compact") {
+      await this.runBuiltin(message.chatId, "compact");
+      return;
+    }
     if (payload === "x?") {
-      await this.renderCallbackPage(message, [
-        "<b>Stop Codex session?</b>",
-        "",
-        "The current workspace binding will remain selected.",
-      ].join("\n"), exitConfirmKeyboard());
+      await this.renderCallbackPage(message, confirmMessage("Stop Codex session?", "The current workspace binding will remain selected."), exitConfirmKeyboard());
       return;
     }
     if (payload === "x!") {
@@ -276,16 +301,22 @@ export class MessageRouter {
 
   private async renderStatusCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     const status = this.statusView(message.chatId);
-    await this.renderCallbackPage(message, formatStatus(status), consoleKeyboard(status));
+    await this.renderCallbackPage(message, formatStatusMessage(status), consoleKeyboard(status));
   }
 
-  private async renderWorkspacesCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
+  private async renderDetailsCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
+    const status = this.statusView(message.chatId);
+    await this.renderCallbackPage(message, formatDetailsMessage(status), consoleKeyboard(status));
+  }
+
+  private async renderWorkspacesCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, pageIndex: number): Promise<void> {
     const workspaces = await this.listAvailableWorkspaces();
     const selected = this.currentWorkspace(message.chatId)?.name;
-    await this.renderCallbackPage(message, formatWorkspaces(workspaces.map((workspace) => ({
+    const page = paginateWorkspaces(workspaces, selected, pageIndex);
+    await this.renderCallbackPage(message, formatWorkspacesMessage(page.items.map((workspace) => ({
       name: workspace.name,
       selected: workspace.name === selected,
-    }))), workspacesKeyboard(workspaces, selected));
+    })), page.pageIndex, page.totalPages), workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages));
   }
 
   private async stopFromCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
@@ -295,21 +326,21 @@ export class MessageRouter {
     await this.deps.agent.stop(key);
     this.deps.store.markSessionStopped(key);
     this.logger.info("router.session_stopped", { chat_id: message.chatId, workspace: workspace.name, session_key: key });
-    await this.renderCallbackPage(message, "<b>Codex session stopped.</b>", consoleKeyboard(this.statusView(message.chatId)));
+    await this.renderCallbackPage(message, messageWithTitle("Codex session stopped."), consoleKeyboard(this.statusView(message.chatId)));
   }
 
   private async renderCallbackPage(
     message: Extract<InboundMessage, { kind: "callback_query" }>,
-    text: string,
+    body: string | RenderedTelegramText,
     replyMarkup: InlineKeyboardMarkup,
   ): Promise<void> {
+    const rendered = ensureRendered(body);
     if (!message.messageId) {
-      await this.deps.adapter.sendMessage(message.chatId, text, { ...HTML, replyMarkup });
+      await this.sendRendered(message.chatId, rendered, { replyMarkup });
       return;
     }
     try {
-      await this.deps.adapter.editMessageText(message.chatId, text, {
-        ...HTML,
+      await this.editRendered(message.chatId, rendered, {
         messageId: message.messageId,
         replyMarkup,
       });
@@ -319,7 +350,7 @@ export class MessageRouter {
         message_id: message.messageId,
         error: error instanceof Error ? error : new Error(String(error)),
       });
-      await this.deps.adapter.sendMessage(message.chatId, text, { ...HTML, replyMarkup });
+      await this.sendRendered(message.chatId, rendered, { replyMarkup });
     }
   }
 
@@ -334,6 +365,26 @@ export class MessageRouter {
     }
   }
 
+  private async sendRendered(chatId: ChatId, rendered: RenderedTelegramText, options: Omit<SendMessageOptions, "entities" | "parseMode"> = {}): Promise<{ messageId?: number }> {
+    return await this.deps.adapter.sendMessage(chatId, rendered.text, {
+      ...options,
+      entities: rendered.entities,
+      disableWebPagePreview: options.disableWebPagePreview ?? true,
+    });
+  }
+
+  private async editRendered(
+    chatId: ChatId,
+    rendered: RenderedTelegramText,
+    options: Omit<Parameters<IMAdapter["editMessageText"]>[2], "entities" | "parseMode">,
+  ): Promise<void> {
+    await this.deps.adapter.editMessageText(chatId, rendered.text, {
+      ...options,
+      entities: rendered.entities,
+      disableWebPagePreview: options.disableWebPagePreview ?? true,
+    });
+  }
+
   private async renderConsole(chatId: ChatId): Promise<void> {
     const status = this.statusView(chatId);
     this.logger.info("router.console_rendered", {
@@ -341,11 +392,11 @@ export class MessageRouter {
       workspace: status.workspaceName,
       running: Boolean(status.running),
     });
-    await this.deps.adapter.sendMessage(chatId, formatStatus(status), { ...HTML, replyMarkup: consoleKeyboard(status) });
+    await this.sendRendered(chatId, formatStatusMessage(status), { replyMarkup: consoleKeyboard(status) });
   }
 
   private async promptForWorkspaceName(chatId: ChatId): Promise<void> {
-    const result = await this.deps.adapter.sendMessage(chatId, "Reply with a workspace name. Existing directories under WORKSPACE_ROOT will be selected; missing names will be created.", {
+    const result = await this.sendRendered(chatId, textMessage("Reply with a workspace name. Existing directories under WORKSPACE_ROOT will be selected; missing names will be created."), {
       forceReply: true,
       disableWebPagePreview: true,
     });
@@ -372,13 +423,16 @@ export class MessageRouter {
     this.deps.store.deletePendingPrompt(chatId, promptMessageId);
     this.logger.info(existed ? "router.workspace_existing_selected" : "router.workspace_created", { chat_id: chatId, workspace: name, path });
     await this.ensureAgentStarted(chatId, { name, path, createdAt: Date.now() });
-    await this.deps.adapter.sendMessage(chatId, `Workspace <code>${htmlEscape(name)}</code> ${existed ? "selected" : "created and selected"}.`, {
-      ...HTML,
+    await this.sendRendered(chatId, renderTelegramText([
+      "Workspace ",
+      code(name),
+      ` ${existed ? "selected" : "created and selected"}.`,
+    ]), {
       replyMarkup: consoleKeyboard(this.statusView(chatId)),
     });
   }
 
-  private async forwardToAgent(chatId: ChatId, text: string): Promise<void> {
+  private async forwardToAgent(chatId: ChatId, text: string, userMessageId?: number): Promise<void> {
     if (!text) return;
     const workspace = this.currentWorkspace(chatId);
     if (!workspace) {
@@ -389,6 +443,7 @@ export class MessageRouter {
     const key = sessionKey(chatId, workspace.name);
     await this.ensureAgentStarted(chatId, workspace);
     await this.finalizeSessionOutput(key);
+    if (userMessageId) this.lastUserMessageIds.set(key, userMessageId);
     await this.deps.adapter.sendChatAction(chatId, "typing").catch((error) => {
       this.logger.debug("router.chat_action_failed", {
         chat_id: chatId,
@@ -436,22 +491,22 @@ export class MessageRouter {
     return status;
   }
 
-  private async handleSlashCommand(chatId: ChatId, command: string, text: string): Promise<boolean> {
+  private async handleSlashCommand(chatId: ChatId, command: string, text: string, userMessageId?: number): Promise<boolean> {
     switch (command) {
       case "/help":
-        await this.deps.adapter.sendMessage(chatId, formatRelayHelp(), HTML);
+        await this.sendRendered(chatId, formatRelayHelp());
         return true;
       case "/status":
         await this.renderConsole(chatId);
         return true;
       case "/init":
-        await this.forwardToAgent(chatId, INIT_PROMPT);
+        await this.forwardToAgent(chatId, INIT_PROMPT, userMessageId);
         return true;
       case "/review":
-        await this.runBuiltin(chatId, "review");
+        await this.runBuiltin(chatId, "review", userMessageId);
         return true;
       case "/compact":
-        await this.runBuiltin(chatId, "compact");
+        await this.runBuiltin(chatId, "compact", userMessageId);
         return true;
       case "/model":
         await this.renderModelInfo(chatId);
@@ -467,23 +522,24 @@ export class MessageRouter {
     }
   }
 
-  private async runBuiltin(chatId: ChatId, command: "review" | "compact"): Promise<void> {
+  private async runBuiltin(chatId: ChatId, command: "review" | "compact", userMessageId?: number): Promise<void> {
     const workspace = this.requireCurrentWorkspace(chatId);
     const status = await this.ensureAgentStarted(chatId, workspace);
     if (!this.deps.agent.runBuiltinCommand) throw new Error("Codex app-server does not support this built-in command.");
     await this.finalizeSessionOutput(status.sessionKey);
+    if (userMessageId) this.lastUserMessageIds.set(status.sessionKey, userMessageId);
     const result = await this.deps.agent.runBuiltinCommand(status.sessionKey, command);
-    await this.deps.adapter.sendMessage(chatId, `<b>${htmlEscape(result.message)}</b>`, HTML);
+    await this.sendRendered(chatId, messageWithTitle(result.message));
   }
 
   private async renderModelInfo(chatId: ChatId): Promise<void> {
     const workspace = this.currentWorkspace(chatId);
     const status = workspace ? this.deps.agent.getStatus(sessionKey(chatId, workspace.name)) : undefined;
     const models = this.deps.agent.listModels ? await this.deps.agent.listModels() : [];
-    await this.deps.adapter.sendMessage(chatId, formatModelInfo(status, models), HTML);
+    await this.sendRendered(chatId, formatModelInfo(status, models));
   }
 
-  private async clearThread(chatId: ChatId): Promise<void> {
+  private async clearThread(chatId: ChatId, callback?: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     const workspace = this.requireCurrentWorkspace(chatId);
     const key = sessionKey(chatId, workspace.name);
     await this.finalizeSessionOutput(key);
@@ -491,24 +547,34 @@ export class MessageRouter {
     this.deps.store.markSessionStopped(key);
     this.deps.store.clearSessionThreadId(key);
     await this.ensureAgentStarted(chatId, workspace);
-    await this.deps.adapter.sendMessage(chatId, "<b>Started a new Codex thread.</b>", {
-      ...HTML,
-      replyMarkup: consoleKeyboard(this.statusView(chatId)),
-    });
+    const body = messageWithTitle("Started a new Codex thread.");
+    if (callback) {
+      await this.renderCallbackPage(callback, body, consoleKeyboard(this.statusView(chatId)));
+    } else {
+      await this.sendRendered(chatId, body, { replyMarkup: consoleKeyboard(this.statusView(chatId)) });
+    }
   }
 
   private async renderResumeThreads(chatId: ChatId): Promise<void> {
     const workspace = this.requireCurrentWorkspace(chatId);
     if (!this.deps.agent.listThreads) throw new Error("Codex app-server does not support thread listing.");
     const threads = await this.deps.agent.listThreads({ workspacePath: workspace.path, limit: 10 });
-    const rows = threads.map((thread) => {
-      const token = this.rememberResumeThread(chatId, workspace, thread);
-      return [{ text: resumeThreadButtonText(thread), callback_data: `ar:r:${token}` }];
+    await this.sendRendered(chatId, formatResumeThreads(threads, 0, Math.max(1, Math.ceil(threads.length / LIST_PAGE_SIZE))), {
+      replyMarkup: resumeThreadsKeyboard(chatId, workspace, threads, 0, this.rememberResumeThread.bind(this)),
     });
-    await this.deps.adapter.sendMessage(chatId, formatResumeThreads(threads), {
-      ...HTML,
-      replyMarkup: { inline_keyboard: rows.length > 0 ? rows : [[{ text: "Refresh", callback_data: "ar:s" }]] },
-    });
+  }
+
+  private async renderResumeThreadsCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, rawPageIndex: number): Promise<void> {
+    const workspace = this.requireCurrentWorkspace(message.chatId);
+    if (!this.deps.agent.listThreads) throw new Error("Codex app-server does not support thread listing.");
+    const threads = await this.deps.agent.listThreads({ workspacePath: workspace.path, limit: 10 });
+    const totalPages = Math.max(1, Math.ceil(threads.length / LIST_PAGE_SIZE));
+    const pageIndex = clampPage(rawPageIndex, totalPages);
+    await this.renderCallbackPage(
+      message,
+      formatResumeThreads(threads, pageIndex, totalPages),
+      resumeThreadsKeyboard(message.chatId, workspace, threads, pageIndex, this.rememberResumeThread.bind(this)),
+    );
   }
 
   private async resumeThreadCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
@@ -527,7 +593,11 @@ export class MessageRouter {
     await this.deps.agent.stop(key);
     this.deps.store.markSessionStopped(key);
     const status = await this.ensureAgentStarted(message.chatId, workspace, entry.threadId);
-    await this.renderCallbackPage(message, `<b>Resumed thread:</b> <code>${htmlEscape(status.threadName ?? entry.threadName ?? entry.threadId)}</code>`, consoleKeyboard(this.statusView(message.chatId)));
+    await this.renderCallbackPage(message, renderTelegramText([
+      bold("Resumed thread:"),
+      " ",
+      code(status.threadName ?? entry.threadName ?? entry.threadId),
+    ]), consoleKeyboard(this.statusView(message.chatId)));
   }
 
   private currentWorkspace(chatId: ChatId): WorkspaceRecord | undefined {
@@ -606,12 +676,14 @@ export class MessageRouter {
     startedAt: number;
     segmentId: number;
     turnId?: string;
+    replyToMessageId?: number;
     timer?: Timer;
     messageId?: number;
     pageToken?: string;
     lastFlushedText?: string;
   }>();
 
+  private readonly lastUserMessageIds = new Map<string, number>();
   private nextOutputSegmentId = 1;
 
   private readonly resumeThreads = new Map<string, {
@@ -638,35 +710,9 @@ export class MessageRouter {
     const key = codexRequestKey(event.sessionKey, event.requestId);
     this.codexRequests.set(key, { sessionKey: event.sessionKey, requestId: event.requestId, questions: event.questions, answers: {} });
 
-    for (const [index, question] of event.questions.entries()) {
-      const options = question.options ?? [];
-      const payload = JSON.stringify({
-        token,
-        requestId: event.requestId,
-        questionIndex: index,
-        questionId: question.id,
-        isSecret: Boolean(question.isSecret),
-        options,
-      });
-      const text = formatCodexQuestion(question);
-      const result = question.isSecret || options.length === 0
-        ? await this.deps.adapter.sendMessage(parsed.chatId, text, { ...HTML, forceReply: true, disableWebPagePreview: true })
-        : await this.deps.adapter.sendMessage(parsed.chatId, text, {
-          ...HTML,
-          replyMarkup: codexQuestionKeyboard(token, index, options),
-          disableWebPagePreview: true,
-        });
-      if (!result.messageId) throw new Error("Telegram did not return a prompt message id.");
-      this.deps.store.setPendingPrompt({
-        chatId: parsed.chatId,
-        promptMessageId: result.messageId,
-        kind: "codex_user_input",
-        createdAt: Date.now(),
-        sessionKey: event.sessionKey,
-        payloadJson: payload,
-        expiresAt,
-      });
-    }
+    const first = event.questions[0];
+    if (!first) throw new Error("Codex requested user input without questions.");
+    await this.sendCodexQuestion(parsed.chatId, event.sessionKey, event.requestId, first, 0, token, expiresAt);
   }
 
   private async handleCodexApprovalRequest(event: AgentApprovalRequestEvent): Promise<void> {
@@ -674,8 +720,7 @@ export class MessageRouter {
     if (!parsed) return;
     const token = shortToken();
     const expiresAt = Date.now() + CODEX_PROMPT_TTL_MS;
-    const result = await this.deps.adapter.sendMessage(parsed.chatId, formatApproval(event.title, event.body), {
-      ...HTML,
+    const result = await this.sendRendered(parsed.chatId, formatApprovalMessage(event.title, event.body), {
       replyMarkup: approvalKeyboard(token),
       disableWebPagePreview: true,
     });
@@ -697,6 +742,61 @@ export class MessageRouter {
     });
   }
 
+  private async sendCodexQuestion(
+    chatId: ChatId,
+    sessionKeyValue: string,
+    requestId: string | number,
+    question: AgentUserInputQuestion,
+    questionIndex: number,
+    token: string,
+    expiresAt: number,
+  ): Promise<void> {
+    const options = question.options ?? [];
+    const payload = JSON.stringify({
+      token,
+      requestId,
+      questionIndex,
+      questionId: question.id,
+      isSecret: Boolean(question.isSecret),
+      options,
+    });
+    const result = question.isSecret || options.length === 0
+      ? await this.sendRendered(chatId, formatCodexQuestion(question), { forceReply: true, disableWebPagePreview: true })
+      : await this.sendRendered(chatId, formatCodexQuestion(question), {
+        replyMarkup: codexQuestionKeyboard(token, questionIndex, options),
+        disableWebPagePreview: true,
+      });
+    if (!result.messageId) throw new Error("Telegram did not return a prompt message id.");
+    this.deps.store.setPendingPrompt({
+      chatId,
+      promptMessageId: result.messageId,
+      kind: "codex_user_input",
+      createdAt: Date.now(),
+      sessionKey: sessionKeyValue,
+      payloadJson: payload,
+      expiresAt,
+    });
+  }
+
+  private async sendNextCodexQuestion(
+    chatId: ChatId,
+    pending: NonNullable<ReturnType<Store["getPendingPrompt"]>>,
+    data: Record<string, unknown>,
+  ): Promise<boolean> {
+    if (!pending.sessionKey) return false;
+    const requestId = data.requestId as string | number | undefined;
+    if (requestId === undefined) return false;
+    const request = this.codexRequests.get(codexRequestKey(pending.sessionKey, requestId));
+    if (!request) return false;
+    const currentIndex = typeof data.questionIndex === "number" ? data.questionIndex : -1;
+    const nextIndex = request.questions.findIndex((question, index) => index > currentIndex && !request.answers[question.id]);
+    const next = nextIndex >= 0 ? request.questions[nextIndex] : undefined;
+    if (!next) return false;
+    const token = typeof data.token === "string" ? data.token : shortToken();
+    await this.sendCodexQuestion(chatId, pending.sessionKey, requestId, next, nextIndex, token, pending.expiresAt ?? Date.now() + CODEX_PROMPT_TTL_MS);
+    return true;
+  }
+
   private async answerCodexOption(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
     const parts = payload.split(":");
     const [, token, rawQuestionIndex, rawOptionIndex] = parts;
@@ -715,7 +815,7 @@ export class MessageRouter {
     }
 
     if (optionIndex === options.length) {
-      const result = await this.deps.adapter.sendMessage(message.chatId, "Reply with your answer.", {
+      const result = await this.sendRendered(message.chatId, textMessage("Reply with your answer."), {
         forceReply: true,
         disableWebPagePreview: true,
       });
@@ -730,7 +830,7 @@ export class MessageRouter {
         expiresAt: pending.expiresAt,
       });
       this.deps.store.deletePendingPrompt(message.chatId, pending.promptMessageId);
-      await this.renderCallbackPage(message, "<b>Waiting for custom answer.</b>", { inline_keyboard: [] });
+      await this.renderCallbackPage(message, messageWithTitle("Waiting for custom answer."), { inline_keyboard: [] });
       return;
     }
 
@@ -738,7 +838,8 @@ export class MessageRouter {
     if (!option || typeof option.label !== "string") throw new Error("Invalid question option.");
     const response = await this.recordCodexAnswer(pending, data, option.label);
     if (response === "expired") return;
-    await this.renderCallbackPage(message, `<b>Answered:</b> ${htmlEscape(option.label)}`, { inline_keyboard: [] });
+    const hasNext = !response && await this.sendNextCodexQuestion(message.chatId, pending, data);
+    await this.renderCallbackPage(message, answeredMessage(option.label, hasNext), { inline_keyboard: [] });
     if (response) await this.respondToCodexPrompt(response);
   }
 
@@ -747,12 +848,13 @@ export class MessageRouter {
     const data = parsePromptPayload(pending?.payloadJson);
     if (!pending || pending.kind !== "codex_user_input" || !data || isExpired(pending)) {
       this.deps.store.deletePendingPrompt(chatId, promptMessageId);
-      await this.deps.adapter.sendMessage(chatId, "Question expired.");
+      await this.sendRendered(chatId, textMessage("Question expired."));
       return;
     }
     const response = await this.recordCodexAnswer(pending, data, text);
     if (response === "expired") return;
-    await this.deps.adapter.sendMessage(chatId, data.isSecret ? "<b>Answered.</b>" : `<b>Answered:</b> ${htmlEscape(text)}`, HTML);
+    const hasNext = !response && await this.sendNextCodexQuestion(chatId, pending, data);
+    if (!hasNext) await this.sendRendered(chatId, data.isSecret ? messageWithTitle("Answered.") : answeredMessage(text, false));
     if (response) await this.respondToCodexPrompt(response);
   }
 
@@ -769,7 +871,7 @@ export class MessageRouter {
     const request = this.codexRequests.get(codexRequestKey(pending.sessionKey, requestId));
     if (!request) {
       this.deps.store.deletePendingPrompt(pending.chatId, pending.promptMessageId);
-      await this.deps.adapter.sendMessage(pending.chatId, "Question expired.");
+      await this.sendRendered(pending.chatId, textMessage("Question expired."));
       return "expired";
     }
 
@@ -797,13 +899,13 @@ export class MessageRouter {
     if (!pending.sessionKey || !this.deps.agent.respond) throw new Error("Approval session is missing.");
     const approved = decision === "y";
     this.deps.store.deletePendingPrompt(message.chatId, pending.promptMessageId);
-    await this.renderCallbackPage(message, approved ? "<b>Approved.</b>" : "<b>Denied.</b>", { inline_keyboard: [] });
+    await this.renderCallbackPage(message, messageWithTitle(approved ? "Approved." : "Denied."), { inline_keyboard: [] });
     await this.deps.agent.respond(pending.sessionKey, data.requestId as string | number, approvalResponse(data.approvalKind as AgentApprovalKind, approved, data.params));
   }
 
   private async expireCallbackPrompt(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     if (message.messageId) this.deps.store.deletePendingPrompt(message.chatId, message.messageId);
-    await this.renderCallbackPage(message, "<b>Question expired.</b>", { inline_keyboard: [] });
+    await this.renderCallbackPage(message, messageWithTitle("Question expired."), { inline_keyboard: [] });
   }
 
   private async bufferAgentOutput(sessionKeyValue: string, chatId: ChatId, chunk: string, turnId?: string): Promise<void> {
@@ -813,7 +915,7 @@ export class MessageRouter {
       state = undefined;
     }
     if (!state) {
-      state = { chatId, text: "", startedAt: Date.now(), segmentId: this.nextOutputSegmentId++, turnId };
+      state = { chatId, text: "", startedAt: Date.now(), segmentId: this.nextOutputSegmentId++, turnId, replyToMessageId: this.lastUserMessageIds.get(sessionKeyValue) };
       this.liveOutput.set(sessionKeyValue, state);
     } else if (!state.turnId && turnId) {
       state.turnId = turnId;
@@ -845,8 +947,8 @@ export class MessageRouter {
 
   private async finalizeSessionOutput(sessionKeyValue: string): Promise<void> {
     const state = this.liveOutput.get(sessionKeyValue);
-    if (state && state.text !== state.lastFlushedText) {
-      await this.flushSessionOutput(sessionKeyValue);
+    if (state && (state.text !== state.lastFlushedText || state.pageToken)) {
+      await this.flushSessionOutput(sessionKeyValue, undefined, true);
     }
     const current = this.liveOutput.get(sessionKeyValue);
     if (current?.timer) clearTimeout(current.timer);
@@ -859,7 +961,7 @@ export class MessageRouter {
     if (state) state.lastFlushedText = text;
   }
 
-  private async flushSessionOutput(sessionKeyValue: string, expectedSegmentId?: number): Promise<void> {
+  private async flushSessionOutput(sessionKeyValue: string, expectedSegmentId?: number, final = false): Promise<void> {
     const state = this.liveOutput.get(sessionKeyValue);
     if (!state || state.text.length === 0) return;
     if (expectedSegmentId !== undefined && state.segmentId !== expectedSegmentId) return;
@@ -879,9 +981,8 @@ export class MessageRouter {
       const chunk = chunks[0]!;
       if (state.messageId) {
         try {
-          await this.deps.adapter.editMessageText(state.chatId, chunk.text, {
+          await this.editRendered(state.chatId, chunk, {
             messageId: state.messageId,
-            entities: chunk.entities,
             disableWebPagePreview: true,
           });
           this.markFlushed(sessionKeyValue, state.text);
@@ -894,8 +995,8 @@ export class MessageRouter {
           });
         }
       }
-      const result = await this.deps.adapter.sendMessage(state.chatId, chunk.text, {
-        entities: chunk.entities,
+      const result = await this.sendRendered(state.chatId, chunk, {
+        replyToMessageId: state.replyToMessageId,
         disableWebPagePreview: true,
       });
       state.messageId = result.messageId;
@@ -914,14 +1015,13 @@ export class MessageRouter {
         createdAt: state.startedAt,
         expiresAt: Date.now() + PAGED_OUTPUT_TTL_MS,
       });
-      const pageIndex = chunks.length - 1;
+      const pageIndex = final ? 0 : chunks.length - 1;
       const page = decoratePagedOutput(chunks[pageIndex]!, pageIndex, chunks.length);
       const replyMarkup = pagedOutputKeyboard(token, pageIndex, chunks.length);
       if (state.messageId) {
         try {
-          await this.deps.adapter.editMessageText(state.chatId, page.text, {
+          await this.editRendered(state.chatId, page, {
             messageId: state.messageId,
-            entities: page.entities,
             replyMarkup,
             disableWebPagePreview: true,
           });
@@ -935,8 +1035,8 @@ export class MessageRouter {
           });
         }
       }
-      const result = await this.deps.adapter.sendMessage(state.chatId, page.text, {
-        entities: page.entities,
+      const result = await this.sendRendered(state.chatId, page, {
+        replyToMessageId: state.replyToMessageId,
         replyMarkup,
         disableWebPagePreview: true,
       });
@@ -952,30 +1052,28 @@ export class MessageRouter {
     const output = token ? this.deps.store.getPagedOutput(token) : undefined;
     if (!output || output.chatId !== message.chatId || output.expiresAt < Date.now()) {
       if (token) this.deps.store.deletePagedOutput(token);
-      await this.renderCallbackPage(message, "<b>Page expired.</b>", { inline_keyboard: [] });
+      await this.renderCallbackPage(message, messageWithTitle("Page expired."), { inline_keyboard: [] });
       return;
     }
     const pageToken = output.token;
     const rendered = renderCodexMarkdownForTelegram(output.text);
     const pages = splitRenderedForTelegram(rendered, PAGE_MAX_CHARS);
     if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= pages.length) {
-      await this.renderCallbackPage(message, "<b>Page unavailable.</b>", pagedOutputKeyboard(pageToken, pages.length - 1, pages.length));
+      await this.renderCallbackPage(message, messageWithTitle("Page unavailable."), pagedOutputKeyboard(pageToken, pages.length - 1, pages.length));
       return;
     }
     const page = decoratePagedOutput(pages[pageIndex]!, pageIndex, pages.length);
     const replyMarkup = pagedOutputKeyboard(pageToken, pageIndex, pages.length);
     if (!message.messageId) {
-      await this.deps.adapter.sendMessage(message.chatId, page.text, {
-        entities: page.entities,
+      await this.sendRendered(message.chatId, page, {
         replyMarkup,
         disableWebPagePreview: true,
       });
       return;
     }
     try {
-      await this.deps.adapter.editMessageText(message.chatId, page.text, {
+      await this.editRendered(message.chatId, page, {
         messageId: message.messageId,
-        entities: page.entities,
         replyMarkup,
         disableWebPagePreview: true,
       });
@@ -985,8 +1083,7 @@ export class MessageRouter {
         message_id: message.messageId,
         error: error instanceof Error ? error : new Error(String(error)),
       });
-      await this.deps.adapter.sendMessage(message.chatId, page.text, {
-        entities: page.entities,
+      await this.sendRendered(message.chatId, page, {
         replyMarkup,
         disableWebPagePreview: true,
       });
@@ -1000,18 +1097,19 @@ function commandName(text: string): string | undefined {
 }
 
 function decoratePagedOutput(page: RenderedTelegramText, pageIndex: number, totalPages: number): RenderedTelegramText {
-  const footer = `\n\nPage ${pageIndex + 1}/${totalPages}`;
-  return {
-    text: `${page.text}${footer}`,
-    entities: page.entities,
-  };
+  return appendRendered(page, renderTelegramText(["\n\n", bold(`Page ${pageIndex + 1}/${totalPages}`)]));
 }
 
 function pagedOutputKeyboard(token: string, pageIndex: number, totalPages: number): InlineKeyboardMarkup {
-  const row: InlineKeyboardMarkup["inline_keyboard"][number] = [];
-  if (pageIndex > 0) row.push({ text: "Previous", callback_data: `ar:p:${token}:${pageIndex - 1}` });
-  if (pageIndex < totalPages - 1) row.push({ text: "Next", callback_data: `ar:p:${token}:${pageIndex + 1}` });
-  return { inline_keyboard: row.length > 0 ? [row] : [] };
+  if (totalPages <= 1) return { inline_keyboard: [] };
+  return {
+    inline_keyboard: [[
+      { text: "First", callback_data: `ar:p:${token}:0` },
+      { text: "Previous", callback_data: `ar:p:${token}:${Math.max(0, pageIndex - 1)}` },
+      { text: "Next", callback_data: `ar:p:${token}:${Math.min(totalPages - 1, pageIndex + 1)}` },
+      { text: "Last", callback_data: `ar:p:${token}:${totalPages - 1}` },
+    ]],
+  };
 }
 
 export function parseSessionKey(key: string): { chatId: ChatId; workspaceName: string } | undefined {
@@ -1033,21 +1131,78 @@ function codexRequestKey(sessionKeyValue: string, requestId: string | number): s
   return `${sessionKeyValue}:${String(requestId)}`;
 }
 
-function formatCodexQuestion(question: AgentUserInputQuestion): string {
-  const lines = [
-    `<b>${htmlEscape(question.header)}</b>`,
-    "",
-    htmlEscape(question.question),
+function bold(text: string): TelegramTextPart {
+  return { text, entity: "bold" };
+}
+
+function code(text: string): TelegramTextPart {
+  return { text, entity: "code" };
+}
+
+function textMessage(text: string): RenderedTelegramText {
+  return renderTelegramText([text]);
+}
+
+function ensureRendered(body: string | RenderedTelegramText): RenderedTelegramText {
+  return typeof body === "string" ? textMessage(body) : body;
+}
+
+function messageWithTitle(title: string, body?: string): RenderedTelegramText {
+  return renderTelegramText(body ? [bold(title), "\n\n", body] : [bold(title)]);
+}
+
+function confirmMessage(title: string, body: string): RenderedTelegramText {
+  return renderTelegramText([bold(title), "\n\n", body]);
+}
+
+function answeredMessage(answer: string, hasNext: boolean): RenderedTelegramText {
+  return renderTelegramText([
+    bold("Answered:"),
+    " ",
+    answer,
+    hasNext ? "\n\nNext question sent." : "",
+  ]);
+}
+
+function formatErrorMessage(detail: string): RenderedTelegramText {
+  return renderTelegramText([bold("Error:"), " ", detail]);
+}
+
+function formatCodexQuestion(question: AgentUserInputQuestion): RenderedTelegramText {
+  const parts: TelegramTextPart[] = [
+    bold(question.header),
+    "\n\n",
+    question.question,
   ];
   const options = question.options ?? [];
   if (!question.isSecret && options.length > 0) {
-    lines.push("", ...options.map((option) => `<b>${htmlEscape(option.label)}</b>${option.description ? ` - ${htmlEscape(option.description)}` : ""}`));
+    parts.push("\n\n");
+    for (const [index, option] of options.entries()) {
+      if (index > 0) parts.push("\n");
+      parts.push(bold(option.label));
+      if (option.description) parts.push(` - ${option.description}`);
+    }
   }
-  return lines.join("\n");
+  return renderTelegramText(parts);
 }
 
-function formatApproval(title: string, body: string): string {
-  return [`<b>${htmlEscape(title)}</b>`, "", htmlEscape(body)].join("\n");
+function formatApprovalMessage(title: string, body: string): RenderedTelegramText {
+  const parts: TelegramTextPart[] = [bold(title)];
+  const lines = body.split("\n").filter((line) => line.length > 0);
+  if (lines.length > 0) {
+    parts.push("\n\n");
+    for (const [index, line] of lines.entries()) {
+      if (index > 0) parts.push("\n");
+      if (line.startsWith("cwd: ")) {
+        parts.push("cwd: ", code(line.slice(5)));
+      } else if (index === lines.length - 1 && lines.length > 1) {
+        parts.push(code(line));
+      } else {
+        parts.push(line);
+      }
+    }
+  }
+  return renderTelegramText(parts);
 }
 
 function codexQuestionKeyboard(token: string, questionIndex: number, options: Array<{ label: string }>): InlineKeyboardMarkup {
@@ -1121,61 +1276,155 @@ function statusViewFromParts(
   };
 }
 
-function formatRelayHelp(): string {
-  return [
-    "<b>Relay commands</b>",
-    "",
-    "<code>/relay</code> - open the relay console",
-    "<code>/status</code> - show current Codex session status",
-    "<code>/init</code> - ask Codex to create AGENTS.md",
-    "<code>/review</code> - start a Codex review of uncommitted changes",
-    "<code>/compact</code> - compact the current Codex thread",
-    "<code>/model</code> - show the current and available models",
-    "<code>/clear</code> - start a fresh Codex thread for this workspace",
-    "<code>/resume</code> - choose a saved Codex thread to resume",
-    "",
-    "Unknown slash commands are forwarded to Codex as normal text.",
-  ].join("\n");
+function formatStatusMessage(status: StatusView): RenderedTelegramText {
+  if (!status.workspaceName || !status.workspacePath) {
+    return renderTelegramText([
+      bold("Status"),
+      "\n\nNo workspace selected.\nUse the console buttons to select or create one.",
+    ]);
+  }
+  const parts: TelegramTextPart[] = [
+    bold("Status"),
+    "\n\nWorkspace: ",
+    code(status.workspaceName),
+    "\nCodex: ",
+    status.running ? "running" : "stopped",
+    "\nWaiting: ",
+    formatWaiting(status),
+    "\nModel: ",
+    status.model ? code(status.model) : "unknown",
+  ];
+  if (status.reasoningEffort) parts.push(" / ", status.reasoningEffort);
+  parts.push("\nTokens: ", formatTokens(status));
+  if (status.recentOutputAt) parts.push("\nRecent output: ", new Date(status.recentOutputAt).toISOString());
+  if (status.recentError) parts.push("\nRecent error: ", status.recentError.trim().slice(0, 300));
+  return renderTelegramText(parts);
 }
 
-function formatModelInfo(status: AgentSessionStatus | undefined, models: AgentModelSummary[]): string {
-  const lines = [
-    "<b>Codex model</b>",
-    "",
-    `<b>Current:</b> ${status?.model ? `<code>${htmlEscape(status.model)}</code>` : "unknown"}`,
+function formatDetailsMessage(status: StatusView): RenderedTelegramText {
+  if (!status.workspaceName || !status.workspacePath) return formatStatusMessage(status);
+  const parts: TelegramTextPart[] = [
+    bold("Details"),
+    "\n\nWorkspace: ",
+    code(status.workspaceName),
+    "\nPath: ",
+    code(status.workspacePath),
+    "\nThread: ",
   ];
-  if (status?.reasoningEffort) lines.push(`<b>Reasoning:</b> <code>${htmlEscape(status.reasoningEffort)}</code>`);
+  const threadLabel = status.threadName || status.threadId;
+  parts.push(threadLabel ? code(threadLabel) : "none");
+  if (status.threadStatus) parts.push(` (${status.threadStatus})`);
+  parts.push(
+    "\nModel: ",
+    status.model ? code(status.model) : "unknown",
+    status.modelProvider ? ` / ${status.modelProvider}` : "",
+    "\nReasoning: ",
+    status.reasoningEffort ?? "unknown",
+    "\nApproval: ",
+    status.approvalPolicy ?? "unknown",
+    "\nSandbox: ",
+    status.sandboxPolicy ?? "unknown",
+    "\nWaiting: ",
+    formatWaiting(status),
+    "\nTokens: ",
+    formatTokens(status),
+  );
+  return renderTelegramText(parts);
+}
+
+function formatWaiting(status: StatusView): string {
+  const waiting = [
+    status.waitingForUserInput ? "user input" : undefined,
+    status.waitingForApproval ? "approval" : undefined,
+  ].filter(Boolean);
+  return waiting.length > 0 ? waiting.join(", ") : "no";
+}
+
+function formatTokens(status: StatusView): string {
+  const total = status.tokenUsage?.total?.totalTokens;
+  const context = status.contextWindow;
+  if (typeof total !== "number" && typeof context !== "number") return "unknown";
+  if (typeof total === "number" && typeof context === "number" && context > 0) {
+    const percent = Math.round((total / context) * 100);
+    return `${total}/${context} (${percent}%)`;
+  }
+  return typeof total === "number" ? String(total) : `context ${context}`;
+}
+
+function formatWorkspacesMessage(workspaces: Array<{ name: string; selected: boolean }>, pageIndex: number, totalPages: number): RenderedTelegramText {
+  if (workspaces.length === 0) {
+    return renderTelegramText([
+      bold("Workspaces"),
+      "\n\nNo workspaces.\nUse New workspace to create one.",
+    ]);
+  }
+  const parts: TelegramTextPart[] = [bold("Workspaces"), `\n\nPage ${pageIndex + 1}/${totalPages}`];
+  for (const workspace of workspaces) {
+    parts.push("\n", workspace.selected ? "Current: " : "- ", code(workspace.name));
+  }
+  return renderTelegramText(parts);
+}
+
+function formatRelayHelp(): RenderedTelegramText {
+  return renderTelegramText([
+    bold("Relay commands"),
+    "\n\n",
+    code("/relay"),
+    " - open the relay console\n",
+    code("/status"),
+    " - show current Codex session status\n",
+    code("/init"),
+    " - ask Codex to create AGENTS.md\n",
+    code("/review"),
+    " - start a Codex review\n",
+    code("/compact"),
+    " - compact the current thread\n",
+    code("/model"),
+    " - show current and available models\n",
+    code("/clear"),
+    " - start a fresh thread\n",
+    code("/resume"),
+    " - resume a saved thread\n\nUnknown slash commands are forwarded to Codex as normal text.",
+  ]);
+}
+
+function formatModelInfo(status: AgentSessionStatus | undefined, models: AgentModelSummary[]): RenderedTelegramText {
+  const parts: TelegramTextPart[] = [
+    bold("Codex model"),
+    "\n\nCurrent: ",
+    status?.model ? code(status.model) : "unknown",
+  ];
+  if (status?.reasoningEffort) parts.push("\nReasoning: ", code(status.reasoningEffort));
   if (models.length > 0) {
-    lines.push("", "<b>Available:</b>");
+    parts.push("\n\n", bold("Available:"));
     for (const model of models.slice(0, 12)) {
       const label = model.displayName ?? model.id;
       const current = status?.model && (status.model === model.id || status.model === model.model) ? " current" : "";
       const def = model.isDefault ? " default" : "";
-      lines.push(`- <code>${htmlEscape(model.id)}</code> ${htmlEscape(label)}${current}${def}`);
+      parts.push("\n- ", code(model.id), ` ${label}${current}${def}`);
     }
   } else {
-    lines.push("", "Model list is unavailable from this Codex app-server.");
+    parts.push("\n\nModel list is unavailable from this Codex app-server.");
   }
-  return lines.join("\n");
+  return renderTelegramText(parts);
 }
 
-function formatResumeThreads(threads: AgentThreadSummary[]): string {
+function formatResumeThreads(threads: AgentThreadSummary[], pageIndex: number, totalPages: number): RenderedTelegramText {
   if (threads.length === 0) {
-    return [
-      "<b>Resume Codex thread</b>",
-      "",
-      "No saved threads were found for the current workspace.",
-    ].join("\n");
+    return renderTelegramText([
+      bold("Resume Codex thread"),
+      "\n\nNo saved threads were found for the current workspace.",
+    ]);
   }
-  return [
-    "<b>Resume Codex thread</b>",
-    "",
-    ...threads.map((thread, index) => {
-      const title = thread.name || thread.preview || thread.id;
-      const updated = thread.updatedAt ? ` ${new Date(thread.updatedAt * 1000).toISOString()}` : "";
-      return `${index + 1}. <code>${htmlEscape(title.slice(0, 80))}</code>${updated}`;
-    }),
-  ].join("\n");
+  const start = pageIndex * LIST_PAGE_SIZE;
+  const items = threads.slice(start, start + LIST_PAGE_SIZE);
+  const parts: TelegramTextPart[] = [bold("Resume Codex thread"), `\n\nPage ${pageIndex + 1}/${totalPages}`];
+  for (const [index, thread] of items.entries()) {
+    const title = thread.name || thread.preview || thread.id;
+    const updated = thread.updatedAt ? ` ${new Date(thread.updatedAt * 1000).toISOString()}` : "";
+    parts.push(`\n${start + index + 1}. `, code(title.slice(0, 80)), updated);
+  }
+  return renderTelegramText(parts);
 }
 
 function resumeThreadButtonText(thread: AgentThreadSummary): string {
@@ -1187,9 +1436,22 @@ function consoleKeyboard(status: { workspaceName?: string; running?: boolean }):
   const rows: InlineKeyboardMarkup["inline_keyboard"] = [
     [
       { text: "Workspaces", callback_data: "ar:w" },
-      { text: "New workspace", callback_data: "ar:n" },
+      { text: "Details", callback_data: "ar:d" },
     ],
   ];
+  if (status.workspaceName) {
+    rows.push([
+      { text: "Resume", callback_data: "ar:rl:0" },
+      { text: "Review", callback_data: "ar:review" },
+      { text: "Compact", callback_data: "ar:compact" },
+    ]);
+    rows.push([
+      { text: "New", callback_data: "ar:n" },
+      { text: "Clear", callback_data: "ar:clear?" },
+    ]);
+  } else {
+    rows.push([{ text: "New", callback_data: "ar:n" }]);
+  }
   if (status.workspaceName && status.running) {
     rows.push([
       { text: "Stop", callback_data: "ar:x?" },
@@ -1201,21 +1463,83 @@ function consoleKeyboard(status: { workspaceName?: string; running?: boolean }):
   };
 }
 
-function workspacesKeyboard(workspaces: WorkspaceRecord[], selected?: string): InlineKeyboardMarkup {
+function workspacesKeyboard(workspaces: WorkspaceRecord[], selected: string | undefined, pageIndex: number, totalPages: number): InlineKeyboardMarkup {
   const rows = workspaces.map((workspace) => [{
-    text: `${workspace.name === selected ? "Current: " : "Use: "}${workspace.name}`,
+    text: `${workspace.name === selected ? "Current: " : "Use: "}${buttonLabel(workspace.name)}`,
     callback_data: workspaceCallbackData(workspace.name),
   }]);
+  if (totalPages > 1) {
+    rows.push([
+      { text: "Previous", callback_data: `ar:wl:${Math.max(0, pageIndex - 1)}` },
+      { text: "Next", callback_data: `ar:wl:${Math.min(totalPages - 1, pageIndex + 1)}` },
+    ]);
+  }
 
   return {
     inline_keyboard: [
       ...rows,
       [
-        { text: "New workspace", callback_data: "ar:n" },
+        { text: "New", callback_data: "ar:n" },
         { text: "Refresh", callback_data: "ar:s" },
       ],
     ],
   };
+}
+
+function resumeThreadsKeyboard(
+  chatId: ChatId,
+  workspace: WorkspaceRecord,
+  threads: AgentThreadSummary[],
+  pageIndex: number,
+  remember: (chatId: ChatId, workspace: WorkspaceRecord, thread: AgentThreadSummary) => string,
+): InlineKeyboardMarkup {
+  const totalPages = Math.max(1, Math.ceil(threads.length / LIST_PAGE_SIZE));
+  const start = pageIndex * LIST_PAGE_SIZE;
+  const rows = threads.slice(start, start + LIST_PAGE_SIZE).map((thread) => {
+    const token = remember(chatId, workspace, thread);
+    return [{ text: resumeThreadButtonText(thread), callback_data: `ar:r:${token}` }];
+  });
+  if (totalPages > 1) {
+    rows.push([
+      { text: "Previous", callback_data: `ar:rl:${Math.max(0, pageIndex - 1)}` },
+      { text: "Next", callback_data: `ar:rl:${Math.min(totalPages - 1, pageIndex + 1)}` },
+    ]);
+  }
+  rows.push([{ text: "Refresh", callback_data: "ar:rl:0" }]);
+  return { inline_keyboard: rows.length > 0 ? rows : [[{ text: "Refresh", callback_data: "ar:s" }]] };
+}
+
+function clearConfirmKeyboard(): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [[
+      { text: "Start new thread", callback_data: "ar:clear!" },
+      { text: "Cancel", callback_data: "ar:c" },
+    ]],
+  };
+}
+
+function paginateWorkspaces(workspaces: WorkspaceRecord[], selected: string | undefined, rawPageIndex: number): { items: WorkspaceRecord[]; pageIndex: number; totalPages: number } {
+  const sorted = [...workspaces].sort((left, right) => {
+    if (left.name === selected) return -1;
+    if (right.name === selected) return 1;
+    return left.name.localeCompare(right.name);
+  });
+  const totalPages = Math.max(1, Math.ceil(sorted.length / LIST_PAGE_SIZE));
+  const pageIndex = clampPage(rawPageIndex, totalPages);
+  return {
+    items: sorted.slice(pageIndex * LIST_PAGE_SIZE, pageIndex * LIST_PAGE_SIZE + LIST_PAGE_SIZE),
+    pageIndex,
+    totalPages,
+  };
+}
+
+function clampPage(value: number, totalPages: number): number {
+  if (!Number.isInteger(value)) return 0;
+  return Math.max(0, Math.min(totalPages - 1, value));
+}
+
+function buttonLabel(value: string): string {
+  return value.length > 40 ? `${value.slice(0, 37)}...` : value;
 }
 
 function workspaceCallbackData(name: string): string {

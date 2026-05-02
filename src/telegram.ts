@@ -140,6 +140,7 @@ export class TelegramAdapter implements IMAdapter {
           disable_web_page_preview: options.disableWebPagePreview ?? true,
           ...(options.parseMode ? { parse_mode: options.parseMode } : {}),
           ...(chunk.entities.length > 0 ? { entities: chunk.entities } : {}),
+          ...(replyParametersForOptions(options, index === 0)),
           ...(replyMarkupForOptions(options, index === chunks.length - 1)),
         });
         lastMessageId = result?.message_id ?? lastMessageId;
@@ -203,6 +204,7 @@ export class TelegramAdapter implements IMAdapter {
       return {
         kind: "message",
         id: String(message.message_id),
+        messageId: message.message_id,
         chatId: message.chat.id,
         userId: message.from.id,
         text: message.text,
@@ -292,4 +294,14 @@ function replyMarkupForOptions(options: SendMessageOptions, include: boolean): {
   if (options.forceReply) return { reply_markup: { force_reply: true, selective: true } };
   if (options.replyMarkup) return { reply_markup: options.replyMarkup };
   return {};
+}
+
+function replyParametersForOptions(options: SendMessageOptions, include: boolean): { reply_parameters?: unknown } {
+  if (!include || !options.replyToMessageId) return {};
+  return {
+    reply_parameters: {
+      message_id: options.replyToMessageId,
+      allow_sending_without_reply: true,
+    },
+  };
 }
