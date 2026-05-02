@@ -1,4 +1,4 @@
-import type { TelegramMessageEntity } from "./types.ts";
+import type { AgentTokenUsage, TelegramMessageEntity } from "./types.ts";
 
 const ANSI_PATTERN = /\x1B(?:\][^\x07\x1B]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g;
 const CONTROL_PATTERN = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
@@ -439,6 +439,19 @@ export interface StatusView {
   running?: boolean;
   recentOutputAt?: number;
   recentError?: string;
+  threadId?: string;
+  threadName?: string;
+  threadStatus?: string;
+  model?: string;
+  modelProvider?: string;
+  reasoningEffort?: string;
+  approvalPolicy?: string;
+  approvalsReviewer?: string;
+  sandboxPolicy?: string;
+  tokenUsage?: AgentTokenUsage;
+  contextWindow?: number;
+  waitingForUserInput?: boolean;
+  waitingForApproval?: boolean;
 }
 
 export interface WorkspaceView {
@@ -461,10 +474,50 @@ export function formatStatus(status: StatusView): string {
     `<b>Workspace:</b> <code>${htmlEscape(status.workspaceName)}</code>`,
     `<b>Path:</b> <code>${htmlEscape(status.workspacePath)}</code>`,
     `<b>Codex:</b> ${status.running ? "running" : "stopped"}`,
+    `<b>Thread:</b> ${formatThreadLine(status)}`,
+    `<b>Model:</b> ${formatModelLine(status)}`,
+    `<b>Approval:</b> ${status.approvalPolicy ? htmlEscape(status.approvalPolicy) : "unknown"}`,
+    `<b>Sandbox:</b> ${status.sandboxPolicy ? htmlEscape(status.sandboxPolicy) : "unknown"}`,
+    `<b>Waiting:</b> ${formatWaiting(status)}`,
+    `<b>Tokens:</b> ${formatTokens(status)}`,
     `<b>Recent output:</b> ${status.recentOutputAt ? htmlEscape(new Date(status.recentOutputAt).toISOString()) : "none"}`,
   ];
   if (status.recentError) lines.push(`<b>Recent error:</b> ${htmlEscape(status.recentError.trim().slice(0, 500))}`);
   return lines.join("\n");
+}
+
+function formatThreadLine(status: StatusView): string {
+  if (!status.threadId && !status.threadName) return "none";
+  const label = status.threadName || status.threadId || "unknown";
+  const state = status.threadStatus ? ` (${status.threadStatus})` : "";
+  return `<code>${htmlEscape(label)}</code>${state}`;
+}
+
+function formatModelLine(status: StatusView): string {
+  if (!status.model) return "unknown";
+  const parts = [`<code>${htmlEscape(status.model)}</code>`];
+  if (status.reasoningEffort) parts.push(`reasoning ${htmlEscape(status.reasoningEffort)}`);
+  if (status.modelProvider) parts.push(htmlEscape(status.modelProvider));
+  return parts.join(" / ");
+}
+
+function formatWaiting(status: StatusView): string {
+  const waiting = [
+    status.waitingForUserInput ? "user input" : undefined,
+    status.waitingForApproval ? "approval" : undefined,
+  ].filter(Boolean);
+  return waiting.length > 0 ? waiting.join(", ") : "no";
+}
+
+function formatTokens(status: StatusView): string {
+  const total = status.tokenUsage?.total?.totalTokens;
+  const context = status.contextWindow;
+  if (typeof total !== "number" && typeof context !== "number") return "unknown";
+  if (typeof total === "number" && typeof context === "number" && context > 0) {
+    const percent = Math.round((total / context) * 100);
+    return `${total}/${context} (${percent}%)`;
+  }
+  return typeof total === "number" ? String(total) : `context ${context}`;
 }
 
 export function formatWorkspaces(workspaces: WorkspaceView[]): string {

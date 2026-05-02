@@ -6,7 +6,10 @@ import type {
   AgentApprovalKind,
   AgentApprovalRequestEvent,
   AgentDriver,
+  AgentModelSummary,
   AgentOutputEvent,
+  AgentSessionStatus,
+  AgentThreadSummary,
   AgentUserInputQuestion,
   AgentUserInputRequestEvent,
   ChatId,
@@ -17,7 +20,7 @@ import type {
 } from "./types.ts";
 import type { Store } from "./store.ts";
 import { createWorkspace, discoverWorkspaceDirectories, isRealDirectory, resolveWorkspacePath, validateWorkspaceName, workspaceDirectoryExists } from "./workspace.ts";
-import { formatError, formatStatus, formatWorkspaces, htmlEscape, renderCodexMarkdownForTelegram, splitRenderedForTelegram, type RenderedTelegramText } from "./text.ts";
+import { formatError, formatStatus, formatWorkspaces, htmlEscape, renderCodexMarkdownForTelegram, splitRenderedForTelegram, type RenderedTelegramText, type StatusView } from "./text.ts";
 import { noopLogger, type Logger } from "./logger.ts";
 
 const CALLBACK_PREFIX = "ar:";
@@ -29,6 +32,11 @@ const STREAM_FLUSH_CHARS = 3400;
 const CODEX_PROMPT_TTL_MS = 30 * 60 * 1000;
 const PAGE_MAX_CHARS = 3200;
 const PAGED_OUTPUT_TTL_MS = 24 * 60 * 60 * 1000;
+const RESUME_THREAD_TTL_MS = 10 * 60 * 1000;
+const INIT_PROMPT = [
+  "Create an AGENTS.md file for this workspace.",
+  "Inspect the project structure first, then write concise, practical instructions that future Codex agents should follow in this repository.",
+].join(" ");
 
 export interface RouterDeps {
   config: AppConfig;
@@ -87,6 +95,8 @@ export class MessageRouter {
         await this.answerCodexFreeText(message.chatId, message.replyToMessageId!, text);
       } else if (command === "/relay" || command === "/start") {
         await this.renderConsole(message.chatId);
+      } else if (command && await this.handleSlashCommand(message.chatId, command, text)) {
+        return;
       } else {
         await this.forwardToAgent(message.chatId, text);
       }
@@ -221,6 +231,10 @@ export class MessageRouter {
       await this.renderPagedOutputCallback(message, payload);
       return;
     }
+    if (payload.startsWith("r:")) {
+      await this.resumeThreadCallback(message, payload);
+      return;
+    }
     if (payload === "x?") {
       await this.renderCallbackPage(message, [
         "<b>Stop Codex session?</b>",
@@ -243,6 +257,7 @@ export class MessageRouter {
       const workspace = this.requireWorkspace(name);
       this.deps.store.bindChat(message.chatId, workspace.name);
       this.logger.info("router.workspace_selected", { chat_id: message.chatId, workspace: workspace.name, path: workspace.path });
+      await this.ensureAgentStarted(message.chatId, workspace);
       await this.renderStatusCallback(message);
       return;
     }
@@ -251,6 +266,7 @@ export class MessageRouter {
       const workspace = this.requireWorkspace(name);
       this.deps.store.bindChat(message.chatId, workspace.name);
       this.logger.info("router.workspace_selected", { chat_id: message.chatId, workspace: workspace.name, path: workspace.path });
+      await this.ensureAgentStarted(message.chatId, workspace);
       await this.renderStatusCallback(message);
       return;
     }
@@ -355,6 +371,7 @@ export class MessageRouter {
     this.deps.store.bindChat(chatId, name);
     this.deps.store.deletePendingPrompt(chatId, promptMessageId);
     this.logger.info(existed ? "router.workspace_existing_selected" : "router.workspace_created", { chat_id: chatId, workspace: name, path });
+    await this.ensureAgentStarted(chatId, { name, path, createdAt: Date.now() });
     await this.deps.adapter.sendMessage(chatId, `Workspace <code>${htmlEscape(name)}</code> ${existed ? "selected" : "created and selected"}.`, {
       ...HTML,
       replyMarkup: consoleKeyboard(this.statusView(chatId)),
@@ -370,13 +387,7 @@ export class MessageRouter {
     }
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
     const key = sessionKey(chatId, workspace.name);
-    if (!this.deps.agent.getStatus(key)) {
-      this.logger.info("router.session_starting", { chat_id: chatId, workspace: workspace.name, session_key: key });
-      const previous = this.deps.store.getSession(key);
-      const status = await this.deps.agent.start({ chatId, workspaceName: workspace.name, workspacePath: workspace.path, threadId: previous?.thread_id ?? undefined });
-      this.deps.store.markSessionStarted(key, chatId, workspace.name, Date.now(), status.threadId);
-      this.logger.info("router.session_started", { chat_id: chatId, workspace: workspace.name, session_key: key });
-    }
+    await this.ensureAgentStarted(chatId, workspace);
     await this.finalizeSessionOutput(key);
     await this.deps.adapter.sendChatAction(chatId, "typing").catch((error) => {
       this.logger.debug("router.chat_action_failed", {
@@ -404,6 +415,119 @@ export class MessageRouter {
       createdAt: Date.now(),
     });
     await this.deps.agent.send(key, text);
+  }
+
+  private async ensureAgentStarted(chatId: ChatId, workspace: WorkspaceRecord, threadId?: string): Promise<AgentSessionStatus> {
+    if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
+    const key = sessionKey(chatId, workspace.name);
+    const existing = this.deps.agent.getStatus(key);
+    if (existing?.running && !threadId) return existing;
+
+    this.logger.info("router.session_starting", { chat_id: chatId, workspace: workspace.name, session_key: key, thread_id: threadId });
+    const previous = threadId ? undefined : this.deps.store.getSession(key);
+    const status = await this.deps.agent.start({
+      chatId,
+      workspaceName: workspace.name,
+      workspacePath: workspace.path,
+      threadId: threadId ?? previous?.thread_id ?? undefined,
+    });
+    this.deps.store.markSessionStarted(key, chatId, workspace.name, Date.now(), status.threadId);
+    this.logger.info("router.session_started", { chat_id: chatId, workspace: workspace.name, session_key: key, thread_id: status.threadId });
+    return status;
+  }
+
+  private async handleSlashCommand(chatId: ChatId, command: string, text: string): Promise<boolean> {
+    switch (command) {
+      case "/help":
+        await this.deps.adapter.sendMessage(chatId, formatRelayHelp(), HTML);
+        return true;
+      case "/status":
+        await this.renderConsole(chatId);
+        return true;
+      case "/init":
+        await this.forwardToAgent(chatId, INIT_PROMPT);
+        return true;
+      case "/review":
+        await this.runBuiltin(chatId, "review");
+        return true;
+      case "/compact":
+        await this.runBuiltin(chatId, "compact");
+        return true;
+      case "/model":
+        await this.renderModelInfo(chatId);
+        return true;
+      case "/clear":
+        await this.clearThread(chatId);
+        return true;
+      case "/resume":
+        await this.renderResumeThreads(chatId);
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  private async runBuiltin(chatId: ChatId, command: "review" | "compact"): Promise<void> {
+    const workspace = this.requireCurrentWorkspace(chatId);
+    const status = await this.ensureAgentStarted(chatId, workspace);
+    if (!this.deps.agent.runBuiltinCommand) throw new Error("Codex app-server does not support this built-in command.");
+    await this.finalizeSessionOutput(status.sessionKey);
+    const result = await this.deps.agent.runBuiltinCommand(status.sessionKey, command);
+    await this.deps.adapter.sendMessage(chatId, `<b>${htmlEscape(result.message)}</b>`, HTML);
+  }
+
+  private async renderModelInfo(chatId: ChatId): Promise<void> {
+    const workspace = this.currentWorkspace(chatId);
+    const status = workspace ? this.deps.agent.getStatus(sessionKey(chatId, workspace.name)) : undefined;
+    const models = this.deps.agent.listModels ? await this.deps.agent.listModels() : [];
+    await this.deps.adapter.sendMessage(chatId, formatModelInfo(status, models), HTML);
+  }
+
+  private async clearThread(chatId: ChatId): Promise<void> {
+    const workspace = this.requireCurrentWorkspace(chatId);
+    const key = sessionKey(chatId, workspace.name);
+    await this.finalizeSessionOutput(key);
+    await this.deps.agent.stop(key);
+    this.deps.store.markSessionStopped(key);
+    this.deps.store.clearSessionThreadId(key);
+    await this.ensureAgentStarted(chatId, workspace);
+    await this.deps.adapter.sendMessage(chatId, "<b>Started a new Codex thread.</b>", {
+      ...HTML,
+      replyMarkup: consoleKeyboard(this.statusView(chatId)),
+    });
+  }
+
+  private async renderResumeThreads(chatId: ChatId): Promise<void> {
+    const workspace = this.requireCurrentWorkspace(chatId);
+    if (!this.deps.agent.listThreads) throw new Error("Codex app-server does not support thread listing.");
+    const threads = await this.deps.agent.listThreads({ workspacePath: workspace.path, limit: 10 });
+    const rows = threads.map((thread) => {
+      const token = this.rememberResumeThread(chatId, workspace, thread);
+      return [{ text: resumeThreadButtonText(thread), callback_data: `ar:r:${token}` }];
+    });
+    await this.deps.adapter.sendMessage(chatId, formatResumeThreads(threads), {
+      ...HTML,
+      replyMarkup: { inline_keyboard: rows.length > 0 ? rows : [[{ text: "Refresh", callback_data: "ar:s" }]] },
+    });
+  }
+
+  private async resumeThreadCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
+    const token = payload.slice("r:".length);
+    const entry = this.resumeThreads.get(token);
+    if (!entry || entry.chatId !== message.chatId || entry.expiresAt < Date.now()) {
+      this.resumeThreads.delete(token);
+      throw new Error("Resume option expired. Run /resume again.");
+    }
+    const workspace = this.requireCurrentWorkspace(message.chatId);
+    if (workspace.name !== entry.workspaceName || workspace.path !== entry.workspacePath) {
+      throw new Error("Workspace changed. Run /resume again.");
+    }
+    const key = sessionKey(message.chatId, workspace.name);
+    await this.finalizeSessionOutput(key);
+    await this.deps.agent.stop(key);
+    this.deps.store.markSessionStopped(key);
+    const status = await this.ensureAgentStarted(message.chatId, workspace, entry.threadId);
+    await this.renderCallbackPage(message, `<b>Resumed thread:</b> <code>${htmlEscape(status.threadName ?? entry.threadName ?? entry.threadId)}</code>`, consoleKeyboard(this.statusView(message.chatId)));
   }
 
   private currentWorkspace(chatId: ChatId): WorkspaceRecord | undefined {
@@ -445,25 +569,35 @@ export class MessageRouter {
     throw new Error("Workspace selection expired. Refresh Workspaces and try again.");
   }
 
+  private rememberResumeThread(chatId: ChatId, workspace: WorkspaceRecord, thread: AgentThreadSummary): string {
+    for (const [token, entry] of this.resumeThreads) {
+      if (entry.expiresAt < Date.now()) this.resumeThreads.delete(token);
+    }
+    const token = shortToken();
+    this.resumeThreads.set(token, {
+      chatId,
+      workspaceName: workspace.name,
+      workspacePath: workspace.path,
+      threadId: thread.id,
+      threadName: thread.name,
+      expiresAt: Date.now() + RESUME_THREAD_TTL_MS,
+    });
+    return token;
+  }
+
   private appendSystem(chatId: ChatId, text: string): void {
     const workspace = this.currentWorkspace(chatId);
     if (!workspace) return;
     this.deps.store.appendTranscript({ chatId, workspaceName: workspace.name, role: "system", text, createdAt: Date.now() });
   }
 
-  private statusView(chatId: ChatId): { workspaceName?: string; workspacePath?: string; running?: boolean; recentOutputAt?: number; recentError?: string } {
+  private statusView(chatId: ChatId): StatusView {
     const workspace = this.currentWorkspace(chatId);
     if (!workspace) return {};
     const status = this.deps.agent.getStatus(sessionKey(chatId, workspace.name));
     const recentOutput = this.deps.store.latestTranscriptEvent(chatId, workspace.name, "agent");
     const recentError = this.deps.store.latestTranscriptEvent(chatId, workspace.name, "system");
-    return {
-      workspaceName: workspace.name,
-      workspacePath: workspace.path,
-      running: Boolean(status?.running),
-      recentOutputAt: recentOutput?.createdAt,
-      recentError: recentError?.text,
-    };
+    return statusViewFromParts(workspace, status, recentOutput?.createdAt, recentError?.text);
   }
 
   private readonly liveOutput = new Map<string, {
@@ -479,6 +613,15 @@ export class MessageRouter {
   }>();
 
   private nextOutputSegmentId = 1;
+
+  private readonly resumeThreads = new Map<string, {
+    chatId: ChatId;
+    workspaceName: string;
+    workspacePath: string;
+    threadId: string;
+    threadName?: string;
+    expiresAt: number;
+  }>();
 
   private readonly codexRequests = new Map<string, {
     sessionKey: string;
@@ -948,6 +1091,96 @@ function approvalResponse(kind: AgentApprovalKind, approved: boolean, params: un
     return approved ? { permissions: record.permissions ?? {}, scope: "turn" } : { permissions: {}, scope: "turn" };
   }
   return { decision: approved ? "accept" : "decline" };
+}
+
+function statusViewFromParts(
+  workspace: WorkspaceRecord,
+  status: AgentSessionStatus | undefined,
+  recentOutputAt: number | undefined,
+  recentError: string | undefined,
+) {
+  return {
+    workspaceName: workspace.name,
+    workspacePath: workspace.path,
+    running: Boolean(status?.running),
+    recentOutputAt,
+    recentError: status?.recentError ?? recentError,
+    threadId: status?.threadId,
+    threadName: status?.threadName,
+    threadStatus: status?.threadStatus,
+    model: status?.model,
+    modelProvider: status?.modelProvider,
+    reasoningEffort: status?.reasoningEffort,
+    approvalPolicy: status?.approvalPolicy,
+    approvalsReviewer: status?.approvalsReviewer,
+    sandboxPolicy: status?.sandboxPolicy,
+    tokenUsage: status?.tokenUsage,
+    contextWindow: status?.contextWindow,
+    waitingForApproval: status?.waitingForApproval,
+    waitingForUserInput: status?.waitingForUserInput,
+  };
+}
+
+function formatRelayHelp(): string {
+  return [
+    "<b>Relay commands</b>",
+    "",
+    "<code>/relay</code> - open the relay console",
+    "<code>/status</code> - show current Codex session status",
+    "<code>/init</code> - ask Codex to create AGENTS.md",
+    "<code>/review</code> - start a Codex review of uncommitted changes",
+    "<code>/compact</code> - compact the current Codex thread",
+    "<code>/model</code> - show the current and available models",
+    "<code>/clear</code> - start a fresh Codex thread for this workspace",
+    "<code>/resume</code> - choose a saved Codex thread to resume",
+    "",
+    "Unknown slash commands are forwarded to Codex as normal text.",
+  ].join("\n");
+}
+
+function formatModelInfo(status: AgentSessionStatus | undefined, models: AgentModelSummary[]): string {
+  const lines = [
+    "<b>Codex model</b>",
+    "",
+    `<b>Current:</b> ${status?.model ? `<code>${htmlEscape(status.model)}</code>` : "unknown"}`,
+  ];
+  if (status?.reasoningEffort) lines.push(`<b>Reasoning:</b> <code>${htmlEscape(status.reasoningEffort)}</code>`);
+  if (models.length > 0) {
+    lines.push("", "<b>Available:</b>");
+    for (const model of models.slice(0, 12)) {
+      const label = model.displayName ?? model.id;
+      const current = status?.model && (status.model === model.id || status.model === model.model) ? " current" : "";
+      const def = model.isDefault ? " default" : "";
+      lines.push(`- <code>${htmlEscape(model.id)}</code> ${htmlEscape(label)}${current}${def}`);
+    }
+  } else {
+    lines.push("", "Model list is unavailable from this Codex app-server.");
+  }
+  return lines.join("\n");
+}
+
+function formatResumeThreads(threads: AgentThreadSummary[]): string {
+  if (threads.length === 0) {
+    return [
+      "<b>Resume Codex thread</b>",
+      "",
+      "No saved threads were found for the current workspace.",
+    ].join("\n");
+  }
+  return [
+    "<b>Resume Codex thread</b>",
+    "",
+    ...threads.map((thread, index) => {
+      const title = thread.name || thread.preview || thread.id;
+      const updated = thread.updatedAt ? ` ${new Date(thread.updatedAt * 1000).toISOString()}` : "";
+      return `${index + 1}. <code>${htmlEscape(title.slice(0, 80))}</code>${updated}`;
+    }),
+  ].join("\n");
+}
+
+function resumeThreadButtonText(thread: AgentThreadSummary): string {
+  const value = thread.name || thread.preview || thread.id;
+  return value.length > 40 ? `${value.slice(0, 37)}...` : value;
 }
 
 function consoleKeyboard(status: { workspaceName?: string; running?: boolean }): InlineKeyboardMarkup {

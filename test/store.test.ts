@@ -74,6 +74,8 @@ describe("store", () => {
     expect(store.getSession("123:demo")?.thread_id).toBe("thread-1");
     store.markSessionStarted("123:demo", 123, "demo", 5);
     expect(store.getSession("123:demo")?.thread_id).toBe("thread-1");
+    store.clearSessionThreadId("123:demo");
+    expect(store.getSession("123:demo")?.thread_id).toBeNull();
     store.close();
   });
 

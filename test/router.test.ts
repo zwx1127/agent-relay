@@ -7,7 +7,7 @@ import type { AppConfig } from "../src/config.ts";
 import { MessageRouter } from "../src/router.ts";
 import { Store } from "../src/store.ts";
 import { TextLogger, type LogLevel } from "../src/logger.ts";
-import type { AgentDriver, AgentSessionStatus, ChatId, EditMessageTextOptions, SendMessageOptions } from "../src/types.ts";
+import type { AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSummary, AgentSessionStatus, AgentThreadListOptions, AgentThreadSummary, ChatId, EditMessageTextOptions, SendMessageOptions } from "../src/types.ts";
 
 class FakeAdapter {
   sent: Array<{ chatId: ChatId; text: string; options?: SendMessageOptions; messageId?: number }> = [];
@@ -40,8 +40,12 @@ class FakeAgent implements AgentDriver {
   sent: Array<{ key: string; text: string }> = [];
   stopped: string[] = [];
   responses: Array<{ key: string; requestId: string | number; result: unknown }> = [];
+  builtins: Array<{ key: string; command: AgentBuiltinCommand }> = [];
+  threadLists: AgentThreadListOptions[] = [];
+  threads: AgentThreadSummary[] = [];
+  models: AgentModelSummary[] = [];
 
-  async start(options: { chatId: ChatId; workspaceName: string; workspacePath: string }): Promise<AgentSessionStatus> {
+  async start(options: { chatId: ChatId; workspaceName: string; workspacePath: string; threadId?: string }): Promise<AgentSessionStatus> {
     const key = sessionKey(options.chatId, options.workspaceName);
     const status = {
       sessionKey: key,
@@ -50,6 +54,7 @@ class FakeAgent implements AgentDriver {
       workspacePath: options.workspacePath,
       running: true,
       startedAt: 1,
+      threadId: options.threadId ?? `thread-${this.statuses.size + 1}`,
     };
     this.statuses.set(key, status);
     return status;
@@ -70,6 +75,20 @@ class FakeAgent implements AgentDriver {
 
   async respond(key: string, requestId: string | number, result: unknown): Promise<void> {
     this.responses.push({ key, requestId, result });
+  }
+
+  async runBuiltinCommand(key: string, command: AgentBuiltinCommand): Promise<AgentBuiltinResult> {
+    this.builtins.push({ key, command });
+    return { message: command === "review" ? "Review started." : "Compaction started." };
+  }
+
+  async listThreads(options: AgentThreadListOptions): Promise<AgentThreadSummary[]> {
+    this.threadLists.push(options);
+    return this.threads;
+  }
+
+  async listModels(): Promise<AgentModelSummary[]> {
+    return this.models;
   }
 }
 
@@ -157,16 +176,16 @@ describe("router", () => {
     expect(logLines.join("\n")).toContain('message_text="secret prompt"');
   });
 
-  test("non-reserved slash text is forwarded to codex", async () => {
+  test("unknown slash text is forwarded to codex", async () => {
     const { router, store, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
     store.bindChat(1, "demo");
 
-    await router.handle(textMessage("/status"));
+    await router.handle(textMessage("/unknown"));
 
-    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "/status" });
+    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "/unknown" });
   });
 
   test("console no longer exposes raw tail action", async () => {
@@ -302,6 +321,82 @@ describe("router", () => {
     expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toContain("ar:n");
   });
 
+  test("supported slash commands are handled without forwarding slash text", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    agent.models = [{ id: "gpt-5.2", displayName: "GPT-5.2", isDefault: true }];
+
+    await router.handle(textMessage("/help"));
+    await router.handle(textMessage("/status"));
+    await router.handle(textMessage("/review"));
+    await router.handle(textMessage("/compact"));
+    await router.handle(textMessage("/model"));
+
+    expect(agent.sent).toEqual([]);
+    expect(agent.builtins).toEqual([
+      { key: "1:demo", command: "review" },
+      { key: "1:demo", command: "compact" },
+    ]);
+    expect(adapter.sent.some((message) => message.text.includes("<b>Relay commands</b>"))).toBe(true);
+    expect(adapter.sent.some((message) => message.text.includes("<b>Codex model</b>"))).toBe(true);
+  });
+
+  test("/init sends an ordinary AGENTS.md creation turn", async () => {
+    const { router, store, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await router.handle(textMessage("/init"));
+
+    expect(agent.sent).toHaveLength(1);
+    expect(agent.sent[0]?.text).toContain("Create an AGENTS.md");
+    expect(agent.sent[0]?.text).not.toBe("/init");
+  });
+
+  test("/clear stops current session, clears stored thread id, and starts fresh", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    store.markSessionStarted("1:demo", 1, "demo", 1, "old-thread");
+    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path, threadId: "old-thread" });
+
+    await router.handle(textMessage("/clear"));
+
+    expect(agent.stopped).toEqual(["1:demo"]);
+    expect(store.getSession("1:demo")?.thread_id).not.toBe("old-thread");
+    expect(adapter.sent.at(-1)?.text).toContain("Started a new Codex thread");
+  });
+
+  test("/resume lists workspace threads and callback resumes selected thread", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path, threadId: "current-thread" });
+    agent.threads = [{ id: "saved-thread", name: "Saved work", cwd: path, updatedAt: 1 }];
+
+    await router.handle(textMessage("/resume"));
+
+    expect(agent.threadLists).toEqual([{ workspacePath: path, limit: 10 }]);
+    const button = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard[0]?.[0];
+    expect(button?.callback_data).toMatch(/^ar:r:/);
+
+    await router.handle(callbackMessage(button!.callback_data, 7, "resume-cb", adapter.sent.at(-1)?.messageId));
+
+    expect(agent.stopped).toEqual(["1:demo"]);
+    expect(agent.getStatus("1:demo")?.threadId).toBe("saved-thread");
+    expect(store.getSession("1:demo")?.thread_id).toBe("saved-thread");
+    expect(adapter.edited.at(-1)?.text).toContain("Resumed thread");
+  });
+
   test("console escapes dynamic workspace values", async () => {
     const { router, store, adapter } = fixture();
     store.upsertWorkspace({ name: "demo", path: "/tmp/<demo>&", createdAt: 1 });
@@ -323,7 +418,7 @@ describe("router", () => {
   });
 
   test("new workspace callback uses ForceReply and reply creates binding", async () => {
-    const { router, store, adapter, root } = fixture();
+    const { router, store, adapter, agent, root } = fixture();
 
     await router.handle(callbackMessage("ar:n"));
     expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
@@ -332,12 +427,13 @@ describe("router", () => {
     await router.handle(textMessage("demo", 7, promptId));
 
     expect(store.getBinding(1)?.workspaceName).toBe("demo");
+    expect(agent.getStatus("1:demo")?.running).toBe(true);
     expect(adapter.sent.at(-1)?.text).toContain("created and selected");
     expect(existsSync(join(root, "demo", ".git"))).toBe(true);
   });
 
   test("new workspace prompt selects an existing directory without git init", async () => {
-    const { router, store, adapter, root } = fixture();
+    const { router, store, adapter, agent, root } = fixture();
     const workspaceName = "客户 repo";
     mkdirSync(join(root, workspaceName));
 
@@ -347,13 +443,14 @@ describe("router", () => {
 
     expect(store.getBinding(1)?.workspaceName).toBe(workspaceName);
     expect(store.getWorkspace(workspaceName)?.path).toBe(join(root, workspaceName));
+    expect(agent.getStatus(`1:${workspaceName}`)?.running).toBe(true);
     expect(adapter.sent.at(-1)?.text).toContain("selected");
     expect(adapter.sent.at(-1)?.text).not.toContain("created and selected");
     expect(existsSync(join(root, workspaceName, ".git"))).toBe(false);
   });
 
-  test("workspace callback switches binding and edits status", async () => {
-    const { router, store, adapter, root } = fixture();
+  test("workspace callback switches binding, auto-starts, and edits status", async () => {
+    const { router, store, adapter, agent, root } = fixture();
     const first = join(root, "first");
     const second = join(root, "second");
     mkdirSync(first);
@@ -365,6 +462,7 @@ describe("router", () => {
     await router.handle(callbackMessage("ar:u:second"));
 
     expect(store.getBinding(1)?.workspaceName).toBe("second");
+    expect(agent.getStatus("1:second")?.running).toBe(true);
     expect(adapter.edited.at(-1)?.text).toContain("<code>second</code>");
     expect(adapter.edited.at(-1)?.options.messageId).toBe(42);
     expect(adapter.answered).toEqual([{ callbackQueryId: "cb1", text: undefined }]);

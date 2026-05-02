@@ -3,10 +3,16 @@ import { createInterface } from "node:readline";
 import { BaseAgentDriver, sessionKey } from "./agent.ts";
 import { noopLogger, type Logger } from "./logger.ts";
 import type {
+  AgentBuiltinCommand,
+  AgentBuiltinResult,
   AgentApprovalKind,
   AgentExitHandler,
+  AgentModelSummary,
   AgentOutputHandler,
   AgentSessionStatus,
+  AgentThreadListOptions,
+  AgentThreadSummary,
+  AgentTokenBreakdown,
   AgentUserInputQuestion,
   StartAgentOptions,
 } from "./types.ts";
@@ -19,6 +25,8 @@ export interface CodexDriverOptions {
   codexBin: string;
   sandbox: string;
   approval: string;
+  developerInstructions?: string;
+  baseInstructions?: string;
 }
 
 interface JsonRpcRequest {
@@ -105,10 +113,13 @@ export class CodexDriver extends BaseAgentDriver {
       approvalPolicy: this.options.approval,
       approvalsReviewer: "user",
       sandbox: this.options.sandbox,
+      ...(this.options.developerInstructions ? { developerInstructions: this.options.developerInstructions } : {}),
+      ...(this.options.baseInstructions ? { baseInstructions: this.options.baseInstructions } : {}),
     });
     const threadId = getThreadId(result) ?? options.threadId;
     if (!threadId) throw new Error("Codex app-server did not return a thread id.");
     status.threadId = threadId;
+    applySessionMetadata(status, result);
     this.threadToSession.set(threadId, key);
     this.sessions.set(key, { status });
 
@@ -202,6 +213,46 @@ export class CodexDriver extends BaseAgentDriver {
     await this.writeMessage({ id: requestId, result });
   }
 
+  async runBuiltinCommand(key: string, command: AgentBuiltinCommand): Promise<AgentBuiltinResult> {
+    const running = this.requireRunningSession(key);
+    if (command === "review") {
+      const result = await this.request("review/start", {
+        threadId: running.status.threadId,
+        target: { type: "uncommittedChanges" },
+        delivery: "inline",
+      });
+      updateActiveTurnFromResult(running, result);
+      return {
+        message: "Review started.",
+        threadId: getString(asRecord(result), "reviewThreadId") ?? running.status.threadId,
+        turnId: getTurnId(result),
+      };
+    }
+
+    const result = await this.request("thread/compact/start", { threadId: running.status.threadId });
+    updateActiveTurnFromResult(running, result);
+    return { message: "Compaction started.", threadId: running.status.threadId, turnId: getTurnId(result) };
+  }
+
+  async listThreads(options: AgentThreadListOptions): Promise<AgentThreadSummary[]> {
+    await this.ensureServer();
+    const result = await this.request("thread/list", {
+      cwd: options.workspacePath,
+      limit: options.limit ?? 10,
+      sortKey: "updated_at",
+      sortDirection: "desc",
+    });
+    const data = Array.isArray(asRecord(result)?.data) ? asRecord(result)!.data as unknown[] : [];
+    return data.map(toThreadSummary).filter((thread): thread is AgentThreadSummary => Boolean(thread));
+  }
+
+  async listModels(): Promise<AgentModelSummary[]> {
+    await this.ensureServer();
+    const result = await this.request("model/list", { includeHidden: false });
+    const data = Array.isArray(asRecord(result)?.data) ? asRecord(result)!.data as unknown[] : [];
+    return data.map(toModelSummary).filter((model): model is AgentModelSummary => Boolean(model));
+  }
+
   private async ensureServer(): Promise<void> {
     if (this.ready) return this.ready;
     this.ready = this.startServer();
@@ -284,6 +335,8 @@ export class CodexDriver extends BaseAgentDriver {
     if (message.method === "thread/started") {
       const startedThreadId = getThreadId({ thread: params?.thread });
       const session = startedThreadId ? this.threadToSession.get(startedThreadId) : undefined;
+      const running = session ? this.sessions.get(session) : undefined;
+      if (running) applyThreadMetadata(running.status, asRecord(params?.thread));
       this.logger.debug("codex.thread_started", { thread_id: startedThreadId, session_key: session });
       return;
     }
@@ -303,13 +356,59 @@ export class CodexDriver extends BaseAgentDriver {
     if (message.method === "turn/started") {
       const turnId = getTurnId({ turn: params?.turn });
       if (turnId) running.status.activeTurnId = turnId;
+      running.status.waitingForApproval = false;
+      running.status.waitingForUserInput = false;
       return;
     }
 
     if (message.method === "turn/completed") {
       const turnId = getTurnId(params);
       running.status.activeTurnId = undefined;
+      running.status.waitingForApproval = false;
+      running.status.waitingForUserInput = false;
       await this.onOutput({ type: "turn_completed", sessionKey: key, turnId });
+      return;
+    }
+
+    if (message.method === "thread/status/changed") {
+      const threadStatus = asRecord(params?.status);
+      running.status.threadStatus = typeof threadStatus?.type === "string" ? threadStatus.type : undefined;
+      const activeFlags = Array.isArray(threadStatus?.activeFlags) ? threadStatus.activeFlags : [];
+      running.status.waitingForApproval = activeFlags.includes("waitingOnApproval");
+      running.status.waitingForUserInput = activeFlags.includes("waitingOnUserInput");
+      return;
+    }
+
+    if (message.method === "thread/tokenUsage/updated") {
+      const tokenUsage = asRecord(params?.tokenUsage);
+      running.status.tokenUsage = {
+        last: toTokenBreakdown(asRecord(tokenUsage?.last)),
+        total: toTokenBreakdown(asRecord(tokenUsage?.total)),
+      };
+      const contextWindow = tokenUsage?.modelContextWindow;
+      running.status.contextWindow = typeof contextWindow === "number" ? contextWindow : undefined;
+      return;
+    }
+
+    if (message.method === "thread/name/updated") {
+      running.status.threadName = typeof params?.threadName === "string" ? params.threadName : undefined;
+      return;
+    }
+
+    if (message.method === "model/rerouted") {
+      const toModel = typeof params?.toModel === "string" ? params.toModel : undefined;
+      if (toModel) running.status.model = toModel;
+      return;
+    }
+
+    if (message.method === "warning") {
+      const warning = typeof params?.message === "string" ? params.message : undefined;
+      if (warning) running.status.recentError = warning;
+      return;
+    }
+
+    if (message.method === "error") {
+      running.status.recentError = summarizeUnknown(params?.error);
       return;
     }
   }
@@ -337,6 +436,8 @@ export class CodexDriver extends BaseAgentDriver {
         turnId: getTurnId(params),
         itemId: typeof params?.itemId === "string" ? params.itemId : undefined,
       });
+      const running = this.sessions.get(key);
+      if (running) running.status.waitingForUserInput = true;
       return;
     }
 
@@ -355,6 +456,8 @@ export class CodexDriver extends BaseAgentDriver {
         turnId: getTurnId(params),
         itemId: typeof params?.itemId === "string" ? params.itemId : undefined,
       });
+      const running = this.sessions.get(key);
+      if (running) running.status.waitingForApproval = true;
       return;
     }
 
@@ -377,6 +480,15 @@ export class CodexDriver extends BaseAgentDriver {
         reject(error instanceof Error ? error : new Error(String(error)));
       });
     });
+  }
+
+  private requireRunningSession(key: string): RunningSession {
+    const running = this.sessions.get(key);
+    if (!running?.status.threadId) {
+      this.logger.warn("codex.builtin_without_session", { session_key: key });
+      throw new Error("Codex session is not running.");
+    }
+    return running;
   }
 
   private async writeMessage(message: JsonRpcRequest | JsonRpcResponse | { id: string | number; result?: unknown; error?: unknown }): Promise<void> {
@@ -414,6 +526,11 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
 }
 
+function getString(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" ? value : undefined;
+}
+
 function getThreadId(value: unknown): string | undefined {
   const record = asRecord(value);
   const thread = asRecord(record?.thread);
@@ -431,6 +548,91 @@ function getTurnStatus(value: unknown): string | undefined {
   const record = asRecord(value);
   const turn = asRecord(record?.turn);
   return typeof turn?.status === "string" ? turn.status : undefined;
+}
+
+function applySessionMetadata(status: AgentSessionStatus, result: unknown): void {
+  const record = asRecord(result);
+  applyThreadMetadata(status, asRecord(record?.thread));
+  status.model = getString(record, "model") ?? status.model;
+  status.modelProvider = getString(record, "modelProvider") ?? status.modelProvider;
+  status.reasoningEffort = getString(record, "reasoningEffort") ?? status.reasoningEffort;
+  status.approvalPolicy = summarizeUnknown(record?.approvalPolicy) ?? status.approvalPolicy;
+  status.approvalsReviewer = getString(record, "approvalsReviewer") ?? status.approvalsReviewer;
+  status.sandboxPolicy = summarizeUnknown(record?.sandbox) ?? status.sandboxPolicy;
+  status.instructionSources = Array.isArray(record?.instructionSources)
+    ? record.instructionSources.filter((source): source is string => typeof source === "string")
+    : status.instructionSources;
+}
+
+function applyThreadMetadata(status: AgentSessionStatus, thread: Record<string, unknown> | undefined): void {
+  if (!thread) return;
+  status.threadId = getString(thread, "id") ?? status.threadId;
+  status.threadName = getString(thread, "name") ?? status.threadName;
+  const threadStatus = asRecord(thread.status);
+  status.threadStatus = getString(threadStatus, "type") ?? status.threadStatus;
+}
+
+function toThreadSummary(value: unknown): AgentThreadSummary | undefined {
+  const record = asRecord(value);
+  const id = getString(record, "id");
+  if (!id) return undefined;
+  const status = asRecord(record?.status);
+  return {
+    id,
+    name: getString(record, "name"),
+    preview: getString(record, "preview"),
+    cwd: getString(record, "cwd"),
+    status: getString(status, "type"),
+    modelProvider: getString(record, "modelProvider"),
+    createdAt: typeof record?.createdAt === "number" ? record.createdAt : undefined,
+    updatedAt: typeof record?.updatedAt === "number" ? record.updatedAt : undefined,
+  };
+}
+
+function toModelSummary(value: unknown): AgentModelSummary | undefined {
+  const record = asRecord(value);
+  const id = getString(record, "id");
+  if (!id) return undefined;
+  return {
+    id,
+    model: getString(record, "model"),
+    displayName: getString(record, "displayName"),
+    description: getString(record, "description"),
+    isDefault: typeof record?.isDefault === "boolean" ? record.isDefault : undefined,
+    defaultReasoningEffort: getString(record, "defaultReasoningEffort"),
+    supportedReasoningEfforts: Array.isArray(record?.supportedReasoningEfforts)
+      ? record.supportedReasoningEfforts.filter((effort): effort is string => typeof effort === "string")
+      : undefined,
+  };
+}
+
+function toTokenBreakdown(record: Record<string, unknown> | undefined): AgentTokenBreakdown | undefined {
+  if (!record) return undefined;
+  return {
+    inputTokens: getNumber(record, "inputTokens"),
+    cachedInputTokens: getNumber(record, "cachedInputTokens"),
+    outputTokens: getNumber(record, "outputTokens"),
+    reasoningOutputTokens: getNumber(record, "reasoningOutputTokens"),
+    totalTokens: getNumber(record, "totalTokens"),
+  };
+}
+
+function getNumber(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  return typeof value === "number" ? value : undefined;
+}
+
+function summarizeUnknown(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  const record = asRecord(value);
+  if (typeof record?.type === "string") return record.type;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function updateActiveTurnFromResult(running: RunningSession, result: unknown): void {

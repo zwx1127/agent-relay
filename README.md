@@ -35,10 +35,16 @@ SQLITE_PATH=.data/agent-relay.sqlite
 CODEX_BIN=codex
 CODEX_SANDBOX=workspace-write
 CODEX_APPROVAL=on-request
+# Optional Codex instruction injection.
+# CODEX_DEVELOPER_INSTRUCTIONS="Extra developer instructions"
+# CODEX_DEVELOPER_INSTRUCTIONS_FILE=/absolute/path/to/developer-instructions.md
+# CODEX_MODEL_INSTRUCTIONS_FILE=/absolute/path/to/model-instructions.md
 LOG_LEVEL=info
 ```
 
 Shell environment variables still override values from `.env`.
+
+When both `CODEX_DEVELOPER_INSTRUCTIONS_FILE` and `CODEX_DEVELOPER_INSTRUCTIONS` are set, relay sends Codex the file contents, a blank line, then the inline text. `CODEX_MODEL_INSTRUCTIONS_FILE` is read and sent as Codex base/model instructions. `AGENTS.md` is not injected by relay; Codex discovers it normally from the selected workspace `cwd`.
 
 ## Run
 
@@ -54,25 +60,32 @@ bun run dev
 
 ## Telegram Commands
 
-Relay exposes one daily command:
+Relay handles these commands:
 
 - `/relay` opens the relay control console.
+- `/start` is a first-use alias for `/relay`.
+- `/help` shows relay and Codex command help.
+- `/status` shows the current workspace and Codex session status.
+- `/init` asks Codex to create `AGENTS.md` in the current workspace.
+- `/review` starts a Codex review of uncommitted changes.
+- `/compact` starts Codex thread compaction.
+- `/model` shows the current model and available app-server models.
+- `/clear` stops the current `chat + workspace` thread binding and starts a fresh Codex thread.
+- `/resume` lists saved Codex threads for the current workspace and resumes the selected thread.
 
-Telegram `/start` is kept as a first-use alias for `/relay`.
-
-Everything else you type is sent directly to Codex in the current workspace, including slash-style text such as `/status`, `/help`, `/model`, and `/review`. This keeps the Telegram chat Codex-first and avoids collisions with Codex's own slash commands.
+Unknown slash-style text is sent directly to Codex as normal input.
 
 If no workspace is selected, user input is not forwarded. Relay opens the console so you can select or create a workspace first.
 
 ## Telegram Interaction
 
-The relay console shows the selected workspace, Codex running/stopped state, recent output time, and recent relay error. Its inline buttons cover relay-specific actions:
+The relay console shows the selected workspace, Codex running/stopped state, thread metadata, model, approval and sandbox policy, token/context usage, waiting state, recent output time, and recent relay error. Its inline buttons cover relay-specific actions:
 
 - `Workspaces` opens the workspace list.
 - `New workspace` asks for a workspace name with Telegram ForceReply, then selects an existing directory under `WORKSPACE_ROOT` or creates and selects a new one.
 - `Stop` opens a confirmation view before stopping the current Codex session.
 - `Refresh` redraws the console.
-- Workspace buttons switch the chat binding and edit the console into the updated status view.
+- Workspace buttons switch the chat binding, start or resume the workspace's Codex thread, and edit the console into the updated status view.
 
 System and console responses use Telegram HTML formatting. Dynamic values such as workspace names, paths, and error details are escaped before rendering.
 
@@ -100,6 +113,7 @@ If Telegram rejects a menu edit, the relay logs a warning and sends a new messag
 - Workspaces are resolved under `WORKSPACE_ROOT`; path traversal and absolute workspace names are rejected.
 - `Workspaces` discovers existing first-level directories under `WORKSPACE_ROOT`; symlinked directories are ignored.
 - `New workspace` creates the workspace directory and runs `git init` only when the directory does not already exist.
+- Selecting or creating a workspace immediately starts the Codex thread for that `chat + workspace`. If the session is already running, relay reuses it. If SQLite has a stored Codex `thread_id`, relay resumes it first.
 - Codex starts one app-server process:
 
 ```bash

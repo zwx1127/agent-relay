@@ -191,6 +191,11 @@ export class Store {
     this.logger.info("store.session_marked_stopped", { session_key: sessionKey });
   }
 
+  clearSessionThreadId(sessionKey: string): void {
+    this.db.query("UPDATE agent_sessions SET thread_id = NULL WHERE session_key = ?").run(sessionKey);
+    this.logger.info("store.session_thread_cleared", { session_key: sessionKey });
+  }
+
   getSession(sessionKey: string): AgentSessionRow | undefined {
     const row = this.db.query<AgentSessionRow, [string]>(`
       SELECT session_key, chat_id, workspace_name, status, started_at, stopped_at, thread_id

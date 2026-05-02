@@ -12,7 +12,13 @@ export async function main(): Promise<void> {
   const telegram = new TelegramAdapter(config.telegramBotToken, fetch, logger);
   let router: MessageRouter;
   const agent = new CodexDriver(
-    { codexBin: config.codexBin, sandbox: config.codexSandbox, approval: config.codexApproval },
+    {
+      codexBin: config.codexBin,
+      sandbox: config.codexSandbox,
+      approval: config.codexApproval,
+      developerInstructions: config.codexDeveloperInstructions,
+      baseInstructions: config.codexBaseInstructions,
+    },
     (event) => router.handleAgentOutput(event),
     (event) => router.handleAgentExit(event.sessionKey, `Codex exited with code ${event.exitCode ?? "unknown"}${event.signalCode ? ` (${event.signalCode})` : ""}.`),
     logger,

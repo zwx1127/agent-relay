@@ -11,6 +11,8 @@ export interface AppConfig {
   codexBin: string;
   codexSandbox: string;
   codexApproval: string;
+  codexDeveloperInstructions?: string;
+  codexBaseInstructions?: string;
   logLevel: LogLevel;
 }
 
@@ -83,6 +85,15 @@ function requireEnv(env: Env, name: string): string {
 export function loadConfig(env?: Env): AppConfig {
   const effectiveEnv = env ?? { ...loadDotEnvFile(), ...process.env };
   const allowedChats = effectiveEnv.TELEGRAM_ALLOWED_CHAT_IDS?.trim();
+  const developerInstructions = combineInstructionSources(
+    effectiveEnv.CODEX_DEVELOPER_INSTRUCTIONS_FILE,
+    effectiveEnv.CODEX_DEVELOPER_INSTRUCTIONS,
+    "CODEX_DEVELOPER_INSTRUCTIONS_FILE",
+  );
+  const baseInstructions = readInstructionFile(
+    effectiveEnv.CODEX_MODEL_INSTRUCTIONS_FILE,
+    "CODEX_MODEL_INSTRUCTIONS_FILE",
+  );
   return {
     telegramBotToken: requireEnv(effectiveEnv, "TELEGRAM_BOT_TOKEN"),
     telegramAllowedUserIds: parseIdSet(requireEnv(effectiveEnv, "TELEGRAM_ALLOWED_USER_IDS"), "TELEGRAM_ALLOWED_USER_IDS"),
@@ -92,8 +103,27 @@ export function loadConfig(env?: Env): AppConfig {
     codexBin: effectiveEnv.CODEX_BIN?.trim() || "codex",
     codexSandbox: effectiveEnv.CODEX_SANDBOX?.trim() || "workspace-write",
     codexApproval: effectiveEnv.CODEX_APPROVAL?.trim() || "on-request",
+    ...(developerInstructions ? { codexDeveloperInstructions: developerInstructions } : {}),
+    ...(baseInstructions ? { codexBaseInstructions: baseInstructions } : {}),
     logLevel: parseLogLevel(effectiveEnv.LOG_LEVEL),
   };
+}
+
+function combineInstructionSources(filePath: string | undefined, inline: string | undefined, fileEnvName: string): string | undefined {
+  const fileText = readInstructionFile(filePath, fileEnvName);
+  const inlineText = inline?.trim();
+  return [fileText, inlineText].filter((part): part is string => Boolean(part)).join("\n\n") || undefined;
+}
+
+function readInstructionFile(filePath: string | undefined, envName: string): string | undefined {
+  const trimmed = filePath?.trim();
+  if (!trimmed) return undefined;
+  try {
+    return readFileSync(resolve(trimmed), "utf8").trim();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`${envName} could not be read: ${detail}`);
+  }
 }
 
 export function isAuthorized(config: Pick<AppConfig, "telegramAllowedUserIds" | "telegramAllowedChatIds">, userId: number, chatId: number): boolean {

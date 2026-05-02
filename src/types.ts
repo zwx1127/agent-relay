@@ -155,7 +155,21 @@ export interface AgentSessionStatus {
   running: boolean;
   startedAt: number;
   threadId?: string;
+  threadName?: string;
+  threadStatus?: string;
   activeTurnId?: string;
+  model?: string;
+  modelProvider?: string;
+  reasoningEffort?: string;
+  approvalPolicy?: string;
+  approvalsReviewer?: string;
+  sandboxPolicy?: string;
+  instructionSources?: string[];
+  tokenUsage?: AgentTokenUsage;
+  contextWindow?: number;
+  waitingForUserInput?: boolean;
+  waitingForApproval?: boolean;
+  recentError?: string;
 }
 
 export interface StartAgentOptions {
@@ -171,6 +185,56 @@ export interface AgentDriver {
   stop(sessionKey: string): Promise<void>;
   getStatus(sessionKey: string): AgentSessionStatus | undefined;
   respond?(sessionKey: string, requestId: string | number, result: unknown): Promise<void>;
+  runBuiltinCommand?(sessionKey: string, command: AgentBuiltinCommand): Promise<AgentBuiltinResult>;
+  listThreads?(options: AgentThreadListOptions): Promise<AgentThreadSummary[]>;
+  listModels?(): Promise<AgentModelSummary[]>;
+}
+
+export type AgentBuiltinCommand = "review" | "compact";
+
+export interface AgentBuiltinResult {
+  message: string;
+  turnId?: string;
+  threadId?: string;
+}
+
+export interface AgentThreadListOptions {
+  workspacePath: string;
+  limit?: number;
+}
+
+export interface AgentThreadSummary {
+  id: string;
+  name?: string;
+  preview?: string;
+  cwd?: string;
+  status?: string;
+  modelProvider?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export interface AgentModelSummary {
+  id: string;
+  model?: string;
+  displayName?: string;
+  description?: string;
+  isDefault?: boolean;
+  defaultReasoningEffort?: string;
+  supportedReasoningEfforts?: string[];
+}
+
+export interface AgentTokenBreakdown {
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningOutputTokens?: number;
+  totalTokens?: number;
+}
+
+export interface AgentTokenUsage {
+  last?: AgentTokenBreakdown;
+  total?: AgentTokenBreakdown;
 }
 
 export interface WorkspaceRecord {

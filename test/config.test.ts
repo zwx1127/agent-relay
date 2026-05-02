@@ -35,6 +35,28 @@ describe("config", () => {
     expect(config.logLevel).toBe("debug");
   });
 
+  test("loads developer and model instructions from env and files", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-relay-config-instructions-"));
+    try {
+      const devFile = join(dir, "developer.md");
+      const modelFile = join(dir, "model.md");
+      writeFileSync(devFile, "file developer");
+      writeFileSync(modelFile, "model instructions");
+      const config = loadConfig({
+        TELEGRAM_BOT_TOKEN: "token",
+        TELEGRAM_ALLOWED_USER_IDS: "10",
+        WORKSPACE_ROOT: "/tmp/workspaces",
+        CODEX_DEVELOPER_INSTRUCTIONS_FILE: devFile,
+        CODEX_DEVELOPER_INSTRUCTIONS: "inline developer",
+        CODEX_MODEL_INSTRUCTIONS_FILE: modelFile,
+      });
+      expect(config.codexDeveloperInstructions).toBe("file developer\n\ninline developer");
+      expect(config.codexBaseInstructions).toBe("model instructions");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("rejects invalid log level", () => {
     expect(() => loadConfig({
       TELEGRAM_BOT_TOKEN: "token",
