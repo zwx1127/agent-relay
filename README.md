@@ -1,13 +1,13 @@
 # agent-relay
 
-Telegram-to-Codex CLI relay built with Bun, TypeScript, SQLite, and Bun's PTY support. It polls Telegram, authorizes messages by allowlist, binds each chat to a local workspace, and runs at most one Codex CLI session per `chat + workspace`.
+Telegram-to-Codex relay built with Bun, TypeScript, SQLite, and Codex app-server. It polls Telegram, authorizes messages by allowlist, binds each chat to a local workspace, and runs at most one structured Codex thread per `chat + workspace`.
 
 ## Requirements
 
 - Bun 1.3 or newer.
 - A Telegram bot token from BotFather.
 - A local `codex` CLI binary available on `PATH`, or a custom `CODEX_BIN`.
-- Linux or macOS. Bun PTY support is POSIX-only.
+- A Codex CLI version with `codex app-server --listen stdio://` support.
 
 ## Setup
 
@@ -70,14 +70,24 @@ The relay console shows the selected workspace, Codex running/stopped state, rec
 
 - `Workspaces` opens the workspace list.
 - `New workspace` asks for a workspace name with Telegram ForceReply, then creates and selects it.
-- `Tail 50` sends recent Codex output.
 - `Stop` opens a confirmation view before stopping the current Codex session.
 - `Refresh` redraws the console.
 - Workspace buttons switch the chat binding and edit the console into the updated status view.
 
 System and console responses use Telegram HTML formatting. Dynamic values such as workspace names, paths, and error details are escaped before rendering.
 
-Codex output and tail responses render common Markdown into Telegram text plus message entities, including headings, lists, task lists, blockquotes, emphasis, inline code, code blocks, and HTTP/HTTPS links. Unsupported Markdown is left readable as plain text.
+Codex assistant replies render common Markdown into Telegram text plus message entities, including headings, lists, task lists, blockquotes, emphasis, inline code, code blocks, and HTTP/HTTPS links. Unsupported Markdown is left readable as plain text.
+
+Raw Codex terminal output is intentionally hidden from Telegram. Command stdout/stderr, terminal interaction events, app-server startup logs, TUI frames, status bars, and other low-level protocol noise are kept out of the chat. Operational debugging should use service logs instead of an in-chat raw tail.
+
+When Codex asks the user a structured question via `request_user_input`, relay maps it to Telegram UI:
+
+- Questions with options are sent with inline keyboard buttons.
+- Free-text, secret, and `Other` answers use Telegram ForceReply.
+- Multi-question requests wait until all answers are collected before replying to Codex.
+- Expired prompt replies are marked expired and are not forwarded as normal Codex prompts.
+
+Codex approval requests for commands, file changes, and permissions are shown as short Telegram messages with `Approve` and `Deny` buttons. The underlying command output is not sent to Telegram.
 
 If Telegram rejects a menu edit, the relay logs a warning and sends a new message instead. Telegram's `message is not modified` edit response is treated as harmless, including the HTTP 400 form returned when an edit would leave both text and buttons unchanged. Other edit failures still fall back to sending a new message.
 
@@ -89,16 +99,18 @@ If Telegram rejects a menu edit, the relay logs a warning and sends a new messag
 - Workspace names are limited to letters, numbers, dots, underscores, and dashes.
 - Workspaces are resolved under `WORKSPACE_ROOT`; path traversal and absolute workspace names are rejected.
 - `New workspace` creates the workspace directory and runs `git init`.
-- Codex starts with:
+- Codex starts one app-server process:
 
 ```bash
-codex --no-alt-screen -C <workspace> -s <CODEX_SANDBOX> -a <CODEX_APPROVAL>
+codex app-server --listen stdio://
 ```
 
-- PTY output is stripped of ANSI/control sequences, stored in SQLite, debounced, and split into Telegram-sized messages.
-- Agent output is aggregated per session, flushed after a short quiet period or size/time limit, and usually edits one live Telegram message for the current response.
+- Each `chat + workspace` starts or resumes a Codex thread with the workspace `cwd`, `CODEX_SANDBOX`, and `CODEX_APPROVAL`.
+- User messages start a new turn with `turn/start`; messages sent while a turn is active are sent with `turn/steer`.
+- Assistant message deltas from `item/agentMessage/delta` are stored in SQLite, debounced, and split into Telegram-sized messages.
+- Agent output is aggregated per session, flushed after a short quiet period, size/time limit, or `turn/completed`, and usually edits one live Telegram message for the current response.
 - Long Codex output is split into continuation messages with Telegram entity offsets recalculated for each chunk.
-- The `Stop` inline button sends Ctrl-C first, then kills the process if it is still alive after 5 seconds. It requires a second confirmation tap.
+- The `Stop` inline button sends `turn/interrupt` for the active turn. It requires a second confirmation tap.
 
 ## Logging
 
@@ -106,7 +118,7 @@ Runtime logs are written to stdout as text lines. Set `LOG_LEVEL` to `debug`, `i
 
 At `info` and above, logs include operational metadata such as chat ID, user ID, workspace, command name, text length, session key, and process exit status. They do not include the Telegram bot token, Telegram message text, or Codex output.
 
-At `debug`, logs also include raw Telegram messages and Codex input/output chunks. Use it only in environments where those logs are protected.
+At `debug`, logs also include raw Telegram messages and Codex input text. Use it only in environments where those logs are protected.
 
 Telegram Bot API HTTP errors include Telegram's `description` field when the response body provides one. This makes 400 errors such as malformed HTML, non-editable messages, or other Bot API validation failures visible in `telegram.api_http_error` logs.
 
@@ -115,7 +127,7 @@ Telegram Bot API HTTP errors include Telegram's `description` field when the res
 ```text
 src/
   agent.ts       Agent driver interface helpers
-  codex.ts       Codex CLI PTY driver
+  codex.ts       Codex app-server JSON-RPC driver
   config.ts      Environment parsing and allowlist checks
   logger.ts      Text stdout logger and log level parsing
   main.ts        Runtime wiring
@@ -125,7 +137,7 @@ src/
   text.ts        Output cleanup, message splitting, and Telegram text rendering helpers
   workspace.ts   Workspace validation and creation
 test/
-  *.test.ts      Unit, routing, adapter, store, and PTY smoke tests
+  *.test.ts      Unit, routing, adapter, store, app-server protocol, and smoke tests
 ```
 
 ## Persistence
@@ -134,9 +146,10 @@ SQLite stores:
 
 - workspace records
 - chat-to-workspace bindings
-- agent session status
+- agent session status and Codex thread IDs
 - transcript events for user, agent, and system messages
-- pending ForceReply prompts for workspace creation
+- pending ForceReply prompts for workspace creation and Codex questions
+- pending Codex approval metadata
 
 The default database path is `.data/agent-relay.sqlite`.
 

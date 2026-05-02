@@ -26,6 +26,19 @@ interface PendingPromptRow {
   prompt_message_id: number;
   kind: string;
   created_at: number;
+  session_key?: string | null;
+  payload_json?: string | null;
+  expires_at?: number | null;
+}
+
+interface AgentSessionRow {
+  session_key: string;
+  chat_id: number;
+  workspace_name: string;
+  status: string;
+  started_at: number;
+  stopped_at?: number | null;
+  thread_id?: string | null;
 }
 
 export class Store {
@@ -89,6 +102,10 @@ export class Store {
         PRIMARY KEY (chat_id, prompt_message_id)
       )
     `);
+    this.addColumnIfMissing("agent_sessions", "thread_id", "TEXT");
+    this.addColumnIfMissing("pending_prompts", "session_key", "TEXT");
+    this.addColumnIfMissing("pending_prompts", "payload_json", "TEXT");
+    this.addColumnIfMissing("pending_prompts", "expires_at", "INTEGER");
     this.logger.debug("store.migrated");
   }
 
@@ -122,18 +139,37 @@ export class Store {
     return row ? { chatId: row.chat_id, workspaceName: row.workspace_name, updatedAt: row.updated_at } : undefined;
   }
 
-  markSessionStarted(sessionKey: string, chatId: ChatId, workspaceName: string, startedAt = Date.now()): void {
+  private addColumnIfMissing(table: string, column: string, definition: string): void {
+    const rows = this.db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
+    if (rows.some((row) => row.name === column)) return;
+    this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
+  markSessionStarted(sessionKey: string, chatId: ChatId, workspaceName: string, startedAt = Date.now(), threadId?: string): void {
     this.db.query(`
-      INSERT INTO agent_sessions (session_key, chat_id, workspace_name, status, started_at, stopped_at)
-      VALUES ($sessionKey, $chatId, $workspaceName, 'running', $startedAt, NULL)
-      ON CONFLICT(session_key) DO UPDATE SET status = 'running', started_at = excluded.started_at, stopped_at = NULL
-    `).run({ $sessionKey: sessionKey, $chatId: chatId, $workspaceName: workspaceName, $startedAt: startedAt });
+      INSERT INTO agent_sessions (session_key, chat_id, workspace_name, status, started_at, stopped_at, thread_id)
+      VALUES ($sessionKey, $chatId, $workspaceName, 'running', $startedAt, NULL, $threadId)
+      ON CONFLICT(session_key) DO UPDATE SET
+        status = 'running',
+        started_at = excluded.started_at,
+        stopped_at = NULL,
+        thread_id = COALESCE(excluded.thread_id, agent_sessions.thread_id)
+    `).run({ $sessionKey: sessionKey, $chatId: chatId, $workspaceName: workspaceName, $startedAt: startedAt, $threadId: threadId ?? null });
     this.logger.info("store.session_marked_started", { session_key: sessionKey, chat_id: chatId, workspace: workspaceName });
   }
 
   markSessionStopped(sessionKey: string, stoppedAt = Date.now()): void {
     this.db.query("UPDATE agent_sessions SET status = 'stopped', stopped_at = ? WHERE session_key = ?").run(stoppedAt, sessionKey);
     this.logger.info("store.session_marked_stopped", { session_key: sessionKey });
+  }
+
+  getSession(sessionKey: string): AgentSessionRow | undefined {
+    const row = this.db.query<AgentSessionRow, [string]>(`
+      SELECT session_key, chat_id, workspace_name, status, started_at, stopped_at, thread_id
+      FROM agent_sessions
+      WHERE session_key = ?
+    `).get(sessionKey);
+    return row ?? undefined;
   }
 
   appendTranscript(event: TranscriptEvent): void {
@@ -178,20 +214,28 @@ export class Store {
 
   setPendingPrompt(prompt: PendingPrompt): void {
     this.db.query(`
-      INSERT INTO pending_prompts (chat_id, prompt_message_id, kind, created_at)
-      VALUES ($chatId, $promptMessageId, $kind, $createdAt)
-      ON CONFLICT(chat_id, prompt_message_id) DO UPDATE SET kind = excluded.kind, created_at = excluded.created_at
+      INSERT INTO pending_prompts (chat_id, prompt_message_id, kind, created_at, session_key, payload_json, expires_at)
+      VALUES ($chatId, $promptMessageId, $kind, $createdAt, $sessionKey, $payloadJson, $expiresAt)
+      ON CONFLICT(chat_id, prompt_message_id) DO UPDATE SET
+        kind = excluded.kind,
+        created_at = excluded.created_at,
+        session_key = excluded.session_key,
+        payload_json = excluded.payload_json,
+        expires_at = excluded.expires_at
     `).run({
       $chatId: prompt.chatId,
       $promptMessageId: prompt.promptMessageId,
       $kind: prompt.kind,
       $createdAt: prompt.createdAt,
+      $sessionKey: prompt.sessionKey ?? null,
+      $payloadJson: prompt.payloadJson ?? null,
+      $expiresAt: prompt.expiresAt ?? null,
     });
   }
 
   getPendingPrompt(chatId: ChatId, promptMessageId: number): PendingPrompt | undefined {
     const row = this.db.query<PendingPromptRow, [number, number]>(`
-      SELECT chat_id, prompt_message_id, kind, created_at
+      SELECT chat_id, prompt_message_id, kind, created_at, session_key, payload_json, expires_at
       FROM pending_prompts
       WHERE chat_id = ? AND prompt_message_id = ?
     `).get(chatId, promptMessageId);
@@ -203,7 +247,7 @@ export class Store {
   }
 
   prunePendingPrompts(olderThan: number): void {
-    this.db.query("DELETE FROM pending_prompts WHERE created_at < ?").run(olderThan);
+    this.db.query("DELETE FROM pending_prompts WHERE created_at < ? OR (expires_at IS NOT NULL AND expires_at < ?)").run(olderThan, Date.now());
   }
 }
 
@@ -217,5 +261,8 @@ function rowToPendingPrompt(row: PendingPromptRow): PendingPrompt {
     promptMessageId: row.prompt_message_id,
     kind: row.kind as PendingPromptKind,
     createdAt: row.created_at,
+    ...(row.session_key ? { sessionKey: row.session_key } : {}),
+    ...(row.payload_json ? { payloadJson: row.payload_json } : {}),
+    ...(row.expires_at ? { expiresAt: row.expires_at } : {}),
   };
 }

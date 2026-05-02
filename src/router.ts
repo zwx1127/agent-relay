@@ -2,10 +2,23 @@ import { existsSync } from "node:fs";
 import type { AppConfig } from "./config.ts";
 import { isAuthorized } from "./config.ts";
 import { sessionKey } from "./agent.ts";
-import type { AgentDriver, ChatId, IMAdapter, InboundMessage, InlineKeyboardMarkup, SendMessageResult, WorkspaceRecord } from "./types.ts";
+import type {
+  AgentApprovalKind,
+  AgentApprovalRequestEvent,
+  AgentDriver,
+  AgentOutputEvent,
+  AgentUserInputQuestion,
+  AgentUserInputRequestEvent,
+  ChatId,
+  IMAdapter,
+  InboundMessage,
+  InlineKeyboardMarkup,
+  SendMessageResult,
+  WorkspaceRecord,
+} from "./types.ts";
 import type { Store } from "./store.ts";
 import { createWorkspace, resolveWorkspacePath, validateWorkspaceName } from "./workspace.ts";
-import { formatError, formatStatus, formatWorkspaces, htmlEscape, renderCodexMarkdownForTelegram, splitRenderedForTelegram, tailLines } from "./text.ts";
+import { formatError, formatStatus, formatWorkspaces, htmlEscape, renderCodexMarkdownForTelegram, splitRenderedForTelegram } from "./text.ts";
 import { noopLogger, type Logger } from "./logger.ts";
 
 const CALLBACK_PREFIX = "ar:";
@@ -14,6 +27,7 @@ const HTML = { parseMode: "HTML" as const };
 const STREAM_QUIET_MS = 800;
 const STREAM_MAX_MS = 3000;
 const STREAM_FLUSH_CHARS = 3400;
+const CODEX_PROMPT_TTL_MS = 30 * 60 * 1000;
 
 export interface RouterDeps {
   config: AppConfig;
@@ -68,6 +82,8 @@ export class MessageRouter {
         : undefined;
       if (pending?.kind === "workspace_name") {
         await this.createWorkspaceFromPrompt(message.chatId, message.replyToMessageId!, text);
+      } else if (pending?.kind === "codex_user_input") {
+        await this.answerCodexFreeText(message.chatId, message.replyToMessageId!, text);
       } else if (command === "/relay" || command === "/start") {
         await this.renderConsole(message.chatId);
       } else {
@@ -87,7 +103,19 @@ export class MessageRouter {
     }
   }
 
-  async handleAgentOutput(session: { sessionKey: string; chunk: string }): Promise<void> {
+  async handleAgentOutput(session: AgentOutputEvent): Promise<void> {
+    if (session.type === "turn_completed") {
+      await this.flushSessionOutput(session.sessionKey);
+      return;
+    }
+    if (session.type === "user_input_request") {
+      await this.handleCodexUserInputRequest(session);
+      return;
+    }
+    if (session.type === "approval_request") {
+      await this.handleCodexApprovalRequest(session);
+      return;
+    }
     const parsed = parseSessionKey(session.sessionKey);
     if (!parsed) {
       this.logger.warn("router.agent_output_invalid_session", { session_key: session.sessionKey, chunk_len: session.chunk.length });
@@ -125,23 +153,6 @@ export class MessageRouter {
     await this.flushSessionOutput(sessionKeyValue);
     this.liveOutput.delete(sessionKeyValue);
     await this.deps.adapter.sendMessage(parsed.chatId, `<b>${htmlEscape(exitText)}</b>`, HTML);
-  }
-
-  private async tail(chatId: ChatId, rawCount?: string): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(chatId);
-    const count = rawCount ? Number(rawCount) : 50;
-    if (!Number.isInteger(count) || count < 1) throw new Error("Tail count must be a positive integer.");
-    const text = this.deps.store.recentTranscript(chatId, workspace.name, "agent", 500);
-    this.logger.info("router.tail_reported", { chat_id: chatId, workspace: workspace.name, count, text_len: text.length });
-    if (!text) {
-      await this.deps.adapter.sendMessage(chatId, "No agent output yet.");
-      return;
-    }
-    const rendered = renderCodexMarkdownForTelegram(tailLines(text, count));
-    await this.deps.adapter.sendMessage(chatId, rendered.text, {
-      entities: rendered.entities,
-      disableWebPagePreview: true,
-    });
   }
 
   private async handleCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
@@ -196,8 +207,12 @@ export class MessageRouter {
       await this.promptForWorkspaceName(message.chatId);
       return;
     }
-    if (payload === "t50") {
-      await this.tail(message.chatId, "50");
+    if (payload.startsWith("q:")) {
+      await this.answerCodexOption(message, payload);
+      return;
+    }
+    if (payload.startsWith("a:")) {
+      await this.answerCodexApproval(message, payload);
       return;
     }
     if (payload === "x?") {
@@ -338,8 +353,9 @@ export class MessageRouter {
     const key = sessionKey(chatId, workspace.name);
     if (!this.deps.agent.getStatus(key)) {
       this.logger.info("router.session_starting", { chat_id: chatId, workspace: workspace.name, session_key: key });
-      await this.deps.agent.start({ chatId, workspaceName: workspace.name, workspacePath: workspace.path });
-      this.deps.store.markSessionStarted(key, chatId, workspace.name);
+      const previous = this.deps.store.getSession(key);
+      const status = await this.deps.agent.start({ chatId, workspaceName: workspace.name, workspacePath: workspace.path, threadId: previous?.thread_id ?? undefined });
+      this.deps.store.markSessionStarted(key, chatId, workspace.name, Date.now(), status.threadId);
       this.logger.info("router.session_started", { chat_id: chatId, workspace: workspace.name, session_key: key });
     }
     await this.deps.adapter.sendChatAction(chatId, "typing").catch((error) => {
@@ -422,6 +438,178 @@ export class MessageRouter {
     timer?: Timer;
     messageId?: number;
   }>();
+
+  private readonly codexRequests = new Map<string, {
+    sessionKey: string;
+    requestId: string | number;
+    questions: AgentUserInputQuestion[];
+    answers: Record<string, { answers: string[] }>;
+  }>();
+
+  private async handleCodexUserInputRequest(event: AgentUserInputRequestEvent): Promise<void> {
+    const parsed = parseSessionKey(event.sessionKey);
+    if (!parsed) return;
+    const token = shortToken();
+    const expiresAt = Date.now() + CODEX_PROMPT_TTL_MS;
+    const key = codexRequestKey(event.sessionKey, event.requestId);
+    this.codexRequests.set(key, { sessionKey: event.sessionKey, requestId: event.requestId, questions: event.questions, answers: {} });
+
+    for (const [index, question] of event.questions.entries()) {
+      const options = question.options ?? [];
+      const payload = JSON.stringify({
+        token,
+        requestId: event.requestId,
+        questionIndex: index,
+        questionId: question.id,
+        isSecret: Boolean(question.isSecret),
+        options,
+      });
+      const text = formatCodexQuestion(question);
+      const result = question.isSecret || options.length === 0
+        ? await this.deps.adapter.sendMessage(parsed.chatId, text, { ...HTML, forceReply: true, disableWebPagePreview: true })
+        : await this.deps.adapter.sendMessage(parsed.chatId, text, {
+          ...HTML,
+          replyMarkup: codexQuestionKeyboard(token, index, options),
+          disableWebPagePreview: true,
+        });
+      if (!result.messageId) throw new Error("Telegram did not return a prompt message id.");
+      this.deps.store.setPendingPrompt({
+        chatId: parsed.chatId,
+        promptMessageId: result.messageId,
+        kind: "codex_user_input",
+        createdAt: Date.now(),
+        sessionKey: event.sessionKey,
+        payloadJson: payload,
+        expiresAt,
+      });
+    }
+  }
+
+  private async handleCodexApprovalRequest(event: AgentApprovalRequestEvent): Promise<void> {
+    const parsed = parseSessionKey(event.sessionKey);
+    if (!parsed) return;
+    const token = shortToken();
+    const expiresAt = Date.now() + CODEX_PROMPT_TTL_MS;
+    const result = await this.deps.adapter.sendMessage(parsed.chatId, formatApproval(event.title, event.body), {
+      ...HTML,
+      replyMarkup: approvalKeyboard(token),
+      disableWebPagePreview: true,
+    });
+    if (!result.messageId) throw new Error("Telegram did not return an approval prompt message id.");
+    this.deps.store.setPendingPrompt({
+      chatId: parsed.chatId,
+      promptMessageId: result.messageId,
+      kind: "codex_approval",
+      createdAt: Date.now(),
+      sessionKey: event.sessionKey,
+      payloadJson: JSON.stringify({
+        token,
+        requestId: event.requestId,
+        method: event.method,
+        approvalKind: event.approvalKind,
+        params: event.params,
+      }),
+      expiresAt,
+    });
+  }
+
+  private async answerCodexOption(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
+    const parts = payload.split(":");
+    const [, token, rawQuestionIndex, rawOptionIndex] = parts;
+    const pending = message.messageId ? this.deps.store.getPendingPrompt(message.chatId, message.messageId) : undefined;
+    const data = parsePromptPayload(pending?.payloadJson);
+    if (!pending || pending.kind !== "codex_user_input" || !data || data.token !== token || isExpired(pending)) {
+      await this.expireCallbackPrompt(message);
+      return;
+    }
+
+    const questionIndex = Number(rawQuestionIndex);
+    const optionIndex = Number(rawOptionIndex);
+    const options = Array.isArray(data.options) ? data.options : [];
+    if (!Number.isInteger(questionIndex) || questionIndex !== data.questionIndex || !Number.isInteger(optionIndex)) {
+      throw new Error("Invalid question answer.");
+    }
+
+    if (optionIndex === options.length) {
+      const result = await this.deps.adapter.sendMessage(message.chatId, "Reply with your answer.", {
+        forceReply: true,
+        disableWebPagePreview: true,
+      });
+      if (!result.messageId) throw new Error("Telegram did not return a prompt message id.");
+      this.deps.store.setPendingPrompt({
+        chatId: message.chatId,
+        promptMessageId: result.messageId,
+        kind: "codex_user_input",
+        createdAt: Date.now(),
+        sessionKey: pending.sessionKey,
+        payloadJson: pending.payloadJson,
+        expiresAt: pending.expiresAt,
+      });
+      this.deps.store.deletePendingPrompt(message.chatId, pending.promptMessageId);
+      await this.renderCallbackPage(message, "<b>Waiting for custom answer.</b>", { inline_keyboard: [] });
+      return;
+    }
+
+    const option = options[optionIndex] as { label?: unknown } | undefined;
+    if (!option || typeof option.label !== "string") throw new Error("Invalid question option.");
+    await this.recordCodexAnswer(pending, data, option.label);
+    await this.renderCallbackPage(message, `<b>Answered:</b> ${htmlEscape(option.label)}`, { inline_keyboard: [] });
+  }
+
+  private async answerCodexFreeText(chatId: ChatId, promptMessageId: number, text: string): Promise<void> {
+    const pending = this.deps.store.getPendingPrompt(chatId, promptMessageId);
+    const data = parsePromptPayload(pending?.payloadJson);
+    if (!pending || pending.kind !== "codex_user_input" || !data || isExpired(pending)) {
+      this.deps.store.deletePendingPrompt(chatId, promptMessageId);
+      await this.deps.adapter.sendMessage(chatId, "Question expired.");
+      return;
+    }
+    await this.recordCodexAnswer(pending, data, text);
+    this.deps.store.deletePendingPrompt(chatId, promptMessageId);
+    await this.deps.adapter.sendMessage(chatId, data.isSecret ? "<b>Answered.</b>" : `<b>Answered:</b> ${htmlEscape(text)}`, HTML);
+  }
+
+  private async recordCodexAnswer(pending: NonNullable<ReturnType<Store["getPendingPrompt"]>>, data: Record<string, unknown>, answer: string): Promise<void> {
+    if (!pending.sessionKey) throw new Error("Question session is missing.");
+    const requestId = data.requestId as string | number | undefined;
+    const questionId = typeof data.questionId === "string" ? data.questionId : undefined;
+    if (requestId === undefined || !questionId) throw new Error("Question payload is invalid.");
+
+    const request = this.codexRequests.get(codexRequestKey(pending.sessionKey, requestId));
+    if (!request) {
+      this.deps.store.deletePendingPrompt(pending.chatId, pending.promptMessageId);
+      await this.deps.adapter.sendMessage(pending.chatId, "Question expired.");
+      return;
+    }
+
+    request.answers[questionId] = { answers: [answer] };
+    this.deps.store.deletePendingPrompt(pending.chatId, pending.promptMessageId);
+    if (Object.keys(request.answers).length !== request.questions.length) return;
+    this.codexRequests.delete(codexRequestKey(pending.sessionKey, requestId));
+    if (!this.deps.agent.respond) throw new Error("Agent driver cannot answer Codex prompts.");
+    await this.deps.agent.respond(pending.sessionKey, requestId, { answers: request.answers });
+  }
+
+  private async answerCodexApproval(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
+    const parts = payload.split(":");
+    const [, token, decision] = parts;
+    const pending = message.messageId ? this.deps.store.getPendingPrompt(message.chatId, message.messageId) : undefined;
+    const data = parsePromptPayload(pending?.payloadJson);
+    if (!pending || pending.kind !== "codex_approval" || !data || data.token !== token || isExpired(pending)) {
+      await this.expireCallbackPrompt(message);
+      return;
+    }
+    if (!pending.sessionKey || !this.deps.agent.respond) throw new Error("Approval session is missing.");
+    const approved = decision === "y";
+    await this.deps.agent.respond(pending.sessionKey, data.requestId as string | number, approvalResponse(data.approvalKind as AgentApprovalKind, approved, data.params));
+    this.deps.store.deletePendingPrompt(message.chatId, pending.promptMessageId);
+    await this.renderCallbackPage(message, approved ? "<b>Approved.</b>" : "<b>Denied.</b>", { inline_keyboard: [] });
+  }
+
+  private async expireCallbackPrompt(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
+    if (message.messageId) this.deps.store.deletePendingPrompt(message.chatId, message.messageId);
+    await this.renderCallbackPage(message, "<b>Question expired.</b>", { inline_keyboard: [] });
+  }
 
   private async bufferAgentOutput(sessionKeyValue: string, chatId: ChatId, chunk: string): Promise<void> {
     let state = this.liveOutput.get(sessionKeyValue);
@@ -543,6 +731,76 @@ export function parseSessionKey(key: string): { chatId: ChatId; workspaceName: s
   return { chatId, workspaceName };
 }
 
+function shortToken(): string {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(36).padStart(2, "0")).join("").slice(0, 12);
+}
+
+function codexRequestKey(sessionKeyValue: string, requestId: string | number): string {
+  return `${sessionKeyValue}:${String(requestId)}`;
+}
+
+function formatCodexQuestion(question: AgentUserInputQuestion): string {
+  const lines = [
+    `<b>${htmlEscape(question.header)}</b>`,
+    "",
+    htmlEscape(question.question),
+  ];
+  const options = question.options ?? [];
+  if (!question.isSecret && options.length > 0) {
+    lines.push("", ...options.map((option) => `<b>${htmlEscape(option.label)}</b>${option.description ? ` - ${htmlEscape(option.description)}` : ""}`));
+  }
+  return lines.join("\n");
+}
+
+function formatApproval(title: string, body: string): string {
+  return [`<b>${htmlEscape(title)}</b>`, "", htmlEscape(body)].join("\n");
+}
+
+function codexQuestionKeyboard(token: string, questionIndex: number, options: Array<{ label: string }>): InlineKeyboardMarkup {
+  const rows: InlineKeyboardMarkup["inline_keyboard"] = [];
+  for (const [index, option] of options.entries()) {
+    rows.push([{ text: option.label, callback_data: `ar:q:${token}:${questionIndex}:${index}` }]);
+  }
+  rows.push([{ text: "Other", callback_data: `ar:q:${token}:${questionIndex}:${options.length}` }]);
+  return { inline_keyboard: rows };
+}
+
+function approvalKeyboard(token: string): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [[
+      { text: "Approve", callback_data: `ar:a:${token}:y` },
+      { text: "Deny", callback_data: `ar:a:${token}:n` },
+    ]],
+  };
+}
+
+function parsePromptPayload(payloadJson: string | undefined): Record<string, unknown> | undefined {
+  if (!payloadJson) return undefined;
+  try {
+    const payload = JSON.parse(payloadJson);
+    return payload && typeof payload === "object" ? payload as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isExpired(prompt: { expiresAt?: number }): boolean {
+  return typeof prompt.expiresAt === "number" && prompt.expiresAt < Date.now();
+}
+
+function approvalResponse(kind: AgentApprovalKind, approved: boolean, params: unknown): unknown {
+  if (kind === "legacy_command" || kind === "legacy_patch") {
+    return { decision: approved ? "approved" : "denied" };
+  }
+  if (kind === "permissions") {
+    const record = params && typeof params === "object" ? params as { permissions?: unknown } : {};
+    return approved ? { permissions: record.permissions ?? {}, scope: "turn" } : { permissions: {}, scope: "turn" };
+  }
+  return { decision: approved ? "accept" : "decline" };
+}
+
 function consoleKeyboard(status: { workspaceName?: string; running?: boolean }): InlineKeyboardMarkup {
   const rows: InlineKeyboardMarkup["inline_keyboard"] = [
     [
@@ -550,10 +808,9 @@ function consoleKeyboard(status: { workspaceName?: string; running?: boolean }):
       { text: "New workspace", callback_data: "ar:n" },
     ],
   ];
-  if (status.workspaceName) {
+  if (status.workspaceName && status.running) {
     rows.push([
-      { text: "Tail 50", callback_data: "ar:t50" },
-      ...(status.running ? [{ text: "Stop", callback_data: "ar:x?" }] : []),
+      { text: "Stop", callback_data: "ar:x?" },
     ]);
   }
   rows.push([{ text: "Refresh", callback_data: "ar:s" }]);

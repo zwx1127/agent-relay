@@ -78,9 +78,60 @@ export interface IMAdapter {
 export type AgentOutputHandler = (event: AgentOutputEvent) => void | Promise<void>;
 export type AgentExitHandler = (event: AgentExitEvent) => void | Promise<void>;
 
-export interface AgentOutputEvent {
+export type AgentOutputEvent =
+  | AgentMessageOutputEvent
+  | AgentTurnCompletedEvent
+  | AgentUserInputRequestEvent
+  | AgentApprovalRequestEvent;
+
+export interface AgentMessageOutputEvent {
+  type?: "message";
   sessionKey: string;
   chunk: string;
+}
+
+export interface AgentTurnCompletedEvent {
+  type: "turn_completed";
+  sessionKey: string;
+}
+
+export interface AgentUserInputOption {
+  label: string;
+  description: string;
+}
+
+export interface AgentUserInputQuestion {
+  id: string;
+  header: string;
+  question: string;
+  isSecret?: boolean;
+  isOther?: boolean;
+  options?: AgentUserInputOption[] | null;
+}
+
+export interface AgentUserInputRequestEvent {
+  type: "user_input_request";
+  sessionKey: string;
+  requestId: string | number;
+  questions: AgentUserInputQuestion[];
+}
+
+export type AgentApprovalKind =
+  | "command"
+  | "file_change"
+  | "permissions"
+  | "legacy_command"
+  | "legacy_patch";
+
+export interface AgentApprovalRequestEvent {
+  type: "approval_request";
+  sessionKey: string;
+  requestId: string | number;
+  method: string;
+  approvalKind: AgentApprovalKind;
+  title: string;
+  body: string;
+  params: unknown;
 }
 
 export interface AgentExitEvent {
@@ -96,12 +147,15 @@ export interface AgentSessionStatus {
   workspacePath: string;
   running: boolean;
   startedAt: number;
+  threadId?: string;
+  activeTurnId?: string;
 }
 
 export interface StartAgentOptions {
   chatId: ChatId;
   workspaceName: string;
   workspacePath: string;
+  threadId?: string;
 }
 
 export interface AgentDriver {
@@ -109,6 +163,7 @@ export interface AgentDriver {
   send(sessionKey: string, text: string): Promise<void>;
   stop(sessionKey: string): Promise<void>;
   getStatus(sessionKey: string): AgentSessionStatus | undefined;
+  respond?(sessionKey: string, requestId: string | number, result: unknown): Promise<void>;
 }
 
 export interface WorkspaceRecord {
@@ -133,11 +188,14 @@ export interface TranscriptEvent {
   createdAt: number;
 }
 
-export type PendingPromptKind = "workspace_name";
+export type PendingPromptKind = "workspace_name" | "codex_user_input" | "codex_approval";
 
 export interface PendingPrompt {
   chatId: ChatId;
   promptMessageId: number;
   kind: PendingPromptKind;
   createdAt: number;
+  sessionKey?: string;
+  payloadJson?: string;
+  expiresAt?: number;
 }

@@ -45,10 +45,35 @@ describe("store", () => {
 
   test("stores pending prompts", () => {
     const store = tempStore();
-    store.setPendingPrompt({ chatId: 123, promptMessageId: 9, kind: "workspace_name", createdAt: 3 });
-    expect(store.getPendingPrompt(123, 9)).toEqual({ chatId: 123, promptMessageId: 9, kind: "workspace_name", createdAt: 3 });
+    store.setPendingPrompt({
+      chatId: 123,
+      promptMessageId: 9,
+      kind: "codex_user_input",
+      createdAt: 3,
+      sessionKey: "123:demo",
+      payloadJson: "{\"ok\":true}",
+      expiresAt: 5,
+    });
+    expect(store.getPendingPrompt(123, 9)).toEqual({
+      chatId: 123,
+      promptMessageId: 9,
+      kind: "codex_user_input",
+      createdAt: 3,
+      sessionKey: "123:demo",
+      payloadJson: "{\"ok\":true}",
+      expiresAt: 5,
+    });
     store.deletePendingPrompt(123, 9);
     expect(store.getPendingPrompt(123, 9)).toBeUndefined();
+    store.close();
+  });
+
+  test("stores app-server thread ids on sessions", () => {
+    const store = tempStore();
+    store.markSessionStarted("123:demo", 123, "demo", 4, "thread-1");
+    expect(store.getSession("123:demo")?.thread_id).toBe("thread-1");
+    store.markSessionStarted("123:demo", 123, "demo", 5);
+    expect(store.getSession("123:demo")?.thread_id).toBe("thread-1");
     store.close();
   });
 });

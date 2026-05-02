@@ -10,15 +10,16 @@ import { TextLogger, type LogLevel } from "../src/logger.ts";
 import type { AgentDriver, AgentSessionStatus, ChatId, EditMessageTextOptions, SendMessageOptions } from "../src/types.ts";
 
 class FakeAdapter {
-  sent: Array<{ chatId: ChatId; text: string; options?: SendMessageOptions }> = [];
+  sent: Array<{ chatId: ChatId; text: string; options?: SendMessageOptions; messageId?: number }> = [];
   edited: Array<{ chatId: ChatId; text: string; options: EditMessageTextOptions }> = [];
   answered: Array<{ callbackQueryId: string; text?: string }> = [];
   chatActions: Array<{ chatId: ChatId; action?: "typing" }> = [];
   nextMessageId = 100;
 
   async sendMessage(chatId: ChatId, text: string, options?: SendMessageOptions): Promise<{ messageId?: number }> {
-    this.sent.push({ chatId, text, options });
-    return { messageId: this.nextMessageId++ };
+    const messageId = this.nextMessageId++;
+    this.sent.push({ chatId, text, options, messageId });
+    return { messageId };
   }
 
   async editMessageText(chatId: ChatId, text: string, options: EditMessageTextOptions): Promise<void> {
@@ -38,6 +39,7 @@ class FakeAgent implements AgentDriver {
   statuses = new Map<string, AgentSessionStatus>();
   sent: Array<{ key: string; text: string }> = [];
   stopped: string[] = [];
+  responses: Array<{ key: string; requestId: string | number; result: unknown }> = [];
 
   async start(options: { chatId: ChatId; workspaceName: string; workspacePath: string }): Promise<AgentSessionStatus> {
     const key = sessionKey(options.chatId, options.workspaceName);
@@ -64,6 +66,10 @@ class FakeAgent implements AgentDriver {
 
   getStatus(key: string): AgentSessionStatus | undefined {
     return this.statuses.get(key);
+  }
+
+  async respond(key: string, requestId: string | number, result: unknown): Promise<void> {
+    this.responses.push({ key, requestId, result });
   }
 }
 
@@ -163,18 +169,17 @@ describe("router", () => {
     expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "/status" });
   });
 
-  test("tail callback returns agent transcript with entities", async () => {
+  test("console no longer exposes raw tail action", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
     store.bindChat(1, "demo");
-    store.appendTranscript({ chatId: 1, workspaceName: "demo", role: "agent", text: "one\n", createdAt: 1 });
 
-    await router.handle(callbackMessage("ar:t50"));
+    await router.handle(textMessage("/relay"));
 
-    expect(adapter.sent.at(-1)?.text).toBe("one\n");
-    expect(adapter.sent.at(-1)?.options?.entities).toEqual([]);
+    const callbackData = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data);
+    expect(callbackData).not.toContain("ar:t50");
   });
 
   test("formats realtime agent output as telegram html", async () => {
@@ -302,20 +307,159 @@ describe("router", () => {
     expect(adapter.edited.at(-1)?.text).toContain("<b>Error:</b> Unknown callback.");
     expect(adapter.edited.at(-1)?.options.parseMode).toBe("HTML");
   });
+
+  test("codex option question uses inline keyboard and responds with selected label", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "1:demo",
+      requestId: 77,
+      questions: [{
+        id: "choice",
+        header: "Mode",
+        question: "Pick one.",
+        options: [{ label: "Fast", description: "Low detail" }, { label: "Deep", description: "More detail" }],
+      }],
+    });
+
+    const prompt = adapter.sent.at(-1)!;
+    expect(prompt.text).toContain("<b>Mode</b>");
+    const button = prompt.options?.replyMarkup?.inline_keyboard[0]?.[0];
+    expect(button?.text).toBe("Fast");
+
+    await router.handle(callbackMessage(button!.callback_data, 7, "cbq", prompt.messageId ?? 100));
+
+    expect(agent.responses).toEqual([{
+      key: "1:demo",
+      requestId: 77,
+      result: { answers: { choice: { answers: ["Fast"] } } },
+    }]);
+    expect(adapter.edited.at(-1)?.text).toContain("Answered");
+  });
+
+  test("codex free text question uses ForceReply and reply is not forwarded as prompt", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "1:demo",
+      requestId: "req1",
+      questions: [{ id: "notes", header: "Notes", question: "What should I use?" }],
+    });
+    const promptId = adapter.sent.at(-1)?.messageId;
+    expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
+
+    await router.handle(textMessage("Use SQLite", 7, promptId));
+
+    expect(agent.responses).toEqual([{
+      key: "1:demo",
+      requestId: "req1",
+      result: { answers: { notes: { answers: ["Use SQLite"] } } },
+    }]);
+    expect(agent.sent).toEqual([]);
+  });
+
+  test("codex multi-question request waits for all answers", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "1:demo",
+      requestId: 88,
+      questions: [
+        { id: "first", header: "First", question: "A?", options: [{ label: "A", description: "" }] },
+        { id: "second", header: "Second", question: "B?", options: [{ label: "B", description: "" }] },
+      ],
+    });
+    const first = adapter.sent.at(-2)!;
+    const second = adapter.sent.at(-1)!;
+
+    await router.handle(callbackMessage(first.options!.replyMarkup!.inline_keyboard[0]![0]!.callback_data, 7, "cb-first", first.messageId));
+    expect(agent.responses).toEqual([]);
+
+    await router.handle(callbackMessage(second.options!.replyMarkup!.inline_keyboard[0]![0]!.callback_data, 7, "cb-second", second.messageId));
+    expect(agent.responses.at(-1)?.result).toEqual({
+      answers: {
+        first: { answers: ["A"] },
+        second: { answers: ["B"] },
+      },
+    });
+  });
+
+  test("stale codex question does not forward answer to Codex", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    store.setPendingPrompt({
+      chatId: 1,
+      promptMessageId: 501,
+      kind: "codex_user_input",
+      createdAt: 1,
+      sessionKey: "1:demo",
+      expiresAt: Date.now() - 1,
+      payloadJson: JSON.stringify({ requestId: "old", questionId: "q" }),
+    });
+
+    await router.handle(textMessage("late answer", 7, 501));
+
+    expect(agent.responses).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toBe("Question expired.");
+  });
+
+  test("codex command approval sends button decision", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await router.handleAgentOutput({
+      type: "approval_request",
+      sessionKey: "1:demo",
+      requestId: 91,
+      method: "item/commandExecution/requestApproval",
+      approvalKind: "command",
+      title: "Approve command?",
+      body: "bun test",
+      params: { command: "bun test" },
+    });
+    const prompt = adapter.sent.at(-1)!;
+    const approve = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
+
+    await router.handle(callbackMessage(approve.callback_data, 7, "cba", prompt.messageId));
+
+    expect(agent.responses).toEqual([{ key: "1:demo", requestId: 91, result: { decision: "accept" } }]);
+    expect(adapter.edited.at(-1)?.text).toContain("Approved");
+  });
 });
 
 function textMessage(text: string, userId = 7, replyToMessageId?: number) {
   return { kind: "message" as const, id: "1", chatId: 1, userId, text, replyToMessageId };
 }
 
-function callbackMessage(data: string, userId = 7, callbackQueryId = "cb1") {
+function callbackMessage(data: string, userId = 7, callbackQueryId = "cb1", messageId = 42) {
   return {
     kind: "callback_query" as const,
     id: callbackQueryId,
     chatId: 1,
     userId,
     callbackQueryId,
-    messageId: 42,
+    messageId,
     data,
   };
 }
