@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Database } from "bun:sqlite";
+import { noopLogger, type Logger } from "./logger.ts";
 import type { ChatBinding, ChatId, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "./types.ts";
 
 interface WorkspaceRow {
@@ -22,16 +23,18 @@ interface TranscriptRow {
 export class Store {
   readonly db: Database;
 
-  constructor(path: string) {
+  constructor(path: string, private readonly logger: Logger = noopLogger) {
     const absolutePath = resolve(path);
     mkdirSync(dirname(absolutePath), { recursive: true });
     this.db = new Database(absolutePath);
     this.db.run("PRAGMA journal_mode = WAL");
     this.migrate();
+    this.logger.info("store.opened", { path: absolutePath });
   }
 
   close(): void {
     this.db.close();
+    this.logger.info("store.closed");
   }
 
   migrate(): void {
@@ -69,6 +72,7 @@ export class Store {
         created_at INTEGER NOT NULL
       )
     `);
+    this.logger.debug("store.migrated");
   }
 
   upsertWorkspace(record: WorkspaceRecord): void {
@@ -107,10 +111,12 @@ export class Store {
       VALUES ($sessionKey, $chatId, $workspaceName, 'running', $startedAt, NULL)
       ON CONFLICT(session_key) DO UPDATE SET status = 'running', started_at = excluded.started_at, stopped_at = NULL
     `).run({ $sessionKey: sessionKey, $chatId: chatId, $workspaceName: workspaceName, $startedAt: startedAt });
+    this.logger.info("store.session_marked_started", { session_key: sessionKey, chat_id: chatId, workspace: workspaceName });
   }
 
   markSessionStopped(sessionKey: string, stoppedAt = Date.now()): void {
     this.db.query("UPDATE agent_sessions SET status = 'stopped', stopped_at = ? WHERE session_key = ?").run(stoppedAt, sessionKey);
+    this.logger.info("store.session_marked_stopped", { session_key: sessionKey });
   }
 
   appendTranscript(event: TranscriptEvent): void {

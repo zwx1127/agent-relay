@@ -6,6 +6,7 @@ import { sessionKey } from "../src/agent.ts";
 import type { AppConfig } from "../src/config.ts";
 import { MessageRouter } from "../src/router.ts";
 import { Store } from "../src/store.ts";
+import { TextLogger, type LogLevel } from "../src/logger.ts";
 import type { AgentDriver, AgentSessionStatus, ChatId } from "../src/types.ts";
 
 class FakeAdapter {
@@ -50,13 +51,15 @@ class FakeAgent implements AgentDriver {
 
 let dirs: string[] = [];
 
-function fixture(): { router: MessageRouter; store: Store; adapter: FakeAdapter; agent: FakeAgent; root: string } {
+function fixture(logLevel: LogLevel = "info"): { router: MessageRouter; store: Store; adapter: FakeAdapter; agent: FakeAgent; root: string; logLines: string[] } {
   const root = mkdtempSync(join(tmpdir(), "agent-relay-router-root-"));
   const data = mkdtempSync(join(tmpdir(), "agent-relay-router-data-"));
   dirs.push(root, data);
   const store = new Store(join(data, "db.sqlite"));
   const adapter = new FakeAdapter();
   const agent = new FakeAgent();
+  const logLines: string[] = [];
+  const logger = new TextLogger(logLevel, (line) => logLines.push(line), () => new Date("2026-05-02T08:00:00.000Z"));
   const config: AppConfig = {
     telegramBotToken: "token",
     telegramAllowedUserIds: new Set([7]),
@@ -65,8 +68,9 @@ function fixture(): { router: MessageRouter; store: Store; adapter: FakeAdapter;
     codexBin: "codex",
     codexSandbox: "workspace-write",
     codexApproval: "on-request",
+    logLevel,
   };
-  return { router: new MessageRouter({ config, store, adapter, agent }), store, adapter, agent, root };
+  return { router: new MessageRouter({ config, store, adapter, agent, logger }), store, adapter, agent, root, logLines };
 }
 
 afterEach(() => {
@@ -92,6 +96,33 @@ describe("router", () => {
 
     expect(agent.sent).toEqual([{ key: "1:demo", text: "hello codex" }]);
     expect(agent.getStatus("1:demo")?.running).toBe(true);
+  });
+
+  test("info logs message metadata without raw text", async () => {
+    const { router, store, root, logLines } = fixture("info");
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await router.handle({ id: "1", chatId: 1, userId: 7, text: "secret prompt" });
+
+    const logs = logLines.join("\n");
+    expect(logs).toContain("router.message_received");
+    expect(logs).toContain("text_len=13");
+    expect(logs).not.toContain("secret prompt");
+  });
+
+  test("debug logs raw message text", async () => {
+    const { router, store, root, logLines } = fixture("debug");
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await router.handle({ id: "1", chatId: 1, userId: 7, text: "secret prompt" });
+
+    expect(logLines.join("\n")).toContain('message_text="secret prompt"');
   });
 
   test("/send forwards command-like text", async () => {

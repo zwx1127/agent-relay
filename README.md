@@ -35,6 +35,7 @@ SQLITE_PATH=.data/agent-relay.sqlite
 CODEX_BIN=codex
 CODEX_SANDBOX=workspace-write
 CODEX_APPROVAL=on-request
+LOG_LEVEL=info
 ```
 
 Shell environment variables still override values from `.env`.
@@ -79,6 +80,14 @@ codex --no-alt-screen -C <workspace> -s <CODEX_SANDBOX> -a <CODEX_APPROVAL>
 - PTY output is stripped of ANSI/control sequences, stored in SQLite, debounced, and split into Telegram-sized messages.
 - `/exit` sends Ctrl-C first, then kills the process if it is still alive after 5 seconds.
 
+## Logging
+
+Runtime logs are written to stdout as text lines. Set `LOG_LEVEL` to `debug`, `info`, `warn`, or `error`; the default is `info`.
+
+At `info` and above, logs include operational metadata such as chat ID, user ID, workspace, command name, text length, session key, and process exit status. They do not include the Telegram bot token, Telegram message text, or Codex output.
+
+At `debug`, logs also include raw Telegram messages and Codex input/output chunks. Use it only in environments where those logs are protected.
+
 ## Project Structure
 
 ```text
@@ -86,6 +95,7 @@ src/
   agent.ts       Agent driver interface helpers
   codex.ts       Codex CLI PTY driver
   config.ts      Environment parsing and allowlist checks
+  logger.ts      Text stdout logger and log level parsing
   main.ts        Runtime wiring
   router.ts      Telegram command and message routing
   store.ts       SQLite schema and persistence

@@ -21,7 +21,27 @@ describe("config", () => {
     });
     expect(config.sqlitePath).toBe(".data/agent-relay.sqlite");
     expect(config.codexBin).toBe("codex");
+    expect(config.logLevel).toBe("info");
     expect(config.telegramAllowedUserIds.has(10)).toBe(true);
+  });
+
+  test("loads log level", () => {
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: "token",
+      TELEGRAM_ALLOWED_USER_IDS: "10",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+      LOG_LEVEL: "debug",
+    });
+    expect(config.logLevel).toBe("debug");
+  });
+
+  test("rejects invalid log level", () => {
+    expect(() => loadConfig({
+      TELEGRAM_BOT_TOKEN: "token",
+      TELEGRAM_ALLOWED_USER_IDS: "10",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+      LOG_LEVEL: "verbose",
+    })).toThrow("LOG_LEVEL");
   });
 
   test("loads values from dotenv files", () => {

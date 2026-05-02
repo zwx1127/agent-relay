@@ -6,6 +6,7 @@ import type { AgentDriver, ChatId, IMAdapter, InboundMessage, WorkspaceRecord } 
 import type { Store } from "./store.ts";
 import { createWorkspace, resolveWorkspacePath, validateWorkspaceName } from "./workspace.ts";
 import { tailLines } from "./text.ts";
+import { noopLogger, type Logger } from "./logger.ts";
 
 const HELP = [
   "Commands:",
@@ -24,19 +25,44 @@ export interface RouterDeps {
   store: Store;
   adapter: Pick<IMAdapter, "sendMessage">;
   agent: AgentDriver;
+  logger?: Logger;
 }
 
 export class MessageRouter {
-  constructor(private readonly deps: RouterDeps) {}
+  private readonly logger: Logger;
+
+  constructor(private readonly deps: RouterDeps) {
+    this.logger = deps.logger ?? noopLogger;
+  }
 
   async handle(message: InboundMessage): Promise<void> {
+    const text = message.text.trim();
+    const command = text.startsWith("/") ? commandName(text) : undefined;
+    this.logger.info("router.message_received", {
+      chat_id: message.chatId,
+      user_id: message.userId,
+      message_id: message.id,
+      text_len: message.text.length,
+      command,
+    });
+    this.logger.debug("router.message_text", {
+      chat_id: message.chatId,
+      user_id: message.userId,
+      message_id: message.id,
+      message_text: message.text,
+    });
+
     if (!isAuthorized(this.deps.config, message.userId, message.chatId)) {
+      this.logger.warn("router.unauthorized_message", {
+        chat_id: message.chatId,
+        user_id: message.userId,
+        message_id: message.id,
+      });
       await this.deps.adapter.sendMessage(message.chatId, "Unauthorized.");
       return;
     }
 
     try {
-      const text = message.text.trim();
       if (text.startsWith("/")) {
         await this.handleCommand(message.chatId, text);
       } else {
@@ -44,6 +70,13 @@ export class MessageRouter {
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
+      this.logger.error("router.message_failed", {
+        chat_id: message.chatId,
+        user_id: message.userId,
+        message_id: message.id,
+        command,
+        error: error instanceof Error ? error : new Error(detail),
+      });
       await this.deps.adapter.sendMessage(message.chatId, `Error: ${detail}`);
       this.appendSystem(message.chatId, `Error: ${detail}\n`);
     }
@@ -51,7 +84,17 @@ export class MessageRouter {
 
   async handleAgentOutput(session: { sessionKey: string; chunk: string }): Promise<void> {
     const parsed = parseSessionKey(session.sessionKey);
-    if (!parsed) return;
+    if (!parsed) {
+      this.logger.warn("router.agent_output_invalid_session", { session_key: session.sessionKey, chunk_len: session.chunk.length });
+      return;
+    }
+    this.logger.debug("router.agent_output_received", {
+      session_key: session.sessionKey,
+      chat_id: parsed.chatId,
+      workspace: parsed.workspaceName,
+      chunk_len: session.chunk.length,
+      agent_chunk: session.chunk,
+    });
     this.deps.store.appendTranscript({
       chatId: parsed.chatId,
       workspaceName: parsed.workspaceName,
@@ -64,15 +107,34 @@ export class MessageRouter {
 
   async handleAgentExit(sessionKeyValue: string, exitText: string): Promise<void> {
     const parsed = parseSessionKey(sessionKeyValue);
-    if (!parsed) return;
+    if (!parsed) {
+      this.logger.warn("router.agent_exit_invalid_session", { session_key: sessionKeyValue });
+      return;
+    }
+    this.logger.info("router.agent_exit", {
+      session_key: sessionKeyValue,
+      chat_id: parsed.chatId,
+      workspace: parsed.workspaceName,
+    });
     this.deps.store.markSessionStopped(sessionKeyValue);
     await this.deps.adapter.sendMessage(parsed.chatId, exitText);
   }
 
   private async handleCommand(chatId: ChatId, text: string): Promise<void> {
     const [command = "", ...rest] = text.split(/\s+/);
+    const normalizedCommand = command.split("@")[0];
     const argText = text.slice(command.length).trim();
-    switch (command.split("@")[0]) {
+    this.logger.info("router.command_received", {
+      chat_id: chatId,
+      command: normalizedCommand,
+      arg_len: argText.length,
+    });
+    this.logger.debug("router.command_text", {
+      chat_id: chatId,
+      command: normalizedCommand,
+      command_text: text,
+    });
+    switch (normalizedCommand) {
       case "/help":
         await this.deps.adapter.sendMessage(chatId, HELP);
         return;
@@ -105,6 +167,7 @@ export class MessageRouter {
 
   private async listWorkspaces(chatId: ChatId): Promise<void> {
     const workspaces = this.deps.store.listWorkspaces();
+    this.logger.info("router.workspaces_listed", { chat_id: chatId, count: workspaces.length });
     if (workspaces.length === 0) {
       await this.deps.adapter.sendMessage(chatId, "No workspaces. Use /new <name>.");
       return;
@@ -118,6 +181,7 @@ export class MessageRouter {
     const path = await createWorkspace(this.deps.config.workspaceRoot, name);
     this.deps.store.upsertWorkspace({ name, path, createdAt: Date.now() });
     this.deps.store.bindChat(chatId, name);
+    this.logger.info("router.workspace_created", { chat_id: chatId, workspace: name, path });
     await this.deps.adapter.sendMessage(chatId, `Workspace '${name}' created and selected.`);
   }
 
@@ -125,6 +189,7 @@ export class MessageRouter {
     if (!name) throw new Error("Usage: /use <name>");
     const workspace = this.requireWorkspace(name);
     this.deps.store.bindChat(chatId, workspace.name);
+    this.logger.info("router.workspace_selected", { chat_id: chatId, workspace: workspace.name, path: workspace.path });
     await this.deps.adapter.sendMessage(chatId, `Using workspace '${workspace.name}'.`);
   }
 
@@ -135,6 +200,11 @@ export class MessageRouter {
       return;
     }
     const status = this.deps.agent.getStatus(sessionKey(chatId, workspace.name));
+    this.logger.info("router.status_reported", {
+      chat_id: chatId,
+      workspace: workspace.name,
+      running: Boolean(status?.running),
+    });
     await this.deps.adapter.sendMessage(chatId, [
       `Workspace: ${workspace.name}`,
       `Path: ${workspace.path}`,
@@ -147,6 +217,7 @@ export class MessageRouter {
     const count = rawCount ? Number(rawCount) : 50;
     if (!Number.isInteger(count) || count < 1) throw new Error("Usage: /tail [positive integer]");
     const text = this.deps.store.recentTranscript(chatId, workspace.name, "agent", 500);
+    this.logger.info("router.tail_reported", { chat_id: chatId, workspace: workspace.name, count, text_len: text.length });
     await this.deps.adapter.sendMessage(chatId, text ? tailLines(text, count) : "No agent output yet.");
   }
 
@@ -155,6 +226,7 @@ export class MessageRouter {
     const key = sessionKey(chatId, workspace.name);
     await this.deps.agent.stop(key);
     this.deps.store.markSessionStopped(key);
+    this.logger.info("router.session_stopped", { chat_id: chatId, workspace: workspace.name, session_key: key });
     await this.deps.adapter.sendMessage(chatId, "Codex session stopped.");
   }
 
@@ -163,9 +235,23 @@ export class MessageRouter {
     const workspace = this.requireCurrentWorkspace(chatId);
     const key = sessionKey(chatId, workspace.name);
     if (!this.deps.agent.getStatus(key)) {
+      this.logger.info("router.session_starting", { chat_id: chatId, workspace: workspace.name, session_key: key });
       await this.deps.agent.start({ chatId, workspaceName: workspace.name, workspacePath: workspace.path });
       this.deps.store.markSessionStarted(key, chatId, workspace.name);
+      this.logger.info("router.session_started", { chat_id: chatId, workspace: workspace.name, session_key: key });
     }
+    this.logger.info("router.user_input_forwarded", {
+      chat_id: chatId,
+      workspace: workspace.name,
+      session_key: key,
+      text_len: text.length,
+    });
+    this.logger.debug("router.user_input_text", {
+      chat_id: chatId,
+      workspace: workspace.name,
+      session_key: key,
+      message_text: text,
+    });
     this.deps.store.appendTranscript({
       chatId,
       workspaceName: workspace.name,
@@ -212,17 +298,30 @@ export class MessageRouter {
     const pending = this.pendingOutput.get(chatId);
     if (pending) {
       pending.text += chunk;
+      this.logger.debug("router.agent_output_buffered", { chat_id: chatId, chunk_len: chunk.length, buffered_len: pending.text.length });
       return;
     }
     const state = {
       text: chunk,
       timer: setTimeout(() => {
         this.pendingOutput.delete(chatId);
-        void this.deps.adapter.sendMessage(chatId, state.text);
+        this.logger.debug("router.agent_output_flushed", { chat_id: chatId, text_len: state.text.length });
+        void this.deps.adapter.sendMessage(chatId, state.text).catch((error) => {
+          this.logger.error("router.agent_output_send_failed", {
+            chat_id: chatId,
+            text_len: state.text.length,
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+        });
       }, 800),
     };
     this.pendingOutput.set(chatId, state);
   }
+}
+
+function commandName(text: string): string | undefined {
+  const [command = ""] = text.split(/\s+/);
+  return command.split("@")[0] || undefined;
 }
 
 export function parseSessionKey(key: string): { chatId: ChatId; workspaceName: string } | undefined {

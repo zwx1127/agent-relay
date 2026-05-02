@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { parseLogLevel, type LogLevel } from "./logger.ts";
 
 export interface AppConfig {
   telegramBotToken: string;
@@ -10,6 +11,7 @@ export interface AppConfig {
   codexBin: string;
   codexSandbox: string;
   codexApproval: string;
+  logLevel: LogLevel;
 }
 
 export type Env = Record<string, string | undefined>;
@@ -90,6 +92,7 @@ export function loadConfig(env?: Env): AppConfig {
     codexBin: effectiveEnv.CODEX_BIN?.trim() || "codex",
     codexSandbox: effectiveEnv.CODEX_SANDBOX?.trim() || "workspace-write",
     codexApproval: effectiveEnv.CODEX_APPROVAL?.trim() || "on-request",
+    logLevel: parseLogLevel(effectiveEnv.LOG_LEVEL),
   };
 }
 
