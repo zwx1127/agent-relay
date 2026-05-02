@@ -1,5 +1,5 @@
 import type { ChatId, EditMessageTextOptions, IMAdapter, InboundMessage, SendMessageOptions } from "./types.ts";
-import { splitForTelegram } from "./text.ts";
+import { splitForTelegram, splitHtmlForTelegram } from "./text.ts";
 import { noopLogger, type Logger } from "./logger.ts";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit | BunFetchRequestInit) => Promise<Response>;
@@ -127,7 +127,8 @@ export class TelegramAdapter implements IMAdapter {
   }
 
   async sendMessage(chatId: ChatId, text: string, options: SendMessageOptions = {}): Promise<void> {
-    const chunks = splitForTelegram(text.length > 0 ? text : "(empty)");
+    const messageText = text.length > 0 ? text : "(empty)";
+    const chunks = options.parseMode === "HTML" ? splitHtmlForTelegram(messageText) : splitForTelegram(messageText);
     this.logger.debug("telegram.send_message_started", { chat_id: chatId, text_len: text.length, chunks: chunks.length });
     for (const [index, chunk] of chunks.entries()) {
       try {

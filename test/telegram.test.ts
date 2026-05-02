@@ -123,6 +123,25 @@ describe("telegram adapter", () => {
     });
   });
 
+  test("splits html outbound messages without dropping parse mode", async () => {
+    const sentBodies: Array<{ text: string; parse_mode?: string }> = [];
+    const adapter = new TelegramAdapter("token", async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ ok: true, result: true });
+    });
+
+    await adapter.sendMessage(1, `<pre>${"x".repeat(3600)}</pre>`, {
+      parseMode: "HTML",
+      replyMarkup: { inline_keyboard: [[{ text: "Status", callback_data: "ar:status" }]] },
+    });
+
+    expect(sentBodies.length).toBeGreaterThan(1);
+    expect(sentBodies.every((body) => body.parse_mode === "HTML")).toBe(true);
+    expect(sentBodies.every((body) => body.text.startsWith("<pre>") && body.text.endsWith("</pre>"))).toBe(true);
+    expect(sentBodies.slice(0, -1).every((body) => !("reply_markup" in body))).toBe(true);
+    expect(sentBodies.at(-1)).toHaveProperty("reply_markup");
+  });
+
   test("edits messages and answers callback queries", async () => {
     const requests: Array<{ method: string; body: unknown }> = [];
     const adapter = new TelegramAdapter("token", async (url, init) => {

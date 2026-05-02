@@ -167,7 +167,21 @@ describe("router", () => {
     await router.handle(textMessage("/tail"));
 
     expect(adapter.sent.at(-1)?.text).toBe("one\n");
-    expect(adapter.sent.at(-1)?.options?.parseMode).toBeUndefined();
+    expect(adapter.sent.at(-1)?.options?.parseMode).toBe("HTML");
+  });
+
+  test("formats realtime agent output as telegram html", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "**Done** `src/app.ts`\n" });
+    await sleep(850);
+
+    expect(adapter.sent.at(-1)?.text).toBe("<b>Done</b> <code>src/app.ts</code>\n");
+    expect(adapter.sent.at(-1)?.options?.parseMode).toBe("HTML");
   });
 
   test("/exit stops current session", async () => {
@@ -280,4 +294,8 @@ function callbackMessage(data: string, userId = 7, callbackQueryId = "cb1") {
     messageId: 42,
     data,
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

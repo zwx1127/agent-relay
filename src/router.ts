@@ -5,7 +5,7 @@ import { sessionKey } from "./agent.ts";
 import type { AgentDriver, ChatId, IMAdapter, InboundMessage, InlineKeyboardMarkup, WorkspaceRecord } from "./types.ts";
 import type { Store } from "./store.ts";
 import { createWorkspace, resolveWorkspacePath, validateWorkspaceName } from "./workspace.ts";
-import { formatError, formatHelp, formatStatus, formatWorkspaces, htmlEscape, tailLines } from "./text.ts";
+import { formatAgentMarkdownForTelegramHtml, formatError, formatHelp, formatStatus, formatWorkspaces, htmlEscape, tailLines } from "./text.ts";
 import { noopLogger, type Logger } from "./logger.ts";
 
 const CALLBACK_PREFIX = "ar:";
@@ -212,7 +212,7 @@ export class MessageRouter {
     if (!Number.isInteger(count) || count < 1) throw new Error("Usage: /tail [positive integer]");
     const text = this.deps.store.recentTranscript(chatId, workspace.name, "agent", 500);
     this.logger.info("router.tail_reported", { chat_id: chatId, workspace: workspace.name, count, text_len: text.length });
-    await this.deps.adapter.sendMessage(chatId, text ? tailLines(text, count) : "No agent output yet.");
+    await this.deps.adapter.sendMessage(chatId, text ? formatAgentMarkdownForTelegramHtml(tailLines(text, count)) : "No agent output yet.", HTML);
   }
 
   private async exit(chatId: ChatId): Promise<void> {
@@ -453,7 +453,7 @@ export class MessageRouter {
       timer: setTimeout(() => {
         this.pendingOutput.delete(chatId);
         this.logger.debug("router.agent_output_flushed", { chat_id: chatId, text_len: state.text.length });
-        void this.deps.adapter.sendMessage(chatId, state.text).catch((error) => {
+        void this.sendAgentOutput(chatId, state.text).catch((error) => {
           this.logger.error("router.agent_output_send_failed", {
             chat_id: chatId,
             text_len: state.text.length,
@@ -463,6 +463,19 @@ export class MessageRouter {
       }, 800),
     };
     this.pendingOutput.set(chatId, state);
+  }
+
+  private async sendAgentOutput(chatId: ChatId, text: string): Promise<void> {
+    try {
+      await this.deps.adapter.sendMessage(chatId, formatAgentMarkdownForTelegramHtml(text), HTML);
+    } catch (error) {
+      this.logger.warn("router.agent_output_html_send_failed", {
+        chat_id: chatId,
+        text_len: text.length,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+      await this.deps.adapter.sendMessage(chatId, text);
+    }
   }
 }
 

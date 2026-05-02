@@ -69,7 +69,7 @@ Plain text is sent to the current workspace's Codex session. If that session is 
 
 System and command responses use Telegram HTML formatting. Dynamic values such as workspace names, paths, and error details are escaped before rendering.
 
-Agent output and `/tail` responses are sent as plain text, without Telegram Markdown or HTML parsing, so terminal output is not reformatted by the Telegram client.
+Agent output and `/tail` responses render common Codex Markdown as Telegram HTML, including headings, lists, emphasis, inline code, code blocks, and HTTP/HTTPS links. Dynamic agent text is escaped before rendering; unsupported Markdown is left readable as text.
 
 Inline buttons use callback queries for common actions:
 
@@ -96,6 +96,7 @@ codex --no-alt-screen -C <workspace> -s <CODEX_SANDBOX> -a <CODEX_APPROVAL>
 ```
 
 - PTY output is stripped of ANSI/control sequences, stored in SQLite, debounced, and split into Telegram-sized messages.
+- Agent output is formatted from common Markdown into Telegram HTML before sending, with safe escaping and tag-aware splitting for long messages.
 - `/exit` sends Ctrl-C first, then kills the process if it is still alive after 5 seconds.
 - The `Stop` inline button uses the same session stop behavior as `/exit`, but requires a second confirmation tap.
 
