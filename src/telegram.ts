@@ -167,7 +167,7 @@ export class TelegramAdapter implements IMAdapter {
         ...(options.parseMode ? { parse_mode: options.parseMode } : {}),
         ...(options.entities && options.entities.length > 0 ? { entities: options.entities } : {}),
         ...(replyMarkupForOptions(options, true)),
-      });
+      }, { quietMessageNotModified: true });
     } catch (error) {
       if (isMessageNotModifiedError(error)) {
         this.logger.debug("telegram.edit_message_not_modified", { chat_id: chatId, message_id: options.messageId });
@@ -228,7 +228,7 @@ export class TelegramAdapter implements IMAdapter {
     return undefined;
   }
 
-  private async request<T>(method: string, body: unknown): Promise<T> {
+  private async request<T>(method: string, body: unknown, options: { quietMessageNotModified?: boolean } = {}): Promise<T> {
     const response = await this.fetchImpl(`${this.apiBase}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -242,18 +242,22 @@ export class TelegramAdapter implements IMAdapter {
     }
     if (!response.ok) {
       const description = payload?.description;
-      this.logger.error("telegram.api_http_error", {
-        method,
-        status: response.status,
-        description: description || "unknown HTTP error",
-      });
+      if (!isQuietMessageNotModified(description, options)) {
+        this.logger.error("telegram.api_http_error", {
+          method,
+          status: response.status,
+          description: description || "unknown HTTP error",
+        });
+      }
       throw new TelegramApiError(method, response.status, description);
     }
     if (!payload) {
       throw new Error(`Telegram ${method} returned an empty response`);
     }
     if (!payload.ok) {
-      this.logger.error("telegram.api_error", { method, description: payload.description || "unknown API error" });
+      if (!isQuietMessageNotModified(payload.description, options)) {
+        this.logger.error("telegram.api_error", { method, description: payload.description || "unknown API error" });
+      }
       throw new TelegramApiError(method, response.status, payload.description || "unknown API error");
     }
     return payload.result as T;
@@ -261,10 +265,18 @@ export class TelegramAdapter implements IMAdapter {
 }
 
 function isMessageNotModifiedError(error: unknown): boolean {
-  if (error instanceof TelegramApiError && error.description?.toLowerCase().includes("message is not modified")) {
+  if (error instanceof TelegramApiError && isMessageNotModifiedDescription(error.description)) {
     return true;
   }
   return error instanceof Error && error.message.toLowerCase().includes("message is not modified");
+}
+
+function isQuietMessageNotModified(description: string | undefined, options: { quietMessageNotModified?: boolean }): boolean {
+  return Boolean(options.quietMessageNotModified && isMessageNotModifiedDescription(description));
+}
+
+function isMessageNotModifiedDescription(description: string | undefined): boolean {
+  return Boolean(description?.toLowerCase().includes("message is not modified"));
 }
 
 function outboundChunks(text: string, options: SendMessageOptions): Array<{ text: string; entities: NonNullable<SendMessageOptions["entities"]> }> {

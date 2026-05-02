@@ -144,9 +144,22 @@ export class CodexDriver extends BaseAgentDriver {
       text_len: text.length,
     });
     this.logger.debug("codex.input_text", { session_key: key, message_text: text });
-    const result = await this.request(method, params);
-    const turnId = getTurnId(result);
-    if (turnId) running.status.activeTurnId = turnId;
+    let result: unknown;
+    try {
+      result = await this.request(method, params);
+    } catch (error) {
+      if (method !== "turn/steer" || !isNoActiveTurnToSteerError(error)) throw error;
+      this.logger.warn("codex.stale_active_turn_recovered", {
+        session_key: key,
+        chat_id: running.status.chatId,
+        workspace: running.status.workspaceName,
+        thread_id: running.status.threadId,
+        stale_turn_id: running.status.activeTurnId,
+      });
+      running.status.activeTurnId = undefined;
+      result = await this.request("turn/start", { threadId: running.status.threadId, input });
+    }
+    updateActiveTurnFromResult(running, result);
   }
 
   async stop(key: string): Promise<void> {
@@ -412,6 +425,27 @@ function getTurnId(value: unknown): string | undefined {
   const turn = asRecord(record?.turn);
   if (typeof turn?.id === "string") return turn.id;
   return typeof record?.turnId === "string" ? record.turnId : undefined;
+}
+
+function getTurnStatus(value: unknown): string | undefined {
+  const record = asRecord(value);
+  const turn = asRecord(record?.turn);
+  return typeof turn?.status === "string" ? turn.status : undefined;
+}
+
+function updateActiveTurnFromResult(running: RunningSession, result: unknown): void {
+  const turnId = getTurnId(result);
+  if (!turnId) return;
+  const status = getTurnStatus(result);
+  if (status && status !== "inProgress") {
+    running.status.activeTurnId = undefined;
+    return;
+  }
+  running.status.activeTurnId = turnId;
+}
+
+function isNoActiveTurnToSteerError(error: unknown): boolean {
+  return error instanceof Error && error.message.toLowerCase().includes("no active turn to steer");
 }
 
 function toQuestion(value: unknown): AgentUserInputQuestion | undefined {

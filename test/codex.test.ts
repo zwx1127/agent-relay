@@ -69,6 +69,27 @@ describe("CodexDriver app-server protocol", () => {
     expect(readLog(fake)).toContain('"id":900,"result":{"answers":{"mode":{"answers":["Fast"]}}}');
     await driver.stop(status.sessionKey);
   });
+
+  test("retries stale turn steering as a new turn", async () => {
+    const fake = fakeCodexBin();
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "ask");
+    await driver.send(status.sessionKey, "after stale");
+
+    const methods = readLog(fake)
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line).method)
+      .filter((method) => method === "turn/start" || method === "turn/steer");
+    expect(methods).toEqual(["turn/start", "turn/steer", "turn/start"]);
+    await driver.stop(status.sessionKey);
+  });
 });
 
 function fakeCodexBin(): string {
@@ -81,6 +102,7 @@ const fs = require("fs");
 const readline = require("readline");
 const log = ${JSON.stringify(log)};
 const rl = readline.createInterface({ input: process.stdin });
+let turnCount = 0;
 function send(message) { process.stdout.write(JSON.stringify(message) + "\\n"); }
 rl.on("line", (line) => {
   fs.appendFileSync(log, line + "\\n");
@@ -90,16 +112,19 @@ rl.on("line", (line) => {
   } else if (msg.method === "thread/start" || msg.method === "thread/resume") {
     send({ id: msg.id, result: { thread: { id: "thread-1" } } });
   } else if (msg.method === "turn/start") {
-    send({ id: msg.id, result: { turn: { id: "turn-1", status: "running", items: [] } } });
+    const turnId = "turn-" + (++turnCount);
+    send({ id: msg.id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });
     if (msg.params.input[0].text === "ask") {
-      send({ id: 900, method: "item/tool/requestUserInput", params: { threadId: "thread-1", turnId: "turn-1", itemId: "item-1", questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [{ label: "Fast", description: "Quick" }] }] } });
+      send({ id: 900, method: "item/tool/requestUserInput", params: { threadId: "thread-1", turnId, itemId: "item-1", questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [{ label: "Fast", description: "Quick" }] }] } });
     } else {
-      send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "turn-1", itemId: "m1", delta: "hello " } });
-      send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", turnId: "turn-1", itemId: "c1", delta: "raw stdout" } });
-      send({ method: "item/commandExecution/terminalInteraction", params: { threadId: "thread-1", turnId: "turn-1", itemId: "t1", processId: "p1", stdin: "raw stdin" } });
-      send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "turn-1", itemId: "m1", delta: "world" } });
-      send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } });
+      send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId, itemId: "m1", delta: "hello " } });
+      send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", turnId, itemId: "c1", delta: "raw stdout" } });
+      send({ method: "item/commandExecution/terminalInteraction", params: { threadId: "thread-1", turnId, itemId: "t1", processId: "p1", stdin: "raw stdin" } });
+      send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId, itemId: "m1", delta: "world" } });
+      send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: turnId, status: "completed", items: [] } } });
     }
+  } else if (msg.method === "turn/steer") {
+    send({ id: msg.id, error: { code: -32000, message: "no active turn to steer" } });
   } else if (msg.method === "turn/interrupt") {
     send({ id: msg.id, result: {} });
   }

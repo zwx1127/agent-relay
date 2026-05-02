@@ -89,7 +89,7 @@ When Codex asks the user a structured question via `request_user_input`, relay m
 
 Codex approval requests for commands, file changes, and permissions are shown as short Telegram messages with `Approve` and `Deny` buttons. The underlying command output is not sent to Telegram.
 
-If Telegram rejects a menu edit, the relay logs a warning and sends a new message instead. Telegram's `message is not modified` edit response is treated as harmless, including the HTTP 400 form returned when an edit would leave both text and buttons unchanged. Other edit failures still fall back to sending a new message.
+If Telegram rejects a menu edit, the relay logs a warning and sends a new message instead. Telegram's `message is not modified` edit response is treated as harmless and is not logged as an error, including the HTTP 400 form returned when an edit would leave both text and buttons unchanged. Other edit failures still fall back to sending a new message.
 
 ## Runtime Behavior
 
@@ -107,7 +107,7 @@ codex app-server --listen stdio://
 ```
 
 - Each `chat + workspace` starts or resumes a Codex thread with the workspace `cwd`, `CODEX_SANDBOX`, and `CODEX_APPROVAL`.
-- User messages start a new turn with `turn/start`; messages sent while a turn is active are sent with `turn/steer`.
+- User messages start a new turn with `turn/start`; messages sent while a turn is active are sent with `turn/steer`. If Codex reports that the locally cached active turn is no longer steerable, the relay clears that stale turn id and retries the same input once with `turn/start`.
 - Assistant message deltas from `item/agentMessage/delta` are stored in SQLite, debounced, and rendered into Telegram-sized output pages.
 - Agent output is aggregated per visible interaction segment, flushed after a short quiet period, size/time limit, or `turn/completed`, and usually edits one live Telegram message for the current response.
 - User input, Codex approval prompts, and Codex question prompts close the current output segment before later assistant output is shown.
