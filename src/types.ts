@@ -183,13 +183,17 @@ export interface StartAgentOptions {
 
 export interface AgentDriver {
   start(options: StartAgentOptions): Promise<AgentSessionStatus>;
-  send(sessionKey: string, text: string): Promise<void>;
+  send(sessionKey: string, text: string): Promise<AgentSendResult>;
   stop(sessionKey: string): Promise<void>;
   getStatus(sessionKey: string): AgentSessionStatus | undefined;
   respond?(sessionKey: string, requestId: string | number, result: unknown): Promise<void>;
   runBuiltinCommand?(sessionKey: string, command: AgentBuiltinCommand): Promise<AgentBuiltinResult>;
   listThreads?(options: AgentThreadListOptions): Promise<AgentThreadSummary[]>;
   listModels?(): Promise<AgentModelSummary[]>;
+}
+
+export interface AgentSendResult {
+  turnId?: string;
 }
 
 export type AgentBuiltinCommand = "review" | "compact";
@@ -271,4 +275,18 @@ export interface PendingPrompt {
   sessionKey?: string;
   payloadJson?: string;
   expiresAt?: number;
+}
+
+export type TaskStatus = "queued" | "running" | "blocked" | "done" | "failed" | "cancelled";
+
+export interface RelayTask {
+  id: number;
+  chatId: ChatId;
+  workspaceName: string;
+  text: string;
+  status: TaskStatus;
+  createdAt: number;
+  updatedAt: number;
+  turnId?: string;
+  userMessageId?: number;
 }

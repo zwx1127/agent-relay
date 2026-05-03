@@ -16,6 +16,7 @@ import type {
   IMAdapter,
   InboundMessage,
   InlineKeyboardMarkup,
+  RelayTask,
   SendMessageOptions,
   WorkspaceRecord,
 } from "./types.ts";
@@ -115,8 +116,10 @@ export class MessageRouter {
         await this.renderConsole(message.chatId);
       } else if (command && await this.handleSlashCommand(message.chatId, command, text, message.messageId)) {
         return;
+      } else if (command) {
+        await this.sendRendered(message.chatId, unknownCommandMessage(command));
       } else {
-        await this.forwardToAgent(message.chatId, text, message.messageId);
+        await this.submitTask(message.chatId, text, message.messageId);
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -135,15 +138,18 @@ export class MessageRouter {
   async handleAgentOutput(session: AgentOutputEvent): Promise<void> {
     if (session.type === "turn_completed") {
       await this.finalizeSessionOutput(session.sessionKey);
+      await this.completeTaskAndDispatchNext(session.sessionKey, session.turnId);
       return;
     }
     if (session.type === "user_input_request") {
       await this.finalizeSessionOutput(session.sessionKey);
+      this.markActiveTask(session.sessionKey, "blocked");
       await this.handleCodexUserInputRequest(session);
       return;
     }
     if (session.type === "approval_request") {
       await this.finalizeSessionOutput(session.sessionKey);
+      this.markActiveTask(session.sessionKey, "blocked");
       await this.handleCodexApprovalRequest(session);
       return;
     }
@@ -224,9 +230,25 @@ export class MessageRouter {
   private async routeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     if (!message.data.startsWith(CALLBACK_PREFIX)) throw new Error("Unknown callback.");
     const payload = message.data.slice(CALLBACK_PREFIX.length);
+    if (this.isStaleConsoleCallback(message, payload)) {
+      await this.renderCallbackPage(message, messageWithTitle("Stale console.", "Open the latest control center."), { inline_keyboard: [[{ text: "🔄 Open latest", callback_data: "ar:home" }]] });
+      return;
+    }
 
+    if (payload === "home") {
+      await this.renderConsole(message.chatId);
+      return;
+    }
     if (payload === "s") {
       await this.renderStatusCallback(message);
+      return;
+    }
+    if (payload === "queue") {
+      await this.renderQueueCallback(message);
+      return;
+    }
+    if (payload.startsWith("qt:")) {
+      await this.routeTaskCallback(message, payload);
       return;
     }
     if (payload === "w") {
@@ -323,11 +345,13 @@ export class MessageRouter {
   private async renderStatusCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     const status = this.statusView(message.chatId);
     await this.renderCallbackPage(message, formatStatusMessage(status), consoleKeyboard(status));
+    if (message.messageId) this.deps.store.setConsoleMessageId(message.chatId, message.messageId);
   }
 
   private async renderDetailsCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     const status = this.statusView(message.chatId);
     await this.renderCallbackPage(message, formatDetailsMessage(status), consoleKeyboard(status));
+    if (message.messageId) this.deps.store.setConsoleMessageId(message.chatId, message.messageId);
   }
 
   private async renderWorkspacesCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, pageIndex: number): Promise<void> {
@@ -413,7 +437,24 @@ export class MessageRouter {
       workspace: status.workspaceName,
       running: Boolean(status.running),
     });
-    await this.sendRendered(chatId, formatStatusMessage(status), { replyMarkup: consoleKeyboard(status) });
+    const previousMessageId = this.deps.store.getConsoleMessageId(chatId);
+    if (previousMessageId) {
+      try {
+        await this.editRendered(chatId, formatStatusMessage(status), {
+          messageId: previousMessageId,
+          replyMarkup: consoleKeyboard(status),
+        });
+        return;
+      } catch (error) {
+        this.logger.warn("router.console_edit_fallback", {
+          chat_id: chatId,
+          message_id: previousMessageId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
+    const result = await this.sendRendered(chatId, formatStatusMessage(status), { replyMarkup: consoleKeyboard(status) });
+    if (result.messageId) this.deps.store.setConsoleMessageId(chatId, result.messageId);
   }
 
   private async promptForWorkspaceName(chatId: ChatId): Promise<void> {
@@ -495,10 +536,15 @@ export class MessageRouter {
       return;
     }
     this.deps.store.deletePendingPrompt(chatId, promptMessageId);
-    await this.forwardToAgent(chatId, text, userMessageId);
+    const data = parsePromptPayload(pending.payloadJson);
+    if (data?.mode === "follow_up") {
+      await this.addContextToAgent(chatId, text, userMessageId);
+    } else {
+      await this.submitTask(chatId, text, userMessageId, "immediate");
+    }
   }
 
-  private async forwardToAgent(chatId: ChatId, text: string, userMessageId?: number): Promise<void> {
+  private async submitTask(chatId: ChatId, text: string, userMessageId?: number, preference: "auto" | "immediate" | "queue" = "auto"): Promise<void> {
     if (!text) return;
     const workspace = this.currentWorkspace(chatId);
     if (!workspace) {
@@ -506,9 +552,42 @@ export class MessageRouter {
       return;
     }
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
-    const key = sessionKey(chatId, workspace.name);
     const status = await this.ensureAgentStarted(chatId, workspace);
     if (await this.sendWaitingPromptNotice(chatId, status)) return;
+    const busy = Boolean(status.activeTurnId);
+    const shouldQueue = preference === "queue" || (preference === "auto" && busy);
+    const task = this.deps.store.createTask({
+      chatId,
+      workspaceName: workspace.name,
+      text,
+      status: shouldQueue ? "queued" : "running",
+      userMessageId,
+    });
+    if (shouldQueue) {
+      await this.sendRendered(chatId, queuedTaskMessage(task), { replyMarkup: queuedTaskKeyboard(task) });
+      return;
+    }
+    await this.runTask(workspace, task);
+  }
+
+  private async addContextToAgent(chatId: ChatId, text: string, userMessageId?: number): Promise<void> {
+    if (!text) return;
+    const workspace = this.requireCurrentWorkspace(chatId);
+    const status = await this.ensureAgentStarted(chatId, workspace);
+    if (!status.activeTurnId) {
+      await this.submitTask(chatId, text, userMessageId, "immediate");
+      return;
+    }
+    await this.sendToAgent(chatId, workspace, text, userMessageId, this.deps.store.activeTask(chatId, workspace.name));
+  }
+
+  private async runTask(workspace: WorkspaceRecord, task: RelayTask): Promise<void> {
+    this.deps.store.updateTask(task.id, { status: "running" });
+    await this.sendToAgent(task.chatId, workspace, task.text, task.userMessageId, task);
+  }
+
+  private async sendToAgent(chatId: ChatId, workspace: WorkspaceRecord, text: string, userMessageId?: number, task?: RelayTask): Promise<void> {
+    const key = sessionKey(chatId, workspace.name);
     await this.finalizeSessionOutput(key);
     if (userMessageId) this.lastUserMessageIds.set(key, userMessageId);
     await this.deps.adapter.sendChatAction(chatId, "typing").catch((error) => {
@@ -536,12 +615,13 @@ export class MessageRouter {
       text: `${text}\n`,
       createdAt: Date.now(),
     });
-    await this.deps.agent.send(key, text);
+    const result = await this.deps.agent.send(key, text);
+    if (task && result.turnId) this.deps.store.updateTask(task.id, { turnId: result.turnId, status: "running" });
   }
 
   private async sendWaitingPromptNotice(chatId: ChatId, status: AgentSessionStatus): Promise<boolean> {
     if (status.waitingForUserInput) {
-      await this.sendRendered(chatId, messageWithTitle("Codex is waiting for your answer.", "Reply to the question message so the answer is sent to the active turn."));
+      await this.sendRendered(chatId, messageWithTitle("Codex is waiting for your answer.", "Open the latest question card or reply to it. New tasks are paused while the active turn is blocked."));
       return true;
     }
     if (status.waitingForApproval) {
@@ -579,7 +659,43 @@ export class MessageRouter {
         await this.renderConsole(chatId);
         return true;
       case "/init":
-        await this.forwardToAgent(chatId, INIT_PROMPT, userMessageId);
+        await this.submitTask(chatId, INIT_PROMPT, userMessageId, "immediate");
+        return true;
+      case "/ask": {
+        const body = commandBody(text);
+        if (!body) {
+          await this.promptForAgentInstruction(chatId);
+        } else {
+          await this.submitTask(chatId, body, userMessageId, "auto");
+        }
+        return true;
+      }
+      case "/add": {
+        const body = commandBody(text);
+        if (!body) {
+          await this.promptForAgentInstruction(chatId);
+        } else {
+          await this.addContextToAgent(chatId, body, userMessageId);
+        }
+        return true;
+      }
+      case "/later": {
+        const body = commandBody(text);
+        if (!body) throw new Error("/later requires task text.");
+        await this.submitTask(chatId, body, userMessageId, "queue");
+        return true;
+      }
+      case "/plan":
+      case "/fix":
+      case "/test":
+      case "/explain": {
+        const body = commandBody(text);
+        if (!body) throw new Error(`${command} requires task text.`);
+        await this.submitTask(chatId, templatePrompt(command, body), userMessageId, "auto");
+        return true;
+      }
+      case "/queue":
+        await this.renderQueue(chatId);
         return true;
       case "/review":
         await this.runBuiltin(chatId, "review", userMessageId);
@@ -591,7 +707,7 @@ export class MessageRouter {
         await this.renderModelInfo(chatId);
         return true;
       case "/clear":
-        await this.clearThread(chatId);
+        await this.sendRendered(chatId, confirmMessage("Start a new Codex thread?", "The current thread binding for this workspace will be replaced."), { replyMarkup: clearConfirmKeyboard() });
         return true;
       case "/resume":
         await this.renderResumeThreads(chatId);
@@ -679,6 +795,77 @@ export class MessageRouter {
     ]), consoleKeyboard(this.statusView(message.chatId)));
   }
 
+  private async renderQueue(chatId: ChatId): Promise<void> {
+    const workspace = this.requireCurrentWorkspace(chatId);
+    const tasks = this.deps.store.listTasks(chatId, workspace.name, ["queued"], LIST_PAGE_SIZE);
+    await this.sendRendered(chatId, formatQueueMessage(tasks), { replyMarkup: queueKeyboard(tasks) });
+  }
+
+  private async renderQueueCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
+    const workspace = this.requireCurrentWorkspace(message.chatId);
+    const tasks = this.deps.store.listTasks(message.chatId, workspace.name, ["queued"], LIST_PAGE_SIZE);
+    await this.renderCallbackPage(message, formatQueueMessage(tasks), queueKeyboard(tasks));
+  }
+
+  private async routeTaskCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
+    const [, rawId, action] = payload.split(":");
+    const taskId = Number(rawId);
+    if (!Number.isInteger(taskId)) throw new Error("Invalid task.");
+    const task = this.deps.store.getTask(taskId);
+    if (!task || task.chatId !== message.chatId) throw new Error("Task not found.");
+    const workspace = this.requireCurrentWorkspace(message.chatId);
+    if (workspace.name !== task.workspaceName) throw new Error("Task belongs to another workspace.");
+    if (action === "del") {
+      if (task.status !== "queued") throw new Error("Only queued tasks can be deleted.");
+      this.deps.store.updateTask(task.id, { status: "cancelled" });
+      await this.renderQueueCallback(message);
+      return;
+    }
+    if (action === "run") {
+      if (task.status !== "queued") throw new Error("Only queued tasks can be run.");
+      const status = await this.ensureAgentStarted(message.chatId, workspace);
+      if (status.activeTurnId || status.waitingForApproval || status.waitingForUserInput) {
+        throw new Error("Codex is busy. The task will stay queued.");
+      }
+      await this.renderCallbackPage(message, messageWithTitle(`Running task #${task.id}.`), { inline_keyboard: [] });
+      await this.runTask(workspace, task);
+      return;
+    }
+    throw new Error("Unknown task action.");
+  }
+
+  private markActiveTask(sessionKeyValue: string, status: "blocked" | "running"): void {
+    const parsed = parseSessionKey(sessionKeyValue);
+    if (!parsed) return;
+    const task = this.deps.store.activeTask(parsed.chatId, parsed.workspaceName);
+    if (task) this.deps.store.updateTask(task.id, { status });
+  }
+
+  private async completeTaskAndDispatchNext(sessionKeyValue: string, turnId: string | undefined): Promise<void> {
+    const parsed = parseSessionKey(sessionKeyValue);
+    if (!parsed) return;
+    const active = this.deps.store.activeTask(parsed.chatId, parsed.workspaceName);
+    if (active && (!turnId || !active.turnId || active.turnId === turnId)) {
+      this.deps.store.updateTask(active.id, { status: "done" });
+      await this.sendRendered(parsed.chatId, messageWithTitle(`Task #${active.id} completed.`), { replyMarkup: resultKeyboard() });
+    }
+    const workspace = this.currentWorkspace(parsed.chatId);
+    if (!workspace || workspace.name !== parsed.workspaceName) return;
+    const status = this.deps.agent.getStatus(sessionKeyValue);
+    if (status?.waitingForApproval || status?.waitingForUserInput || status?.activeTurnId) return;
+    const next = this.deps.store.nextQueuedTask(parsed.chatId, parsed.workspaceName);
+    if (next) {
+      await this.sendRendered(parsed.chatId, messageWithTitle(`Running queued task #${next.id}.`));
+      await this.runTask(workspace, next);
+    }
+  }
+
+  private isStaleConsoleCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): boolean {
+    if (!message.messageId || !isConsolePayload(payload)) return false;
+    const latest = this.deps.store.getConsoleMessageId(message.chatId);
+    return Boolean(latest && latest !== message.messageId);
+  }
+
   private currentWorkspace(chatId: ChatId): WorkspaceRecord | undefined {
     const binding = this.deps.store.getBinding(chatId);
     return binding ? this.deps.store.getWorkspace(binding.workspaceName) : undefined;
@@ -746,7 +933,15 @@ export class MessageRouter {
     const status = this.deps.agent.getStatus(sessionKey(chatId, workspace.name));
     const recentOutput = this.deps.store.latestTranscriptEvent(chatId, workspace.name, "agent");
     const recentError = this.deps.store.latestTranscriptEvent(chatId, workspace.name, "system");
-    return statusViewFromParts(workspace, status, recentOutput?.createdAt, recentError?.text);
+    return statusViewFromParts(
+      workspace,
+      status,
+      recentOutput?.createdAt,
+      recentError?.text,
+      this.deps.store.countTasks(chatId, workspace.name, ["queued"]),
+      this.deps.store.countTasks(chatId, workspace.name, ["blocked"]),
+      this.deps.store.activeTask(chatId, workspace.name),
+    );
   }
 
   private readonly liveOutput = new Map<string, LiveOutputState>();
@@ -1202,6 +1397,37 @@ function commandName(text: string): string | undefined {
   return command.split("@")[0] || undefined;
 }
 
+function commandBody(text: string): string {
+  const firstSpace = text.search(/\s/);
+  return firstSpace < 0 ? "" : text.slice(firstSpace + 1).trim();
+}
+
+function unknownCommandMessage(command: string): RenderedTelegramText {
+  return renderTelegramText([
+    bold("Unknown command:"),
+    " ",
+    code(command),
+    "\n\nUse ",
+    code("/ask <task>"),
+    " to send slash-style text to Codex.",
+  ]);
+}
+
+function templatePrompt(command: string, body: string): string {
+  switch (command) {
+    case "/plan":
+      return `Create an implementation plan for this request. Do not modify files unless explicitly asked later.\n\n${body}`;
+    case "/fix":
+      return `Fix the following issue. Inspect the relevant code first, make the smallest safe change, and run focused verification.\n\n${body}`;
+    case "/test":
+      return `Add or update tests for the following behavior. Keep the tests focused and run the relevant test command.\n\n${body}`;
+    case "/explain":
+      return `Explain the following code or behavior with concrete file references where relevant.\n\n${body}`;
+    default:
+      return body;
+  }
+}
+
 function decoratePagedOutput(page: RenderedTelegramText, pageIndex: number, totalPages: number): RenderedTelegramText {
   return appendRendered(page, renderTelegramText(["\n\n", bold(`Page ${pageIndex + 1}/${totalPages}`)]));
 }
@@ -1268,6 +1494,23 @@ function answeredMessage(answer: string, hasNext: boolean): RenderedTelegramText
     answer,
     hasNext ? "\n\nNext question sent." : "",
   ]);
+}
+
+function queuedTaskMessage(task: RelayTask): RenderedTelegramText {
+  return renderTelegramText([
+    bold(`Queued task #${task.id}`),
+    "\n\n",
+    truncateForTelegramLabel(task.text, 220),
+  ]);
+}
+
+function formatQueueMessage(tasks: RelayTask[]): RenderedTelegramText {
+  if (tasks.length === 0) return messageWithTitle("Task queue", "No queued tasks.");
+  const parts: TelegramTextPart[] = [bold("Task queue")];
+  for (const task of tasks) {
+    parts.push("\n\n", bold(`#${task.id}`), " ", truncateForTelegramLabel(task.text, 160));
+  }
+  return renderTelegramText(parts);
 }
 
 function formatErrorMessage(detail: string): RenderedTelegramText {
@@ -1367,6 +1610,9 @@ function statusViewFromParts(
   status: AgentSessionStatus | undefined,
   recentOutputAt: number | undefined,
   recentError: string | undefined,
+  queuedTaskCount = 0,
+  blockedTaskCount = 0,
+  activeTask?: RelayTask,
 ) {
   return {
     workspaceName: workspace.name,
@@ -1387,6 +1633,10 @@ function statusViewFromParts(
     contextWindow: status?.contextWindow,
     waitingForApproval: status?.waitingForApproval,
     waitingForUserInput: status?.waitingForUserInput,
+    queuedTaskCount,
+    blockedTaskCount,
+    activeTaskId: activeTask?.id,
+    activeTaskStatus: activeTask?.status,
   };
 }
 
@@ -1416,6 +1666,8 @@ function formatStatusMessage(status: StatusView): RenderedTelegramText {
     formatContext(status),
     "\nWaiting: ",
     formatWaiting(status),
+    "\nTasks: ",
+    formatTaskCounts(status),
   );
   if (status.recentOutputAt) parts.push("\nLast output: ", relativeTime(status.recentOutputAt));
   if (status.recentError) parts.push("\nError: ", truncateForTelegramLabel(status.recentError.trim(), 120));
@@ -1447,6 +1699,8 @@ function formatDetailsMessage(status: StatusView): RenderedTelegramText {
     status.sandboxPolicy ?? "unknown",
     "\nWaiting: ",
     formatWaiting(status),
+    "\nTasks: ",
+    formatTaskCounts(status),
     "\nToken usage: ",
     formatTokens(status),
   );
@@ -1471,6 +1725,15 @@ function formatWaiting(status: StatusView): string {
     status.waitingForApproval ? "approval" : undefined,
   ].filter(Boolean);
   return waiting.length > 0 ? waiting.join(", ") : "no";
+}
+
+function formatTaskCounts(status: StatusView): string {
+  const parts = [
+    status.activeTaskId ? `#${status.activeTaskId} ${status.activeTaskStatus ?? "active"}` : undefined,
+    status.queuedTaskCount ? `${status.queuedTaskCount} queued` : undefined,
+    status.blockedTaskCount ? `${status.blockedTaskCount} blocked` : undefined,
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(", ") : "none";
 }
 
 function formatTokens(status: StatusView): string {
@@ -1531,6 +1794,14 @@ function formatRelayHelp(): RenderedTelegramText {
     " - open the relay console\n",
     code("/status"),
     " - show current Codex session status\n",
+    code("/ask"),
+    " - create a new task\n",
+    code("/add"),
+    " - add context to the active turn\n",
+    code("/later"),
+    " - queue a task\n",
+    code("/queue"),
+    " - show queued tasks\n",
     code("/init"),
     " - ask Codex to create AGENTS.md\n",
     code("/review"),
@@ -1542,7 +1813,7 @@ function formatRelayHelp(): RenderedTelegramText {
     code("/clear"),
     " - start a fresh thread\n",
     code("/resume"),
-    " - resume a saved thread\n\nUnknown slash commands are forwarded to Codex as normal text.",
+    " - resume a saved thread\n\nUnknown slash commands are rejected. Use /ask <text> to send slash-style text to Codex.",
   ]);
 }
 
@@ -1594,30 +1865,62 @@ function consoleKeyboard(status: { workspaceName?: string; running?: boolean }):
   const rows: InlineKeyboardMarkup["inline_keyboard"] = [];
   if (status.workspaceName) {
     rows.push([
-      { text: "💬", callback_data: "ar:i" },
-      { text: "🔍", callback_data: "ar:review" },
-      { text: "📦", callback_data: "ar:compact" },
+      { text: "💬 New", callback_data: "ar:i" },
+      { text: "➕ Queue", callback_data: "ar:queue" },
+      { text: "🔍 Review", callback_data: "ar:review" },
     ]);
     rows.push([
-      { text: "📁", callback_data: "ar:w" },
-      { text: "🔁", callback_data: "ar:rl:0" },
-      { text: "ℹ️", callback_data: "ar:d" },
+      { text: "📦 Compact", callback_data: "ar:compact" },
+      { text: "📁 Workspace", callback_data: "ar:w" },
+      { text: "🔁 Resume", callback_data: "ar:rl:0" },
     ]);
     rows.push(status.running
       ? [
-        { text: "🛑", callback_data: "ar:x?" },
-        { text: "🔄", callback_data: "ar:s" },
+        { text: "ℹ️ Details", callback_data: "ar:d" },
+        { text: "🛑 Stop", callback_data: "ar:x?" },
+        { text: "🔄 Refresh", callback_data: "ar:s" },
       ]
-      : [{ text: "🔄", callback_data: "ar:s" }]);
+      : [{ text: "🔄 Refresh", callback_data: "ar:s" }]);
   } else {
     rows.push([
-      { text: "📁", callback_data: "ar:w" },
-      { text: "💬", callback_data: "ar:n" },
-      { text: "🔄", callback_data: "ar:s" },
+      { text: "📁 Workspace", callback_data: "ar:w" },
+      { text: "💬 New", callback_data: "ar:n" },
+      { text: "🔄 Refresh", callback_data: "ar:s" },
     ]);
   }
   return {
     inline_keyboard: rows,
+  };
+}
+
+function queueKeyboard(tasks: RelayTask[]): InlineKeyboardMarkup {
+  const rows = tasks.flatMap((task) => [
+    [{ text: `▶ Run #${task.id}`, callback_data: `ar:qt:${task.id}:run` }],
+    [{ text: `🗑 Delete #${task.id}`, callback_data: `ar:qt:${task.id}:del` }],
+  ]);
+  rows.push([{ text: "🔄 Console", callback_data: "ar:home" }]);
+  return { inline_keyboard: rows };
+}
+
+function queuedTaskKeyboard(task: RelayTask): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [[
+      { text: "▶ Run now", callback_data: `ar:qt:${task.id}:run` },
+      { text: "🗑 Delete", callback_data: `ar:qt:${task.id}:del` },
+    ], [
+      { text: "🧾 Queue", callback_data: "ar:queue" },
+      { text: "🔄 Console", callback_data: "ar:home" },
+    ]],
+  };
+}
+
+function resultKeyboard(): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [[
+      { text: "💬 New", callback_data: "ar:i" },
+      { text: "🧾 Queue", callback_data: "ar:queue" },
+      { text: "🔄 Console", callback_data: "ar:home" },
+    ]],
   };
 }
 
@@ -1710,6 +2013,23 @@ function workspaceCallbackData(name: string): string {
 
 function workspaceCallbackToken(name: string): string {
   return createHash("sha256").update(name).digest("hex").slice(0, 16);
+}
+
+function isConsolePayload(payload: string): boolean {
+  return payload === "s"
+    || payload === "w"
+    || payload === "n"
+    || payload === "i"
+    || payload === "d"
+    || payload === "review"
+    || payload === "compact"
+    || payload === "x?"
+    || payload === "clear?"
+    || payload === "queue"
+    || payload.startsWith("wl:")
+    || payload.startsWith("rl:")
+    || payload.startsWith("uh:")
+    || payload.startsWith("u:");
 }
 
 function exitConfirmKeyboard(): InlineKeyboardMarkup {

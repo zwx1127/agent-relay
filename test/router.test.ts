@@ -62,8 +62,13 @@ class FakeAgent implements AgentDriver {
     return status;
   }
 
-  async send(key: string, text: string): Promise<void> {
+  async send(key: string, text: string): Promise<{ turnId?: string }> {
     this.sent.push({ key, text });
+    const status = this.statuses.get(key);
+    if (status?.activeTurnId) return { turnId: status.activeTurnId };
+    const turnId = `turn-${this.sent.length}`;
+    if (status) status.activeTurnId = turnId;
+    return { turnId };
   }
 
   async stop(key: string): Promise<void> {
@@ -143,7 +148,7 @@ describe("router", () => {
   });
 
   test("uses existing workspace and auto-starts session for text", async () => {
-    const { router, store, agent, root } = fixture();
+    const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
@@ -182,8 +187,8 @@ describe("router", () => {
     expect(logLines.join("\n")).toContain('message_text="secret prompt"');
   });
 
-  test("unknown slash text is forwarded to codex", async () => {
-    const { router, store, agent, root } = fixture();
+  test("unknown slash text is rejected instead of forwarded", async () => {
+    const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
@@ -191,7 +196,9 @@ describe("router", () => {
 
     await router.handle(textMessage("/unknown"));
 
-    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "/unknown" });
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Unknown command");
+    expect(adapter.sent.at(-1)?.text).toContain("/ask <task>");
   });
 
   test("console no longer exposes raw tail action", async () => {
@@ -374,7 +381,7 @@ describe("router", () => {
     expect(adapter.sent.at(-1)?.text).toContain("Agent Relay");
     expect(adapter.sent.at(-1)?.text).toContain("Workspace: none");
     expect(adapter.sent.at(-1)?.options?.entities?.[0]?.type).toBe("bold");
-    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["📁", "💬", "🔄"]);
+    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["📁 Workspace", "💬 New", "🔄 Refresh"]);
   });
 
   test("/start opens the same console", async () => {
@@ -422,7 +429,7 @@ describe("router", () => {
     expect(agent.sent[0]?.text).not.toBe("/init");
   });
 
-  test("/clear stops current session, clears stored thread id, and starts fresh", async () => {
+  test("/clear requires confirmation before replacing the thread", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -433,9 +440,9 @@ describe("router", () => {
 
     await router.handle(textMessage("/clear"));
 
-    expect(agent.stopped).toEqual(["1:demo"]);
-    expect(store.getSession("1:demo")?.thread_id).not.toBe("old-thread");
-    expect(adapter.sent.at(-1)?.text).toContain("Started a new Codex thread");
+    expect(agent.stopped).toEqual([]);
+    expect(store.getSession("1:demo")?.thread_id).toBe("old-thread");
+    expect(adapter.sent.at(-1)?.text).toContain("Start a new Codex thread?");
   });
 
   test("clear callback requires confirmation before replacing the thread", async () => {
@@ -569,6 +576,49 @@ describe("router", () => {
     await router.handle(textMessage("also cover tests", 7, prompt.messageId));
 
     expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "also cover tests" });
+  });
+
+  test("ordinary text queues a new task while a turn is active", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    const status = await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+    status.activeTurnId = "turn-1";
+
+    await router.handle(textMessage("new task while busy"));
+
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Queued task #");
+    expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(1);
+  });
+
+  test("/add steers the active turn instead of queueing", async () => {
+    const { router, store, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    const status = await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+    status.activeTurnId = "turn-1";
+
+    await router.handle(textMessage("/add include tests"));
+
+    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "include tests" });
+    expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(0);
+  });
+
+  test("relay reuses the latest console message when possible", async () => {
+    const { router, adapter, store } = fixture();
+
+    await router.handle(textMessage("/relay"));
+    const firstMessageId = adapter.sent.at(-1)?.messageId;
+    await router.handle(textMessage("/relay"));
+
+    expect(store.getConsoleMessageId(1)).toBe(firstMessageId);
+    expect(adapter.sent).toHaveLength(1);
+    expect(adapter.edited.at(-1)?.options.messageId).toBe(firstMessageId);
   });
 
   test("workspace callback switches binding, auto-starts, and edits status", async () => {

@@ -101,4 +101,20 @@ describe("store", () => {
     expect(store.getPagedOutput("tok")).toBeUndefined();
     store.close();
   });
+
+  test("stores console ui state and task queue", () => {
+    const store = tempStore();
+    store.setConsoleMessageId(1, 101);
+    expect(store.getConsoleMessageId(1)).toBe(101);
+
+    const first = store.createTask({ chatId: 1, workspaceName: "demo", text: "first", status: "queued", createdAt: 1 });
+    const second = store.createTask({ chatId: 1, workspaceName: "demo", text: "second", status: "queued", createdAt: 2 });
+
+    expect(store.nextQueuedTask(1, "demo")?.id).toBe(first.id);
+    expect(store.countTasks(1, "demo", ["queued"])).toBe(2);
+    store.updateTask(first.id, { status: "running", turnId: "turn-1" });
+    expect(store.activeTask(1, "demo")?.turnId).toBe("turn-1");
+    expect(store.nextQueuedTask(1, "demo")?.id).toBe(second.id);
+    store.close();
+  });
 });

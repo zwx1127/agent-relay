@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import { noopLogger, type Logger } from "./logger.ts";
-import type { ChatBinding, ChatId, PendingPrompt, PendingPromptKind, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "./types.ts";
+import type { ChatBinding, ChatId, PendingPrompt, PendingPromptKind, RelayTask, TaskStatus, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "./types.ts";
 
 interface WorkspaceRow {
   name: string;
@@ -48,6 +48,23 @@ interface PagedOutputRow {
   text: string;
   created_at: number;
   expires_at: number;
+}
+
+interface ChatUiStateRow {
+  chat_id: number;
+  console_message_id?: number | null;
+}
+
+interface TaskRow {
+  id: number;
+  chat_id: number;
+  workspace_name: string;
+  text: string;
+  status: string;
+  created_at: number;
+  updated_at: number;
+  turn_id?: string | null;
+  user_message_id?: number | null;
 }
 
 export interface PagedOutput {
@@ -128,6 +145,25 @@ export class Store {
         text TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS chat_ui_state (
+        chat_id INTEGER PRIMARY KEY,
+        console_message_id INTEGER
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        workspace_name TEXT NOT NULL,
+        text TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        turn_id TEXT,
+        user_message_id INTEGER
       )
     `);
     this.addColumnIfMissing("agent_sessions", "thread_id", "TEXT");
@@ -320,6 +356,111 @@ export class Store {
   prunePagedOutputs(now = Date.now()): void {
     this.db.query("DELETE FROM paged_outputs WHERE expires_at < ?").run(now);
   }
+
+  getConsoleMessageId(chatId: ChatId): number | undefined {
+    const row = this.db.query<ChatUiStateRow, [number]>("SELECT chat_id, console_message_id FROM chat_ui_state WHERE chat_id = ?").get(chatId);
+    return row?.console_message_id ?? undefined;
+  }
+
+  setConsoleMessageId(chatId: ChatId, messageId: number): void {
+    this.db.query(`
+      INSERT INTO chat_ui_state (chat_id, console_message_id)
+      VALUES (?, ?)
+      ON CONFLICT(chat_id) DO UPDATE SET console_message_id = excluded.console_message_id
+    `).run(chatId, messageId);
+  }
+
+  createTask(task: {
+    chatId: ChatId;
+    workspaceName: string;
+    text: string;
+    status: TaskStatus;
+    createdAt?: number;
+    userMessageId?: number;
+  }): RelayTask {
+    const now = task.createdAt ?? Date.now();
+    const result = this.db.query(`
+      INSERT INTO tasks (chat_id, workspace_name, text, status, created_at, updated_at, user_message_id)
+      VALUES ($chatId, $workspaceName, $text, $status, $createdAt, $updatedAt, $userMessageId)
+    `).run({
+      $chatId: task.chatId,
+      $workspaceName: task.workspaceName,
+      $text: task.text,
+      $status: task.status,
+      $createdAt: now,
+      $updatedAt: now,
+      $userMessageId: task.userMessageId ?? null,
+    });
+    const id = Number(result.lastInsertRowid);
+    return this.getTask(id)!;
+  }
+
+  getTask(id: number): RelayTask | undefined {
+    const row = this.db.query<TaskRow, [number]>(`
+      SELECT id, chat_id, workspace_name, text, status, created_at, updated_at, turn_id, user_message_id
+      FROM tasks WHERE id = ?
+    `).get(id);
+    return row ? rowToTask(row) : undefined;
+  }
+
+  listTasks(chatId: ChatId, workspaceName: string, statuses?: TaskStatus[], limit = 20): RelayTask[] {
+    const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+    if (statuses && statuses.length > 0) {
+      const placeholders = statuses.map(() => "?").join(", ");
+      return this.db.query<TaskRow, any>(`
+        SELECT id, chat_id, workspace_name, text, status, created_at, updated_at, turn_id, user_message_id
+        FROM tasks
+        WHERE chat_id = ? AND workspace_name = ? AND status IN (${placeholders})
+        ORDER BY id ASC LIMIT ?
+      `).all(chatId, workspaceName, ...statuses, safeLimit).map(rowToTask);
+    }
+    return this.db.query<TaskRow, [number, string, number]>(`
+      SELECT id, chat_id, workspace_name, text, status, created_at, updated_at, turn_id, user_message_id
+      FROM tasks
+      WHERE chat_id = ? AND workspace_name = ?
+      ORDER BY id DESC LIMIT ?
+    `).all(chatId, workspaceName, safeLimit).map(rowToTask);
+  }
+
+  nextQueuedTask(chatId: ChatId, workspaceName: string): RelayTask | undefined {
+    const row = this.db.query<TaskRow, [number, string]>(`
+      SELECT id, chat_id, workspace_name, text, status, created_at, updated_at, turn_id, user_message_id
+      FROM tasks
+      WHERE chat_id = ? AND workspace_name = ? AND status = 'queued'
+      ORDER BY id ASC LIMIT 1
+    `).get(chatId, workspaceName);
+    return row ? rowToTask(row) : undefined;
+  }
+
+  activeTask(chatId: ChatId, workspaceName: string): RelayTask | undefined {
+    const row = this.db.query<TaskRow, [number, string]>(`
+      SELECT id, chat_id, workspace_name, text, status, created_at, updated_at, turn_id, user_message_id
+      FROM tasks
+      WHERE chat_id = ? AND workspace_name = ? AND status IN ('running', 'blocked')
+      ORDER BY id DESC LIMIT 1
+    `).get(chatId, workspaceName);
+    return row ? rowToTask(row) : undefined;
+  }
+
+  updateTask(id: number, updates: { status?: TaskStatus; turnId?: string | null }): void {
+    const current = this.getTask(id);
+    if (!current) return;
+    this.db.query(`
+      UPDATE tasks
+      SET status = ?, turn_id = ?, updated_at = ?
+      WHERE id = ?
+    `).run(updates.status ?? current.status, updates.turnId === undefined ? current.turnId ?? null : updates.turnId, Date.now(), id);
+  }
+
+  countTasks(chatId: ChatId, workspaceName: string, statuses: TaskStatus[]): number {
+    if (statuses.length === 0) return 0;
+    const placeholders = statuses.map(() => "?").join(", ");
+    const row = this.db.query<{ count: number }, any>(`
+      SELECT COUNT(*) as count FROM tasks
+      WHERE chat_id = ? AND workspace_name = ? AND status IN (${placeholders})
+    `).get(chatId, workspaceName, ...statuses);
+    return row?.count ?? 0;
+  }
 }
 
 function rowToWorkspace(row: WorkspaceRow): WorkspaceRecord {
@@ -346,5 +487,19 @@ function rowToPagedOutput(row: PagedOutputRow): PagedOutput {
     text: row.text,
     createdAt: row.created_at,
     expiresAt: row.expires_at,
+  };
+}
+
+function rowToTask(row: TaskRow): RelayTask {
+  return {
+    id: row.id,
+    chatId: row.chat_id,
+    workspaceName: row.workspace_name,
+    text: row.text,
+    status: row.status as TaskStatus,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...(row.turn_id ? { turnId: row.turn_id } : {}),
+    ...(row.user_message_id ? { userMessageId: row.user_message_id } : {}),
   };
 }

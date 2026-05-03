@@ -71,20 +71,29 @@ Relay handles these commands:
 - `/start` is a first-use alias for `/relay`.
 - `/help` shows relay and Codex command help.
 - `/status` shows the current workspace and Codex session status.
+- `/ask <task>` creates a new Codex task. If Codex is busy, the task is queued.
+- `/add <text>` adds context to the active Codex turn.
+- `/later <task>` queues a task without running it immediately.
+- `/queue` shows queued tasks for the current workspace.
+- `/plan <text>`, `/fix <text>`, `/test <text>`, and `/explain <text>` create task prompts from common templates.
 - `/init` asks Codex to create `AGENTS.md` in the current workspace.
 - `/review` starts a Codex review of uncommitted changes.
 - `/compact` starts Codex thread compaction.
 - `/model` shows the current model and available app-server models.
-- `/clear` stops the current `chat + workspace` thread binding and starts a fresh Codex thread.
+- `/clear` asks for confirmation before replacing the current `chat + workspace` thread binding with a fresh Codex thread.
 - `/resume` lists saved Codex threads for the current workspace and resumes the selected thread.
 
-Unknown slash-style text is sent directly to Codex as normal input.
+Unknown slash-style text is rejected instead of being forwarded to Codex. Use `/ask <text>` when the task text intentionally starts with a slash.
+
+Relay commands take precedence over task text. For example, `/test fix auth` is handled by relay as the test template, not sent to Codex as a literal slash command. To send slash-style text to Codex, wrap it with `/ask`, for example `/ask /test fix auth`.
 
 If no workspace is selected, user input is not forwarded. Relay opens the console so you can select or create a workspace first.
 
 ## Telegram Interaction
 
-The relay console is a readable status panel. It shows the selected workspace, Codex state, waiting state, model, token/context usage, recent output time, and recent relay error with full field labels. Dynamic values such as workspace names and paths are rendered as Telegram code entities instead of HTML. Long values are truncated in the main panel and shown in full from Details.
+The relay console is a readable status panel. Relay stores the latest console message id for each chat; `/relay` edits that message when possible and sends a replacement only when Telegram rejects the edit. Old console callbacks are treated as stale so older buttons do not accidentally operate on current state.
+
+The console shows the selected workspace, Codex state, waiting state, queued/running/blocked task counts, model, token/context usage, recent output time, and recent relay error with full field labels. Dynamic values such as workspace names and paths are rendered as Telegram code entities instead of HTML. Long values are truncated in the main panel and shown in full from Details.
 
 Example status panel:
 
@@ -96,25 +105,27 @@ Workspace: agent-relay
 Model: gpt-5.2 / high
 Context: ▰▰▱▱▱ 42%
 Waiting: no
+Tasks: none
 Last output: 2m ago
 ```
 
-Inline action buttons are intentionally emoji-only:
+Inline action buttons use an icon plus a short label:
 
-- `💬` opens a ForceReply prompt. With a selected workspace it sends a new task, or adds context to an active turn. Without a selected workspace it asks for a workspace name. It is also used for custom answers to Codex questions.
-- `🔍` starts a Codex review of uncommitted changes.
-- `📦` starts Codex thread compaction.
-- `📁` opens a paged workspace list with the current workspace pinned first.
-- `🔁` opens a paged saved-session picker for the current workspace.
-- `ℹ️` opens the expanded Details view.
-- `🛑` opens a confirmation view before stopping the current Codex session.
-- `🔄` redraws the status panel.
+- `💬 New` opens a ForceReply prompt. With a selected workspace it creates a new task, or adds context when Codex already has an active turn. Without a selected workspace it asks for a workspace name. It is also used for custom answers to Codex questions.
+- `➕ Queue` opens queued tasks for the current workspace.
+- `🔍 Review` starts a Codex review of uncommitted changes.
+- `📦 Compact` starts Codex thread compaction.
+- `📁 Workspace` opens a paged workspace list with the current workspace pinned first.
+- `🔁 Resume` opens a paged saved-session picker for the current workspace.
+- `ℹ️ Details` opens the expanded Details view.
+- `🛑 Stop` opens a confirmation view before stopping the current Codex session.
+- `🔄 Refresh` redraws the status panel.
 - `✅` and `❌` answer approval prompts.
 - `🆕` confirms replacing the current stored Codex thread binding with a new thread.
 - `⬅` returns to the status panel from confirmation views.
 - `⏮`, `◀`, `▶`, and `⏭` navigate long assistant output pages.
 
-Workspace and saved-session picker buttons still include text labels because otherwise choices cannot be distinguished. Codex question option buttons also keep the option labels provided by Codex; `💬` is used for a custom answer.
+Workspace, saved-session, queue, and Codex question option buttons keep descriptive labels because otherwise choices cannot be distinguished; `💬` is used for a custom answer.
 
 System, console, approval, question, and assistant responses are sent as Telegram text plus message entities instead of HTML parse mode. Dynamic values such as workspace names, paths, and errors are rendered as plain text or code entities, avoiding HTML parse failures while preserving readable formatting.
 
@@ -152,7 +163,8 @@ codex app-server --listen stdio://
 ```
 
 - Each `chat + workspace` starts or resumes a Codex thread with the workspace `cwd`, `CODEX_SANDBOX`, and `CODEX_APPROVAL`.
-- User messages are serialized per `chat + workspace`. A message starts a new turn with `turn/start`; follow-up messages sent while a turn is active are sent with `turn/steer`, so quick corrections or additions are applied to the current turn instead of queued as unrelated work. If Codex reports that the locally cached active turn is no longer steerable, the relay clears that stale turn id and retries the same input once with `turn/start`.
+- User messages are serialized per `chat + workspace`. When Codex is idle, ordinary text creates a task and starts a Codex turn with `turn/start`. When a turn is active, ordinary text creates a queued task instead of steering the active turn. Use `/add <text>` or reply to the active task prompt to send `turn/steer`. If Codex reports that the locally cached active turn is no longer steerable, the relay clears that stale turn id and retries the same input once with `turn/start`.
+- Queued tasks are stored in SQLite and dispatched FIFO after the active turn completes, as long as Codex is not waiting for user input or approval. Queue cards can run or delete individual queued tasks.
 - While Codex is waiting for a user-input answer or approval decision, ordinary chat text is not forwarded as a new instruction. The relay prompts the user to reply to the question message or use the approval buttons.
 - Assistant output is visually linked back to the triggering Telegram message via reply metadata.
 - Assistant message deltas from `item/agentMessage/delta` are stored in SQLite, debounced, and rendered into Telegram-sized output pages.
@@ -196,9 +208,12 @@ SQLite stores:
 - workspace records
 - chat-to-workspace bindings
 - agent session status and Codex thread IDs
+- latest relay console message IDs
+- queued/running/blocked/done task records
 - transcript events for user, agent, and system messages
 - pending ForceReply prompts for workspace creation and Codex questions
 - pending Codex approval metadata
+- paged assistant output for Telegram navigation
 
 The default database path is `.data/agent-relay.sqlite`.
 
