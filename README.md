@@ -68,12 +68,14 @@ bun run dev
 The Telegram interaction is workspace-first:
 
 - `/start` opens Relay Home. It is the only Telegram bot command reserved by relay.
-- Every other ordinary text message is Codex input once a cwd is selected, including `/compact`, `/review`, `/help`, and any other slash-style Codex instruction.
+- Every other ordinary text message is Codex input once a cwd is selected, including `/relay`, `/codex`, `/compact`, `/review`, `/help`, and any other slash-style Codex instruction.
 - Relay controls such as cwd selection, new thread, resume, review, compact, stop, backlog, and approvals are handled through inline buttons and ForceReply forms.
 - Replies to Relay forms are handled by the form context instead of being forwarded to Codex.
 - If no cwd is selected, ordinary input opens Relay Home so you can choose or create a cwd.
 
 Relay no longer uses typed commands such as `/cd`, `/status`, `/model`, or `/resume`. This keeps the whole ordinary-message namespace available to Codex, so no `//` escaping is needed.
+
+After upgrading, restart the relay process so Telegram polling uses the new routing code. If `/relay` or `/codex` still opens Relay Home while a cwd is selected, the running bot process is not on the current build.
 
 ## Telegram Interaction
 
@@ -84,7 +86,7 @@ Relay Home shows the selected cwd, Codex state, waiting state, prompt counts, mo
 Example home view:
 
 ```text
-Codex
+Relay Home
 
 ● Running
 cwd: agent-relay

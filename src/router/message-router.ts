@@ -223,7 +223,7 @@ export class MessageRouter {
     if (!message.data.startsWith(CALLBACK_PREFIX)) throw new Error("Unknown callback.");
     const payload = message.data.slice(CALLBACK_PREFIX.length);
     if (this.isStaleConsoleCallback(message, payload)) {
-      await this.renderCallbackPage(message, messageWithTitle("Stale console.", "Open the latest control center."), { inline_keyboard: [[{ text: "🔄 Open latest", callback_data: "ar:home" }]] });
+      await this.renderCallbackPage(message, messageWithTitle("Stale Relay Home.", "Open the latest Relay Home."), { inline_keyboard: [[{ text: "🔄 Open latest", callback_data: "ar:home" }]] });
       return;
     }
 
@@ -1513,14 +1513,14 @@ function statusViewFromParts(
 function formatStatusMessage(status: StatusView): RenderedTelegramText {
   if (!status.workspaceName || !status.workspacePath) {
     return renderTelegramText([
-      bold("Codex"),
+      bold("Relay Home"),
       "\n\n● Stopped",
       "\ncwd: none",
       "\nUse the cwd buttons below to select or create a workspace.",
     ]);
   }
   const parts: TelegramTextPart[] = [
-    bold("Codex"),
+    bold("Relay Home"),
     "\n\n",
     statusDot(status),
     " ",
@@ -1547,7 +1547,7 @@ function formatStatusMessage(status: StatusView): RenderedTelegramText {
 function formatDetailsMessage(status: StatusView): RenderedTelegramText {
   if (!status.workspaceName || !status.workspacePath) return formatStatusMessage(status);
   const parts: TelegramTextPart[] = [
-    bold("Codex status"),
+    bold("Relay status"),
     "\n\ncwd: ",
     code(status.workspaceName),
     "\nPath: ",
@@ -1716,7 +1716,7 @@ function queueKeyboard(tasks: RelayTask[]): InlineKeyboardMarkup {
     [{ text: `▶ Run #${task.id}`, callback_data: `ar:qt:${task.id}:run` }],
     [{ text: `🗑 Delete #${task.id}`, callback_data: `ar:qt:${task.id}:del` }],
   ]);
-  rows.push([{ text: "↻ Codex", callback_data: "ar:home" }]);
+  rows.push([{ text: "↻ Home", callback_data: "ar:home" }]);
   return { inline_keyboard: rows };
 }
 
@@ -1727,7 +1727,7 @@ function queuedTaskKeyboard(task: RelayTask): InlineKeyboardMarkup {
       { text: "🗑 Delete", callback_data: `ar:qt:${task.id}:del` },
     ], [
       { text: "🧾 Backlog", callback_data: "ar:queue" },
-      { text: "↻ Codex", callback_data: "ar:home" },
+      { text: "↻ Home", callback_data: "ar:home" },
     ]],
   };
 }
@@ -1737,7 +1737,7 @@ function resultKeyboard(): InlineKeyboardMarkup {
     inline_keyboard: [[
       { text: "✎ Prompt", callback_data: "ar:i" },
       { text: "🧾 Backlog", callback_data: "ar:queue" },
-      { text: "↻ Codex", callback_data: "ar:home" },
+      { text: "↻ Home", callback_data: "ar:home" },
     ]],
   };
 }
