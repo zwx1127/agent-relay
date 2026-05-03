@@ -7,7 +7,6 @@ import type {
   AgentApprovalKind,
   AgentApprovalRequestEvent,
   AgentDriver,
-  AgentModelSummary,
   AgentOutputEvent,
   AgentSessionStatus,
   AgentThreadSummary,
@@ -36,10 +35,6 @@ const PAGE_MAX_CHARS = 3200;
 const PAGED_OUTPUT_TTL_MS = 24 * 60 * 60 * 1000;
 const RESUME_THREAD_TTL_MS = 10 * 60 * 1000;
 const LIST_PAGE_SIZE = 8;
-const INIT_PROMPT = [
-  "Create an AGENTS.md file for this workspace.",
-  "Inspect the project structure first, then write concise, practical instructions that future Codex agents should follow in this repository.",
-].join(" ");
 
 export interface RouterDeps {
   config: AppConfig;
@@ -113,12 +108,8 @@ export class MessageRouter {
         await this.answerAgentInstructionPrompt(message.chatId, message.replyToMessageId!, text, message.messageId);
       } else if (pending?.kind === "codex_user_input") {
         await this.answerCodexFreeText(message.chatId, message.replyToMessageId!, text);
-      } else if (command === "/codex" || command === "/relay" || command === "/start") {
+      } else if (command === "/start") {
         await this.renderConsole(message.chatId);
-      } else if (command && await this.handleSlashCommand(message.chatId, command, text, message.messageId)) {
-        return;
-      } else if (command) {
-        await this.submitTask(message.chatId, text, message.messageId);
       } else {
         await this.submitTask(message.chatId, text, message.messageId);
       }
@@ -363,18 +354,6 @@ export class MessageRouter {
       name: workspace.name,
       selected: workspace.name === selected,
     })), page.pageIndex, page.totalPages), workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages));
-  }
-
-  private async renderWorkspaces(chatId: ChatId): Promise<void> {
-    const workspaces = await this.listAvailableWorkspaces();
-    const selected = this.currentWorkspace(chatId)?.name;
-    const page = paginateWorkspaces(workspaces, selected, 0);
-    await this.sendRendered(chatId, formatWorkspacesMessage(page.items.map((workspace) => ({
-      name: workspace.name,
-      selected: workspace.name === selected,
-    })), page.pageIndex, page.totalPages), {
-      replyMarkup: workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages),
-    });
   }
 
   private async stopFromCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
@@ -671,105 +650,13 @@ export class MessageRouter {
     return status;
   }
 
-  private async handleSlashCommand(chatId: ChatId, command: string, text: string, userMessageId?: number): Promise<boolean> {
-    switch (command) {
-      case "/help":
-        await this.sendRendered(chatId, formatRelayHelp());
-        return true;
-      case "/status":
-        await this.renderConsole(chatId);
-        return true;
-      case "/cd": {
-        const body = commandBody(text);
-        if (!body) {
-          await this.renderWorkspaces(chatId);
-        } else {
-          await this.selectOrCreateWorkspace(chatId, body);
-        }
-        return true;
-      }
-      case "/new":
-        await this.sendRendered(chatId, confirmMessage("Start a new Codex session?", "This replaces the current thread binding for the selected cwd."), { replyMarkup: clearConfirmKeyboard() });
-        return true;
-      case "/init":
-        await this.submitTask(chatId, INIT_PROMPT, userMessageId, "immediate");
-        return true;
-      case "/exec":
-      case "/ask": {
-        const body = commandBody(text);
-        if (!body) {
-          await this.promptForAgentInstruction(chatId);
-        } else {
-          await this.submitTask(chatId, body, userMessageId, "auto");
-        }
-        return true;
-      }
-      case "/add": {
-        const body = commandBody(text);
-        if (!body) {
-          await this.promptForAgentInstruction(chatId);
-        } else {
-          await this.addContextToAgent(chatId, body, userMessageId);
-        }
-        return true;
-      }
-      case "/later": {
-        const body = commandBody(text);
-        if (!body) throw new Error("/later requires prompt text.");
-        await this.submitTask(chatId, body, userMessageId, "queue");
-        return true;
-      }
-      case "/plan":
-      case "/fix":
-      case "/test":
-      case "/explain": {
-        const body = commandBody(text);
-        if (!body) throw new Error(`${command} requires task text.`);
-        await this.submitTask(chatId, templatePrompt(command, body), userMessageId, "auto");
-        return true;
-      }
-      case "/queue":
-        {
-          const body = commandBody(text);
-          if (body) await this.submitTask(chatId, body, userMessageId, "queue");
-          else await this.renderQueue(chatId);
-        }
-        return true;
-      case "/review":
-        await this.runBuiltin(chatId, "review", userMessageId);
-        return true;
-      case "/compact":
-        await this.runBuiltin(chatId, "compact", userMessageId);
-        return true;
-      case "/model":
-        await this.renderModelInfo(chatId);
-        return true;
-      case "/clear":
-        await this.sendRendered(chatId, confirmMessage("Start a new Codex session?", "This replaces the current thread binding for the selected cwd."), { replyMarkup: clearConfirmKeyboard() });
-        return true;
-      case "/resume":
-        await this.renderResumeThreads(chatId);
-        return true;
-      default:
-        return false;
-    }
-  }
-
-  private async runBuiltin(chatId: ChatId, command: "review" | "compact", userMessageId?: number): Promise<void> {
+  private async runBuiltin(chatId: ChatId, command: "review" | "compact"): Promise<void> {
     const workspace = this.requireCurrentWorkspace(chatId);
     const status = await this.ensureAgentStarted(chatId, workspace);
     if (!this.deps.agent.runBuiltinCommand) throw new Error("Codex app-server does not support this built-in command.");
     await this.finalizeSessionOutput(status.sessionKey);
-    if (userMessageId) this.lastUserMessageIds.set(status.sessionKey, userMessageId);
     const result = await this.deps.agent.runBuiltinCommand(status.sessionKey, command);
     await this.sendRendered(chatId, messageWithTitle(result.message));
-  }
-
-  private async renderModelInfo(chatId: ChatId): Promise<void> {
-    const workspace = this.currentWorkspace(chatId);
-    const status = workspace ? this.deps.agent.getStatus(sessionKey(chatId, workspace.name)) : undefined;
-    const models = this.deps.agent.listModels ? await this.deps.agent.listModels() : [];
-    await this.sendRendered(chatId, formatModelInfo(status, models));
   }
 
   private async clearThread(chatId: ChatId, callback?: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
@@ -786,15 +673,6 @@ export class MessageRouter {
     } else {
       await this.sendRendered(chatId, body, { replyMarkup: consoleKeyboard(this.statusView(chatId)) });
     }
-  }
-
-  private async renderResumeThreads(chatId: ChatId): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(chatId);
-    if (!this.deps.agent.listThreads) throw new Error("Codex app-server does not support thread listing.");
-    const threads = await this.deps.agent.listThreads({ workspacePath: workspace.path, limit: 10 });
-    await this.sendRendered(chatId, formatResumeThreads(threads, 0, Math.max(1, Math.ceil(threads.length / LIST_PAGE_SIZE))), {
-      replyMarkup: resumeThreadsKeyboard(chatId, workspace, threads, 0, this.rememberResumeThread.bind(this)),
-    });
   }
 
   private async renderResumeThreadsCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, rawPageIndex: number): Promise<void> {
@@ -815,11 +693,11 @@ export class MessageRouter {
     const entry = this.resumeThreads.get(token);
     if (!entry || entry.chatId !== message.chatId || entry.expiresAt < Date.now()) {
       this.resumeThreads.delete(token);
-      throw new Error("Resume option expired. Run /resume again.");
+      throw new Error("Resume option expired. Open Resume again.");
     }
     const workspace = this.requireCurrentWorkspace(message.chatId);
     if (workspace.name !== entry.workspaceName || workspace.path !== entry.workspacePath) {
-      throw new Error("Workspace changed. Run /resume again.");
+      throw new Error("Workspace changed. Open Resume again.");
     }
     const key = sessionKey(message.chatId, workspace.name);
     await this.finalizeSessionOutput(key);
@@ -831,12 +709,6 @@ export class MessageRouter {
       " ",
       code(status.threadName ?? entry.threadName ?? entry.threadId),
     ]), consoleKeyboard(this.statusView(message.chatId)));
-  }
-
-  private async renderQueue(chatId: ChatId): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(chatId);
-    const tasks = this.deps.store.listTasks(chatId, workspace.name, ["queued"], LIST_PAGE_SIZE);
-    await this.sendRendered(chatId, formatQueueMessage(tasks), { replyMarkup: queueKeyboard(tasks) });
   }
 
   private async renderQueueCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
@@ -911,7 +783,7 @@ export class MessageRouter {
 
   private requireCurrentWorkspace(chatId: ChatId): WorkspaceRecord {
     const workspace = this.currentWorkspace(chatId);
-    if (!workspace) throw new Error("No cwd selected. Use /cd <name> or /cd to select one.");
+    if (!workspace) throw new Error("No cwd selected. Open Relay Home and choose or create a cwd.");
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
     return workspace;
   }
@@ -923,7 +795,7 @@ export class MessageRouter {
       path: resolveWorkspacePath(this.deps.config.workspaceRoot, name),
       createdAt: Date.now(),
     };
-    if (!isRealDirectory(workspace.path)) throw new Error(`cwd '${name}' does not exist. Create it with /cd ${name}.`);
+    if (!isRealDirectory(workspace.path)) throw new Error(`cwd '${name}' does not exist. Create it from Relay Home.`);
     this.deps.store.upsertWorkspace(workspace);
     return workspace;
   }
@@ -1435,26 +1307,6 @@ function commandName(text: string): string | undefined {
   return command.split("@")[0] || undefined;
 }
 
-function commandBody(text: string): string {
-  const firstSpace = text.search(/\s/);
-  return firstSpace < 0 ? "" : text.slice(firstSpace + 1).trim();
-}
-
-function templatePrompt(command: string, body: string): string {
-  switch (command) {
-    case "/plan":
-      return `Create an implementation plan for this request. Do not modify files unless explicitly asked later.\n\n${body}`;
-    case "/fix":
-      return `Fix the following issue. Inspect the relevant code first, make the smallest safe change, and run focused verification.\n\n${body}`;
-    case "/test":
-      return `Add or update tests for the following behavior. Keep the tests focused and run the relevant test command.\n\n${body}`;
-    case "/explain":
-      return `Explain the following code or behavior with concrete file references where relevant.\n\n${body}`;
-    default:
-      return body;
-  }
-}
-
 function decoratePagedOutput(page: RenderedTelegramText, pageIndex: number, totalPages: number): RenderedTelegramText {
   return appendRendered(page, renderTelegramText(["\n\n", bold(`Page ${pageIndex + 1}/${totalPages}`)]));
 }
@@ -1664,7 +1516,7 @@ function formatStatusMessage(status: StatusView): RenderedTelegramText {
       bold("Codex"),
       "\n\n● Stopped",
       "\ncwd: none",
-      "\nUse /cd <name> to select or create a cwd.",
+      "\nUse the cwd buttons below to select or create a workspace.",
     ]);
   }
   const parts: TelegramTextPart[] = [
@@ -1794,71 +1646,12 @@ function formatWorkspacesMessage(workspaces: Array<{ name: string; selected: boo
   if (workspaces.length === 0) {
     return renderTelegramText([
       bold("Select cwd"),
-      "\n\nNo cwd directories found.\nUse /cd <name> to create one.",
+      "\n\nNo cwd directories found.\nUse the new cwd button to create one.",
     ]);
   }
   const parts: TelegramTextPart[] = [bold("Select cwd"), `\n\nPage ${pageIndex + 1}/${totalPages}`];
   for (const workspace of workspaces) {
     parts.push("\n", workspace.selected ? "● " : "○ ", code(workspace.name));
-  }
-  return renderTelegramText(parts);
-}
-
-function formatRelayHelp(): RenderedTelegramText {
-  return renderTelegramText([
-    bold("Codex commands"),
-    "\n\n",
-    "Send any message to Codex, like ",
-    code("fix the failing tests"),
-    ". Slash text that is not a relay command is also sent to Codex.\n\n",
-    code("/codex"),
-    " - show the Codex panel\n",
-    code("/cd <name>"),
-    " - select or create the cwd under WORKSPACE_ROOT\n",
-    code("/status"),
-    " - show session status\n",
-    code("/new"),
-    " - start a fresh Codex session\n",
-    code("/exec <prompt>"),
-    " - send a prompt explicitly\n",
-    code("/add"),
-    " - add to the active turn\n",
-    code("/queue <prompt>"),
-    " - queue a prompt for later\n",
-    code("/queue"),
-    " - show queued prompts\n",
-    code("/init"),
-    " - ask Codex to create AGENTS.md\n",
-    code("/review"),
-    " - start a Codex review\n",
-    code("/compact"),
-    " - compact the current thread\n",
-    code("/model"),
-    " - show current and available models\n",
-    code("/clear"),
-    " - alias for /new\n",
-    code("/resume"),
-    " - resume a saved session",
-  ]);
-}
-
-function formatModelInfo(status: AgentSessionStatus | undefined, models: AgentModelSummary[]): RenderedTelegramText {
-  const parts: TelegramTextPart[] = [
-    bold("Codex model"),
-    "\n\nCurrent: ",
-    status?.model ? code(status.model) : "unknown",
-  ];
-  if (status?.reasoningEffort) parts.push("\nReasoning: ", code(status.reasoningEffort));
-  if (models.length > 0) {
-    parts.push("\n\n", bold("Available:"));
-    for (const model of models.slice(0, 12)) {
-      const label = model.displayName ?? model.id;
-      const current = status?.model && (status.model === model.id || status.model === model.model) ? " current" : "";
-      const def = model.isDefault ? " default" : "";
-      parts.push("\n- ", code(model.id), ` ${label}${current}${def}`);
-    }
-  } else {
-    parts.push("\n\nModel list is unavailable from this Codex app-server.");
   }
   return renderTelegramText(parts);
 }

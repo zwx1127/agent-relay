@@ -65,34 +65,23 @@ bun run dev
 
 ## Telegram Commands
 
-The Telegram interaction intentionally mirrors Codex CLI:
+The Telegram interaction is workspace-first:
 
-- Send ordinary text to Codex the same way you would run `codex "prompt"` from a shell.
-- `/cd <name>` selects or creates the working directory under `WORKSPACE_ROOT`, similar to `codex -C <dir>`.
-- `/codex`, `/start`, and `/relay` show the Codex panel.
-- `/status` shows the selected cwd and Codex session status.
-- `/new` starts a fresh Codex session for the selected cwd. `/clear` is kept as an alias.
-- `/exec <prompt>` sends a prompt explicitly. `/ask <prompt>` remains as a compatibility alias.
-- `/add <text>` adds context to the currently active turn.
-- `/queue <prompt>` queues a prompt for later; `/queue` shows the backlog.
-- `/plan <text>`, `/fix <text>`, `/test <text>`, and `/explain <text>` create prompts from common templates.
-- `/init` asks Codex to create `AGENTS.md` in the selected cwd.
-- `/review` starts a Codex review of uncommitted changes.
-- `/compact` starts Codex thread compaction.
-- `/model` shows the current model and available app-server models.
-- `/resume` lists saved Codex sessions for the selected cwd and resumes the selected session.
+- `/start` opens Relay Home. It is the only Telegram bot command reserved by relay.
+- Every other ordinary text message is Codex input once a cwd is selected, including `/compact`, `/review`, `/help`, and any other slash-style Codex instruction.
+- Relay controls such as cwd selection, new thread, resume, review, compact, stop, backlog, and approvals are handled through inline buttons and ForceReply forms.
+- Replies to Relay forms are handled by the form context instead of being forwarded to Codex.
+- If no cwd is selected, ordinary input opens Relay Home so you can choose or create a cwd.
 
-Relay commands take precedence over prompt text. Unknown slash-style text is forwarded to Codex instead of being rejected, so prompts that start with `/` do not need special wrapping.
-
-If no cwd is selected, ordinary input opens the Codex panel so you can run `/cd <name>` or pick a directory.
+Relay no longer uses typed commands such as `/cd`, `/status`, `/model`, or `/resume`. This keeps the whole ordinary-message namespace available to Codex, so no `//` escaping is needed.
 
 ## Telegram Interaction
 
-The Codex panel is a compact session view. Relay stores the latest panel message id for each chat; `/codex` edits that message when possible and sends a replacement only when Telegram rejects the edit. Old panel callbacks are treated as stale so older buttons do not accidentally operate on current state.
+Relay Home is a compact session view. Relay stores the latest home message id for each chat; `/start` edits that message when possible and sends a replacement only when Telegram rejects the edit. Old home callbacks are treated as stale so older buttons do not accidentally operate on current state.
 
-The panel shows the selected cwd, Codex state, waiting state, prompt counts, model, token/context usage, recent output time, and recent relay error. Dynamic values such as cwd names and paths are rendered as Telegram code entities instead of HTML. Long values are truncated in the main panel and shown in full from Status.
+Relay Home shows the selected cwd, Codex state, waiting state, prompt counts, model, token/context usage, recent output time, and recent relay error. Dynamic values such as cwd names and paths are rendered as Telegram code entities instead of HTML. Long values are truncated in the main home view and shown in full from Status.
 
-Example panel:
+Example home view:
 
 ```text
 Codex
@@ -116,14 +105,14 @@ Inline action buttons use Codex-oriented labels:
 - `🆕 New` confirms replacing the current stored Codex thread binding with a new session.
 - `ℹ️ Status` opens the expanded status view.
 - `🛑 Stop` opens a confirmation view before stopping the current Codex session.
-- `↻` redraws the panel.
+- `↻` redraws Relay Home.
 - `✅` and `❌` answer approval prompts.
-- `⬅` returns to the status panel from confirmation views.
+- `⬅` returns to the status view from confirmation views.
 - `⏮`, `◀`, `▶`, and `⏭` navigate long assistant output pages.
 
 cwd, saved-session, backlog, and Codex question option buttons keep descriptive labels because otherwise choices cannot be distinguished; `💬` is used for a custom answer.
 
-System, panel, approval, question, and assistant responses are sent as Telegram text plus message entities instead of HTML parse mode. Dynamic values such as cwd names, paths, and errors are rendered as plain text or code entities, avoiding HTML parse failures while preserving readable formatting.
+System, home, approval, question, and assistant responses are sent as Telegram text plus message entities instead of HTML parse mode. Dynamic values such as cwd names, paths, and errors are rendered as plain text or code entities, avoiding HTML parse failures while preserving readable formatting.
 
 Codex assistant replies render common Markdown into Telegram text plus message entities, including headings, lists, task lists, blockquotes, emphasis, inline code, code blocks, and HTTP/HTTPS links. Unsupported Markdown is left readable as plain text.
 
@@ -150,7 +139,7 @@ If Telegram rejects a menu edit, the relay logs a warning and sends a new messag
 - cwd names cannot be empty, `.`, `..`, or contain slashes, backslashes, NUL, or control characters.
 - cwd names are resolved under `WORKSPACE_ROOT`; path traversal and absolute names are rejected.
 - `📂 cwd` discovers existing first-level directories under `WORKSPACE_ROOT`; symlinked directories are ignored.
-- `/cd <name>` creates the directory and runs `git init` only when the directory does not already exist.
+- The new-cwd form creates the directory and runs `git init` only when the directory does not already exist.
 - Selecting or creating a cwd immediately starts the Codex thread for that `chat + cwd`. If the session is already running, relay reuses it. If SQLite has a stored Codex `thread_id`, relay resumes it first.
 - Codex starts one app-server process:
 
@@ -205,7 +194,7 @@ SQLite stores:
 - cwd records
 - chat-to-cwd bindings
 - agent session status and Codex thread IDs
-- latest Codex panel message IDs
+- latest Relay Home message IDs
 - queued/running/blocked/done task records
 - transcript events for user, agent, and system messages
 - pending ForceReply prompts for cwd creation and Codex questions
