@@ -21,7 +21,7 @@ import type {
 } from "./types.ts";
 import type { Store } from "./store.ts";
 import { createWorkspace, discoverWorkspaceDirectories, isRealDirectory, resolveWorkspacePath, validateWorkspaceName, workspaceDirectoryExists } from "./workspace.ts";
-import { appendRendered, renderCodexMarkdownForTelegram, renderTelegramText, splitRenderedForTelegram, type RenderedTelegramText, type StatusView, type TelegramTextPart } from "./text.ts";
+import { appendRendered, contextUsageBar, renderCodexMarkdownForTelegram, renderTelegramText, splitRenderedForTelegram, truncateForTelegramLabel, type RenderedTelegramText, type StatusView, type TelegramTextPart } from "./text.ts";
 import { noopLogger, type Logger } from "./logger.ts";
 
 const CALLBACK_PREFIX = "ar:";
@@ -107,6 +107,8 @@ export class MessageRouter {
         : undefined;
       if (pending?.kind === "workspace_name") {
         await this.createWorkspaceFromPrompt(message.chatId, message.replyToMessageId!, text);
+      } else if (pending?.kind === "agent_instruction") {
+        await this.answerAgentInstructionPrompt(message.chatId, message.replyToMessageId!, text, message.messageId);
       } else if (pending?.kind === "codex_user_input") {
         await this.answerCodexFreeText(message.chatId, message.replyToMessageId!, text);
       } else if (command === "/relay" || command === "/start") {
@@ -233,6 +235,10 @@ export class MessageRouter {
     }
     if (payload === "n") {
       await this.promptForWorkspaceName(message.chatId);
+      return;
+    }
+    if (payload === "i") {
+      await this.promptForAgentInstruction(message.chatId);
       return;
     }
     if (payload.startsWith("q:")) {
@@ -427,6 +433,40 @@ export class MessageRouter {
     this.logger.info("router.workspace_prompt_created", { chat_id: chatId, prompt_message_id: result.messageId });
   }
 
+  private async promptForAgentInstruction(chatId: ChatId): Promise<void> {
+    const workspace = this.currentWorkspace(chatId);
+    if (!workspace) {
+      await this.promptForWorkspaceName(chatId);
+      return;
+    }
+    const status = await this.ensureAgentStarted(chatId, workspace);
+    if (await this.sendWaitingPromptNotice(chatId, status)) return;
+    const active = Boolean(status.activeTurnId);
+    const result = await this.sendRendered(chatId, renderTelegramText([
+      bold(active ? "Add context" : "New task"),
+      "\n\nReply with the ",
+      active ? "follow-up for " : "task for ",
+      code(workspace.name),
+      ".",
+    ]), {
+      forceReply: true,
+      disableWebPagePreview: true,
+    });
+    if (!result.messageId) {
+      throw new Error("Telegram did not return a prompt message id.");
+    }
+    this.deps.store.setPendingPrompt({
+      chatId,
+      promptMessageId: result.messageId,
+      kind: "agent_instruction",
+      createdAt: Date.now(),
+      sessionKey: status.sessionKey,
+      payloadJson: JSON.stringify({ mode: active ? "follow_up" : "new_task" }),
+      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
+    });
+    this.logger.info("router.agent_instruction_prompt_created", { chat_id: chatId, prompt_message_id: result.messageId, workspace: workspace.name });
+  }
+
   private async createWorkspaceFromPrompt(chatId: ChatId, promptMessageId: number, name: string): Promise<void> {
     validateWorkspaceName(name);
     const existed = workspaceDirectoryExists(this.deps.config.workspaceRoot, name);
@@ -445,6 +485,17 @@ export class MessageRouter {
     ]), {
       replyMarkup: consoleKeyboard(this.statusView(chatId)),
     });
+  }
+
+  private async answerAgentInstructionPrompt(chatId: ChatId, promptMessageId: number, text: string, userMessageId?: number): Promise<void> {
+    const pending = this.deps.store.getPendingPrompt(chatId, promptMessageId);
+    if (!pending || pending.kind !== "agent_instruction" || isExpired(pending)) {
+      this.deps.store.deletePendingPrompt(chatId, promptMessageId);
+      await this.sendRendered(chatId, textMessage("Prompt expired."));
+      return;
+    }
+    this.deps.store.deletePendingPrompt(chatId, promptMessageId);
+    await this.forwardToAgent(chatId, text, userMessageId);
   }
 
   private async forwardToAgent(chatId: ChatId, text: string, userMessageId?: number): Promise<void> {
@@ -777,9 +828,11 @@ export class MessageRouter {
       isSecret: Boolean(question.isSecret),
       options,
     });
+    const request = this.codexRequests.get(codexRequestKey(sessionKeyValue, requestId));
+    const totalQuestions = request?.questions.length ?? 1;
     const result = question.isSecret || options.length === 0
-      ? await this.sendRendered(chatId, formatCodexQuestion(question), { forceReply: true, disableWebPagePreview: true })
-      : await this.sendRendered(chatId, formatCodexQuestion(question), {
+      ? await this.sendRendered(chatId, formatCodexQuestion(question, questionIndex, totalQuestions), { forceReply: true, disableWebPagePreview: true })
+      : await this.sendRendered(chatId, formatCodexQuestion(question, questionIndex, totalQuestions), {
         replyMarkup: codexQuestionKeyboard(token, questionIndex, options),
         disableWebPagePreview: true,
       });
@@ -1157,10 +1210,10 @@ function pagedOutputKeyboard(token: string, pageIndex: number, totalPages: numbe
   if (totalPages <= 1) return { inline_keyboard: [] };
   return {
     inline_keyboard: [[
-      { text: "First", callback_data: `ar:p:${token}:0` },
-      { text: "Previous", callback_data: `ar:p:${token}:${Math.max(0, pageIndex - 1)}` },
-      { text: "Next", callback_data: `ar:p:${token}:${Math.min(totalPages - 1, pageIndex + 1)}` },
-      { text: "Last", callback_data: `ar:p:${token}:${totalPages - 1}` },
+      { text: "⏮", callback_data: `ar:p:${token}:0` },
+      { text: "◀", callback_data: `ar:p:${token}:${Math.max(0, pageIndex - 1)}` },
+      { text: "▶", callback_data: `ar:p:${token}:${Math.min(totalPages - 1, pageIndex + 1)}` },
+      { text: "⏭", callback_data: `ar:p:${token}:${totalPages - 1}` },
     ]],
   };
 }
@@ -1221,12 +1274,20 @@ function formatErrorMessage(detail: string): RenderedTelegramText {
   return renderTelegramText([bold("Error:"), " ", detail]);
 }
 
-function formatCodexQuestion(question: AgentUserInputQuestion): RenderedTelegramText {
-  const parts: TelegramTextPart[] = [
-    bold(question.header),
-    "\n\n",
-    question.question,
-  ];
+function formatCodexQuestion(question: AgentUserInputQuestion, questionIndex?: number, totalQuestions?: number): RenderedTelegramText {
+  if (typeof questionIndex === "number" && typeof totalQuestions === "number" && totalQuestions > 1) {
+    return renderCodexQuestionBody([
+      bold(`Question ${questionIndex + 1}/${totalQuestions}`),
+      "\n",
+      bold(question.header),
+      "\n\n",
+      question.question,
+    ], question);
+  }
+  return renderCodexQuestionBody([bold(question.header), "\n\n", question.question], question);
+}
+
+function renderCodexQuestionBody(parts: TelegramTextPart[], question: AgentUserInputQuestion): RenderedTelegramText {
   const options = question.options ?? [];
   if (!question.isSecret && options.length > 0) {
     parts.push("\n\n");
@@ -1263,15 +1324,15 @@ function codexQuestionKeyboard(token: string, questionIndex: number, options: Ar
   for (const [index, option] of options.entries()) {
     rows.push([{ text: option.label, callback_data: `ar:q:${token}:${questionIndex}:${index}` }]);
   }
-  rows.push([{ text: "Other", callback_data: `ar:q:${token}:${questionIndex}:${options.length}` }]);
+  rows.push([{ text: "💬", callback_data: `ar:q:${token}:${questionIndex}:${options.length}` }]);
   return { inline_keyboard: rows };
 }
 
 function approvalKeyboard(token: string): InlineKeyboardMarkup {
   return {
     inline_keyboard: [[
-      { text: "Approve", callback_data: `ar:a:${token}:y` },
-      { text: "Deny", callback_data: `ar:a:${token}:n` },
+      { text: "✅", callback_data: `ar:a:${token}:y` },
+      { text: "❌", callback_data: `ar:a:${token}:n` },
     ]],
   };
 }
@@ -1332,57 +1393,76 @@ function statusViewFromParts(
 function formatStatusMessage(status: StatusView): RenderedTelegramText {
   if (!status.workspaceName || !status.workspacePath) {
     return renderTelegramText([
-      bold("Status"),
-      "\n\nNo workspace selected.\nUse the console buttons to select or create one.",
+      bold("Agent Relay"),
+      "\n\n● Stopped",
+      "\nws  none",
+      "\nact select or create a workspace",
     ]);
   }
   const parts: TelegramTextPart[] = [
-    bold("Status"),
-    "\n\nWorkspace: ",
-    code(status.workspaceName),
-    "\nCodex: ",
-    status.running ? "running" : "stopped",
-    "\nWaiting: ",
-    formatWaiting(status),
-    "\nModel: ",
-    status.model ? code(status.model) : "unknown",
+    bold("Agent Relay"),
+    "\n\n",
+    statusDot(status),
+    " ",
+    statusLabel(status),
+    "\nws  ",
+    code(truncateForTelegramLabel(status.workspaceName, 32)),
+    "\nmdl ",
+    status.model ? code(truncateForTelegramLabel(status.model, 28)) : "unknown",
   ];
   if (status.reasoningEffort) parts.push(" / ", status.reasoningEffort);
-  parts.push("\nTokens: ", formatTokens(status));
-  if (status.recentOutputAt) parts.push("\nRecent output: ", new Date(status.recentOutputAt).toISOString());
-  if (status.recentError) parts.push("\nRecent error: ", status.recentError.trim().slice(0, 300));
+  parts.push(
+    "\nctx ",
+    formatContext(status),
+    "\nwait ",
+    formatWaiting(status),
+  );
+  if (status.recentOutputAt) parts.push("\nlast ", relativeTime(status.recentOutputAt));
+  if (status.recentError) parts.push("\nerr ", truncateForTelegramLabel(status.recentError.trim(), 120));
   return renderTelegramText(parts);
 }
 
 function formatDetailsMessage(status: StatusView): RenderedTelegramText {
   if (!status.workspaceName || !status.workspacePath) return formatStatusMessage(status);
   const parts: TelegramTextPart[] = [
-    bold("Details"),
-    "\n\nWorkspace: ",
+    bold("Agent Relay Details"),
+    "\n\nws   ",
     code(status.workspaceName),
-    "\nPath: ",
+    "\npath ",
     code(status.workspacePath),
-    "\nThread: ",
+    "\nthrd ",
   ];
   const threadLabel = status.threadName || status.threadId;
   parts.push(threadLabel ? code(threadLabel) : "none");
   if (status.threadStatus) parts.push(` (${status.threadStatus})`);
   parts.push(
-    "\nModel: ",
+    "\nmdl  ",
     status.model ? code(status.model) : "unknown",
     status.modelProvider ? ` / ${status.modelProvider}` : "",
-    "\nReasoning: ",
+    "\nrsn  ",
     status.reasoningEffort ?? "unknown",
-    "\nApproval: ",
+    "\nappr ",
     status.approvalPolicy ?? "unknown",
-    "\nSandbox: ",
+    "\nsbox ",
     status.sandboxPolicy ?? "unknown",
-    "\nWaiting: ",
+    "\nwait ",
     formatWaiting(status),
-    "\nTokens: ",
+    "\ntok  ",
     formatTokens(status),
   );
   return renderTelegramText(parts);
+}
+
+function statusDot(status: StatusView): string {
+  if (status.recentError) return "●";
+  if (status.waitingForApproval || status.waitingForUserInput) return "●";
+  return status.running ? "●" : "●";
+}
+
+function statusLabel(status: StatusView): string {
+  if (status.recentError) return "Error";
+  if (status.waitingForApproval || status.waitingForUserInput) return "Waiting";
+  return status.running ? "Running" : "Stopped";
 }
 
 function formatWaiting(status: StatusView): string {
@@ -1404,16 +1484,41 @@ function formatTokens(status: StatusView): string {
   return typeof total === "number" ? String(total) : `context ${context}`;
 }
 
+function contextPercent(status: StatusView): number | undefined {
+  const total = status.tokenUsage?.total?.totalTokens;
+  const context = status.contextWindow;
+  if (typeof total !== "number" || typeof context !== "number" || context <= 0) return undefined;
+  return Math.round((total / context) * 100);
+}
+
+function formatContext(status: StatusView): string {
+  const percent = contextPercent(status);
+  return typeof percent === "number"
+    ? `${contextUsageBar(percent)} ${percent}%`
+    : `${contextUsageBar(undefined)} ${formatTokens(status)}`;
+}
+
+function relativeTime(timestamp: number): string {
+  const elapsed = Math.max(0, Date.now() - timestamp);
+  const seconds = Math.floor(elapsed / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return new Date(timestamp).toISOString();
+}
+
 function formatWorkspacesMessage(workspaces: Array<{ name: string; selected: boolean }>, pageIndex: number, totalPages: number): RenderedTelegramText {
   if (workspaces.length === 0) {
     return renderTelegramText([
       bold("Workspaces"),
-      "\n\nNo workspaces.\nUse New workspace to create one.",
+      "\n\nNo workspaces.\nUse 💬 to create one.",
     ]);
   }
   const parts: TelegramTextPart[] = [bold("Workspaces"), `\n\nPage ${pageIndex + 1}/${totalPages}`];
   for (const workspace of workspaces) {
-    parts.push("\n", workspace.selected ? "Current: " : "- ", code(workspace.name));
+    parts.push("\n", workspace.selected ? "● " : "○ ", code(workspace.name));
   }
   return renderTelegramText(parts);
 }
@@ -1465,13 +1570,13 @@ function formatModelInfo(status: AgentSessionStatus | undefined, models: AgentMo
 function formatResumeThreads(threads: AgentThreadSummary[], pageIndex: number, totalPages: number): RenderedTelegramText {
   if (threads.length === 0) {
     return renderTelegramText([
-      bold("Resume Codex thread"),
-      "\n\nNo saved threads were found for the current workspace.",
+      bold("Resume session"),
+      "\n\nNo saved sessions were found for the current workspace.",
     ]);
   }
   const start = pageIndex * LIST_PAGE_SIZE;
   const items = threads.slice(start, start + LIST_PAGE_SIZE);
-  const parts: TelegramTextPart[] = [bold("Resume Codex thread"), `\n\nPage ${pageIndex + 1}/${totalPages}`];
+  const parts: TelegramTextPart[] = [bold("Resume session"), `\n\nPage ${pageIndex + 1}/${totalPages}`];
   for (const [index, thread] of items.entries()) {
     const title = thread.name || thread.preview || thread.id;
     const updated = thread.updatedAt ? ` ${new Date(thread.updatedAt * 1000).toISOString()}` : "";
@@ -1486,31 +1591,31 @@ function resumeThreadButtonText(thread: AgentThreadSummary): string {
 }
 
 function consoleKeyboard(status: { workspaceName?: string; running?: boolean }): InlineKeyboardMarkup {
-  const rows: InlineKeyboardMarkup["inline_keyboard"] = [
-    [
-      { text: "Workspaces", callback_data: "ar:w" },
-      { text: "Details", callback_data: "ar:d" },
-    ],
-  ];
+  const rows: InlineKeyboardMarkup["inline_keyboard"] = [];
   if (status.workspaceName) {
     rows.push([
-      { text: "Resume", callback_data: "ar:rl:0" },
-      { text: "Review", callback_data: "ar:review" },
-      { text: "Compact", callback_data: "ar:compact" },
+      { text: "💬", callback_data: "ar:i" },
+      { text: "🔍", callback_data: "ar:review" },
+      { text: "📦", callback_data: "ar:compact" },
     ]);
     rows.push([
-      { text: "New", callback_data: "ar:n" },
-      { text: "Clear", callback_data: "ar:clear?" },
+      { text: "📁", callback_data: "ar:w" },
+      { text: "🔁", callback_data: "ar:rl:0" },
+      { text: "ℹ️", callback_data: "ar:d" },
     ]);
+    rows.push(status.running
+      ? [
+        { text: "🛑", callback_data: "ar:x?" },
+        { text: "🔄", callback_data: "ar:s" },
+      ]
+      : [{ text: "🔄", callback_data: "ar:s" }]);
   } else {
-    rows.push([{ text: "New", callback_data: "ar:n" }]);
-  }
-  if (status.workspaceName && status.running) {
     rows.push([
-      { text: "Stop", callback_data: "ar:x?" },
+      { text: "📁", callback_data: "ar:w" },
+      { text: "💬", callback_data: "ar:n" },
+      { text: "🔄", callback_data: "ar:s" },
     ]);
   }
-  rows.push([{ text: "Refresh", callback_data: "ar:s" }]);
   return {
     inline_keyboard: rows,
   };
@@ -1518,13 +1623,13 @@ function consoleKeyboard(status: { workspaceName?: string; running?: boolean }):
 
 function workspacesKeyboard(workspaces: WorkspaceRecord[], selected: string | undefined, pageIndex: number, totalPages: number): InlineKeyboardMarkup {
   const rows = workspaces.map((workspace) => [{
-    text: `${workspace.name === selected ? "Current: " : "Use: "}${buttonLabel(workspace.name)}`,
+    text: `${workspace.name === selected ? "● " : "○ "}${buttonLabel(workspace.name)}`,
     callback_data: workspaceCallbackData(workspace.name),
   }]);
   if (totalPages > 1) {
     rows.push([
-      { text: "Previous", callback_data: `ar:wl:${Math.max(0, pageIndex - 1)}` },
-      { text: "Next", callback_data: `ar:wl:${Math.min(totalPages - 1, pageIndex + 1)}` },
+      { text: "◀", callback_data: `ar:wl:${Math.max(0, pageIndex - 1)}` },
+      { text: "▶", callback_data: `ar:wl:${Math.min(totalPages - 1, pageIndex + 1)}` },
     ]);
   }
 
@@ -1532,8 +1637,8 @@ function workspacesKeyboard(workspaces: WorkspaceRecord[], selected: string | un
     inline_keyboard: [
       ...rows,
       [
-        { text: "New", callback_data: "ar:n" },
-        { text: "Refresh", callback_data: "ar:s" },
+        { text: "💬", callback_data: "ar:n" },
+        { text: "🔄", callback_data: "ar:s" },
       ],
     ],
   };
@@ -1554,19 +1659,19 @@ function resumeThreadsKeyboard(
   });
   if (totalPages > 1) {
     rows.push([
-      { text: "Previous", callback_data: `ar:rl:${Math.max(0, pageIndex - 1)}` },
-      { text: "Next", callback_data: `ar:rl:${Math.min(totalPages - 1, pageIndex + 1)}` },
+      { text: "◀", callback_data: `ar:rl:${Math.max(0, pageIndex - 1)}` },
+      { text: "▶", callback_data: `ar:rl:${Math.min(totalPages - 1, pageIndex + 1)}` },
     ]);
   }
-  rows.push([{ text: "Refresh", callback_data: "ar:rl:0" }]);
-  return { inline_keyboard: rows.length > 0 ? rows : [[{ text: "Refresh", callback_data: "ar:s" }]] };
+  rows.push([{ text: "🔄", callback_data: "ar:rl:0" }]);
+  return { inline_keyboard: rows.length > 0 ? rows : [[{ text: "🔄", callback_data: "ar:s" }]] };
 }
 
 function clearConfirmKeyboard(): InlineKeyboardMarkup {
   return {
     inline_keyboard: [[
-      { text: "Start new thread", callback_data: "ar:clear!" },
-      { text: "Cancel", callback_data: "ar:c" },
+      { text: "🆕", callback_data: "ar:clear!" },
+      { text: "⬅", callback_data: "ar:c" },
     ]],
   };
 }
@@ -1611,8 +1716,8 @@ function exitConfirmKeyboard(): InlineKeyboardMarkup {
   return {
     inline_keyboard: [
       [
-        { text: "Stop session", callback_data: "ar:x!" },
-        { text: "Cancel", callback_data: "ar:c" },
+        { text: "🛑", callback_data: "ar:x!" },
+        { text: "⬅", callback_data: "ar:c" },
       ],
     ],
   };

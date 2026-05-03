@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   cleanTerminalOutput,
+  contextUsageBar,
   renderTelegramText,
   renderCodexMarkdownForTelegram,
   splitForTelegram,
   splitHtmlForTelegram,
   splitRenderedForTelegram,
+  truncateForTelegramLabel,
 } from "../src/text.ts";
 
 describe("text utilities", () => {
@@ -78,5 +80,16 @@ describe("text utilities", () => {
       { text: "abc", entities: [{ type: "bold", offset: 2, length: 1 }] },
       { text: "def", entities: [{ type: "bold", offset: 0, length: 2 }] },
     ]);
+  });
+
+  test("renders compact context usage bars", () => {
+    expect(contextUsageBar(42)).toBe("▰▰▱▱▱");
+    expect(contextUsageBar(undefined)).toBe("▱▱▱▱▱");
+    expect(contextUsageBar(100, 4)).toBe("▰▰▰▰");
+  });
+
+  test("truncates labels from the middle", () => {
+    expect(truncateForTelegramLabel("agent-relay-workspace", 12)).toBe("agent...pace");
+    expect(truncateForTelegramLabel("short", 12)).toBe("short");
   });
 });

@@ -261,7 +261,7 @@ export interface TranscriptEvent {
   createdAt: number;
 }
 
-export type PendingPromptKind = "workspace_name" | "codex_user_input" | "codex_approval";
+export type PendingPromptKind = "workspace_name" | "codex_user_input" | "codex_approval" | "agent_instruction";
 
 export interface PendingPrompt {
   chatId: ChatId;

@@ -84,18 +84,37 @@ If no workspace is selected, user input is not forwarded. Relay opens the consol
 
 ## Telegram Interaction
 
-The relay console is a compact control panel. It shows the selected workspace, Codex running/stopped state, waiting state, model, token/context usage, recent output time, and recent relay error. The `Details` button expands lower-frequency metadata such as path, thread, provider, approval policy, and sandbox policy. Its inline buttons cover relay-specific actions:
+The relay console is a compact TUI-lite Cockpit. It shows the selected workspace, Codex state, waiting state, model, token/context usage, recent output time, and recent relay error in short English lines. Dynamic values such as workspace names and paths are rendered as Telegram code entities instead of HTML. Long labels are truncated in the Cockpit and shown in full from Details.
 
-- `Workspaces` opens a paged workspace list with the current workspace pinned first.
-- `Details` opens the expanded status view.
-- `Resume` opens a paged saved-thread picker for the current workspace.
-- `Review` starts a Codex review of uncommitted changes.
-- `Compact` starts Codex thread compaction.
-- `New` asks for a workspace name with Telegram ForceReply, then selects an existing directory under `WORKSPACE_ROOT` or creates and selects a new one.
-- `Clear` opens a confirmation view before replacing the current stored Codex thread binding.
-- `Stop` opens a confirmation view before stopping the current Codex session.
-- `Refresh` redraws the console.
-- Workspace buttons switch the chat binding, start or resume the workspace's Codex thread, and edit the console into the updated status view.
+Example Cockpit:
+
+```text
+Agent Relay
+
+● Running
+ws  agent-relay
+mdl gpt-5.2 / high
+ctx ▰▰▱▱▱ 42%
+wait no
+last 2m ago
+```
+
+Inline action buttons are intentionally emoji-only:
+
+- `💬` opens a ForceReply prompt. With a selected workspace it sends a new task, or adds context to an active turn. Without a selected workspace it asks for a workspace name. It is also used for custom answers to Codex questions.
+- `🔍` starts a Codex review of uncommitted changes.
+- `📦` starts Codex thread compaction.
+- `📁` opens a paged workspace list with the current workspace pinned first.
+- `🔁` opens a paged saved-session picker for the current workspace.
+- `ℹ️` opens the expanded Details view.
+- `🛑` opens a confirmation view before stopping the current Codex session.
+- `🔄` redraws the Cockpit.
+- `✅` and `❌` answer approval prompts.
+- `🆕` confirms replacing the current stored Codex thread binding with a new thread.
+- `⬅` returns to the Cockpit from confirmation views.
+- `⏮`, `◀`, `▶`, and `⏭` navigate long assistant output pages.
+
+Workspace and saved-session picker buttons still include text labels because otherwise choices cannot be distinguished. Codex question option buttons also keep the option labels provided by Codex; `💬` is used for a custom answer.
 
 System, console, approval, question, and assistant responses are sent as Telegram text plus message entities instead of HTML parse mode. Dynamic values such as workspace names, paths, and errors are rendered as plain text or code entities, avoiding HTML parse failures while preserving readable formatting.
 
@@ -108,11 +127,11 @@ Raw Codex terminal output is intentionally hidden from Telegram. Command stdout/
 When Codex asks the user a structured question via `request_user_input`, relay maps it to Telegram UI:
 
 - Questions with options are sent with inline keyboard buttons.
-- Free-text, secret, and `Other` answers use Telegram ForceReply.
+- Free-text, secret, and `💬` custom answers use Telegram ForceReply.
 - Multi-question requests are shown sequentially, one question at a time, and relay waits until all answers are collected before replying to Codex.
 - Expired prompt replies are marked expired and are not forwarded as normal Codex prompts.
 
-Codex approval requests for commands, file changes, and permissions are shown as concise Telegram messages with `Approve` and `Deny` buttons. The underlying command output is not sent to Telegram, and the approval card is edited to show the decision after a tap.
+Codex approval requests for commands, file changes, and permissions are shown as concise Telegram messages with `✅` and `❌` buttons. The underlying command output is not sent to Telegram, and the approval card is edited to show the decision after a tap.
 
 If Telegram rejects a menu edit, the relay logs a warning and sends a new message instead. Telegram's `message is not modified` edit response is treated as harmless and is not logged as an error, including the HTTP 400 form returned when an edit would leave both text and buttons unchanged. Other edit failures still fall back to sending a new message.
 
@@ -139,8 +158,8 @@ codex app-server --listen stdio://
 - Assistant message deltas from `item/agentMessage/delta` are stored in SQLite, debounced, and rendered into Telegram-sized output pages.
 - Agent output is aggregated per visible interaction segment, flushed after a short quiet period, size/time limit, or `turn/completed`, and usually edits one live Telegram message for the current response.
 - User input, Codex approval prompts, and Codex question prompts close the current output segment before later assistant output is shown.
-- Long Codex output is rendered as a paged Telegram message with First/Previous/Next/Last buttons instead of flooding the chat with continuation messages. While streaming, the live message follows the newest page; after `turn/completed`, it returns to page 1 for easier reading from the top.
-- The `Stop` inline button sends `turn/interrupt` for the active turn. It requires a second confirmation tap.
+- Long Codex output is rendered as a paged Telegram message with emoji-only navigation buttons instead of flooding the chat with continuation messages. While streaming, the live message follows the newest page; after `turn/completed`, it returns to page 1 for easier reading from the top.
+- The `🛑` inline button sends `turn/interrupt` for the active turn. It requires a second confirmation tap.
 
 ## Logging
 
