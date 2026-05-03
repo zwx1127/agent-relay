@@ -372,7 +372,7 @@ describe("router", () => {
     await router.handle(textMessage("/relay"));
 
     expect(adapter.sent.at(-1)?.text).toContain("Agent Relay");
-    expect(adapter.sent.at(-1)?.text).toContain("ws  none");
+    expect(adapter.sent.at(-1)?.text).toContain("Workspace: none");
     expect(adapter.sent.at(-1)?.options?.entities?.[0]?.type).toBe("bold");
     expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["📁", "💬", "🔄"]);
   });
@@ -499,7 +499,7 @@ describe("router", () => {
     await router.handle(textMessage("hello"));
 
     expect(agent.sent).toEqual([]);
-    expect(adapter.sent.at(-1)?.text).toContain("ws  none");
+    expect(adapter.sent.at(-1)?.text).toContain("Workspace: none");
   });
 
   test("new workspace callback uses ForceReply and reply creates binding", async () => {
@@ -585,7 +585,7 @@ describe("router", () => {
 
     expect(store.getBinding(1)?.workspaceName).toBe("second");
     expect(agent.getStatus("1:second")?.running).toBe(true);
-    expect(adapter.edited.at(-1)?.text).toContain("ws  second");
+    expect(adapter.edited.at(-1)?.text).toContain("Workspace: second");
     expect(adapter.edited.at(-1)?.options.entities?.some((entity) => entity.type === "code")).toBe(true);
     expect(adapter.edited.at(-1)?.options.messageId).toBe(42);
     expect(adapter.answered).toEqual([{ callbackQueryId: "cb1", text: undefined }]);

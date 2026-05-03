@@ -84,19 +84,19 @@ If no workspace is selected, user input is not forwarded. Relay opens the consol
 
 ## Telegram Interaction
 
-The relay console is a compact TUI-lite Cockpit. It shows the selected workspace, Codex state, waiting state, model, token/context usage, recent output time, and recent relay error in short English lines. Dynamic values such as workspace names and paths are rendered as Telegram code entities instead of HTML. Long labels are truncated in the Cockpit and shown in full from Details.
+The relay console is a readable status panel. It shows the selected workspace, Codex state, waiting state, model, token/context usage, recent output time, and recent relay error with full field labels. Dynamic values such as workspace names and paths are rendered as Telegram code entities instead of HTML. Long values are truncated in the main panel and shown in full from Details.
 
-Example Cockpit:
+Example status panel:
 
 ```text
 Agent Relay
 
 ● Running
-ws  agent-relay
-mdl gpt-5.2 / high
-ctx ▰▰▱▱▱ 42%
-wait no
-last 2m ago
+Workspace: agent-relay
+Model: gpt-5.2 / high
+Context: ▰▰▱▱▱ 42%
+Waiting: no
+Last output: 2m ago
 ```
 
 Inline action buttons are intentionally emoji-only:
@@ -108,10 +108,10 @@ Inline action buttons are intentionally emoji-only:
 - `🔁` opens a paged saved-session picker for the current workspace.
 - `ℹ️` opens the expanded Details view.
 - `🛑` opens a confirmation view before stopping the current Codex session.
-- `🔄` redraws the Cockpit.
+- `🔄` redraws the status panel.
 - `✅` and `❌` answer approval prompts.
 - `🆕` confirms replacing the current stored Codex thread binding with a new thread.
-- `⬅` returns to the Cockpit from confirmation views.
+- `⬅` returns to the status panel from confirmation views.
 - `⏮`, `◀`, `▶`, and `⏭` navigate long assistant output pages.
 
 Workspace and saved-session picker buttons still include text labels because otherwise choices cannot be distinguished. Codex question option buttons also keep the option labels provided by Codex; `💬` is used for a custom answer.

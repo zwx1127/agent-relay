@@ -1395,8 +1395,8 @@ function formatStatusMessage(status: StatusView): RenderedTelegramText {
     return renderTelegramText([
       bold("Agent Relay"),
       "\n\n● Stopped",
-      "\nws  none",
-      "\nact select or create a workspace",
+      "\nWorkspace: none",
+      "\nAction: select or create a workspace",
     ]);
   }
   const parts: TelegramTextPart[] = [
@@ -1405,20 +1405,20 @@ function formatStatusMessage(status: StatusView): RenderedTelegramText {
     statusDot(status),
     " ",
     statusLabel(status),
-    "\nws  ",
+    "\nWorkspace: ",
     code(truncateForTelegramLabel(status.workspaceName, 32)),
-    "\nmdl ",
+    "\nModel: ",
     status.model ? code(truncateForTelegramLabel(status.model, 28)) : "unknown",
   ];
   if (status.reasoningEffort) parts.push(" / ", status.reasoningEffort);
   parts.push(
-    "\nctx ",
+    "\nContext: ",
     formatContext(status),
-    "\nwait ",
+    "\nWaiting: ",
     formatWaiting(status),
   );
-  if (status.recentOutputAt) parts.push("\nlast ", relativeTime(status.recentOutputAt));
-  if (status.recentError) parts.push("\nerr ", truncateForTelegramLabel(status.recentError.trim(), 120));
+  if (status.recentOutputAt) parts.push("\nLast output: ", relativeTime(status.recentOutputAt));
+  if (status.recentError) parts.push("\nError: ", truncateForTelegramLabel(status.recentError.trim(), 120));
   return renderTelegramText(parts);
 }
 
@@ -1426,28 +1426,28 @@ function formatDetailsMessage(status: StatusView): RenderedTelegramText {
   if (!status.workspaceName || !status.workspacePath) return formatStatusMessage(status);
   const parts: TelegramTextPart[] = [
     bold("Agent Relay Details"),
-    "\n\nws   ",
+    "\n\nWorkspace: ",
     code(status.workspaceName),
-    "\npath ",
+    "\nPath: ",
     code(status.workspacePath),
-    "\nthrd ",
+    "\nThread: ",
   ];
   const threadLabel = status.threadName || status.threadId;
   parts.push(threadLabel ? code(threadLabel) : "none");
   if (status.threadStatus) parts.push(` (${status.threadStatus})`);
   parts.push(
-    "\nmdl  ",
+    "\nModel: ",
     status.model ? code(status.model) : "unknown",
     status.modelProvider ? ` / ${status.modelProvider}` : "",
-    "\nrsn  ",
+    "\nReasoning: ",
     status.reasoningEffort ?? "unknown",
-    "\nappr ",
+    "\nApproval policy: ",
     status.approvalPolicy ?? "unknown",
-    "\nsbox ",
+    "\nSandbox policy: ",
     status.sandboxPolicy ?? "unknown",
-    "\nwait ",
+    "\nWaiting: ",
     formatWaiting(status),
-    "\ntok  ",
+    "\nToken usage: ",
     formatTokens(status),
   );
   return renderTelegramText(parts);
