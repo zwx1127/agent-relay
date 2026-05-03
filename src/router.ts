@@ -112,12 +112,12 @@ export class MessageRouter {
         await this.answerAgentInstructionPrompt(message.chatId, message.replyToMessageId!, text, message.messageId);
       } else if (pending?.kind === "codex_user_input") {
         await this.answerCodexFreeText(message.chatId, message.replyToMessageId!, text);
-      } else if (command === "/relay" || command === "/start") {
+      } else if (command === "/codex" || command === "/relay" || command === "/start") {
         await this.renderConsole(message.chatId);
       } else if (command && await this.handleSlashCommand(message.chatId, command, text, message.messageId)) {
         return;
       } else if (command) {
-        await this.sendRendered(message.chatId, unknownCommandMessage(command));
+        await this.submitTask(message.chatId, text, message.messageId);
       } else {
         await this.submitTask(message.chatId, text, message.messageId);
       }
@@ -292,7 +292,7 @@ export class MessageRouter {
       return;
     }
     if (payload === "clear?") {
-      await this.renderCallbackPage(message, confirmMessage("Start a new Codex thread?", "The current thread binding for this workspace will be replaced."), clearConfirmKeyboard());
+      await this.renderCallbackPage(message, confirmMessage("Start a new Codex session?", "This replaces the current thread binding for the selected cwd."), clearConfirmKeyboard());
       return;
     }
     if (payload === "clear!") {
@@ -308,7 +308,7 @@ export class MessageRouter {
       return;
     }
     if (payload === "x?") {
-      await this.renderCallbackPage(message, confirmMessage("Stop Codex session?", "The current workspace binding will remain selected."), exitConfirmKeyboard());
+      await this.renderCallbackPage(message, confirmMessage("Stop Codex session?", "The selected cwd stays active."), exitConfirmKeyboard());
       return;
     }
     if (payload === "x!") {
@@ -362,6 +362,18 @@ export class MessageRouter {
       name: workspace.name,
       selected: workspace.name === selected,
     })), page.pageIndex, page.totalPages), workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages));
+  }
+
+  private async renderWorkspaces(chatId: ChatId): Promise<void> {
+    const workspaces = await this.listAvailableWorkspaces();
+    const selected = this.currentWorkspace(chatId)?.name;
+    const page = paginateWorkspaces(workspaces, selected, 0);
+    await this.sendRendered(chatId, formatWorkspacesMessage(page.items.map((workspace) => ({
+      name: workspace.name,
+      selected: workspace.name === selected,
+    })), page.pageIndex, page.totalPages), {
+      replyMarkup: workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages),
+    });
   }
 
   private async stopFromCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
@@ -458,7 +470,7 @@ export class MessageRouter {
   }
 
   private async promptForWorkspaceName(chatId: ChatId): Promise<void> {
-    const result = await this.sendRendered(chatId, textMessage("Reply with a workspace name. Existing directories under WORKSPACE_ROOT will be selected; missing names will be created."), {
+    const result = await this.sendRendered(chatId, textMessage("Reply with the cwd name. Existing directories under WORKSPACE_ROOT are selected; missing names are created."), {
       forceReply: true,
       disableWebPagePreview: true,
     });
@@ -484,9 +496,9 @@ export class MessageRouter {
     if (await this.sendWaitingPromptNotice(chatId, status)) return;
     const active = Boolean(status.activeTurnId);
     const result = await this.sendRendered(chatId, renderTelegramText([
-      bold(active ? "Add context" : "New task"),
+      bold(active ? "Add to current turn" : "Prompt Codex"),
       "\n\nReply with the ",
-      active ? "follow-up for " : "task for ",
+      active ? "follow-up for " : "prompt for ",
       code(workspace.name),
       ".",
     ]), {
@@ -509,6 +521,11 @@ export class MessageRouter {
   }
 
   private async createWorkspaceFromPrompt(chatId: ChatId, promptMessageId: number, name: string): Promise<void> {
+    await this.selectOrCreateWorkspace(chatId, name);
+    this.deps.store.deletePendingPrompt(chatId, promptMessageId);
+  }
+
+  private async selectOrCreateWorkspace(chatId: ChatId, name: string): Promise<void> {
     validateWorkspaceName(name);
     const existed = workspaceDirectoryExists(this.deps.config.workspaceRoot, name);
     const path = existed
@@ -516,11 +533,10 @@ export class MessageRouter {
       : await createWorkspace(this.deps.config.workspaceRoot, name);
     this.deps.store.upsertWorkspace({ name, path, createdAt: Date.now() });
     this.deps.store.bindChat(chatId, name);
-    this.deps.store.deletePendingPrompt(chatId, promptMessageId);
     this.logger.info(existed ? "router.workspace_existing_selected" : "router.workspace_created", { chat_id: chatId, workspace: name, path });
     await this.ensureAgentStarted(chatId, { name, path, createdAt: Date.now() });
     await this.sendRendered(chatId, renderTelegramText([
-      "Workspace ",
+      "cwd ",
       code(name),
       ` ${existed ? "selected" : "created and selected"}.`,
     ]), {
@@ -555,7 +571,11 @@ export class MessageRouter {
     const status = await this.ensureAgentStarted(chatId, workspace);
     if (await this.sendWaitingPromptNotice(chatId, status)) return;
     const busy = Boolean(status.activeTurnId);
-    const shouldQueue = preference === "queue" || (preference === "auto" && busy);
+    if (preference === "auto" && busy) {
+      await this.sendToAgent(chatId, workspace, text, userMessageId, this.deps.store.activeTask(chatId, workspace.name));
+      return;
+    }
+    const shouldQueue = preference === "queue";
     const task = this.deps.store.createTask({
       chatId,
       workspaceName: workspace.name,
@@ -621,7 +641,7 @@ export class MessageRouter {
 
   private async sendWaitingPromptNotice(chatId: ChatId, status: AgentSessionStatus): Promise<boolean> {
     if (status.waitingForUserInput) {
-      await this.sendRendered(chatId, messageWithTitle("Codex is waiting for your answer.", "Open the latest question card or reply to it. New tasks are paused while the active turn is blocked."));
+      await this.sendRendered(chatId, messageWithTitle("Codex is waiting for your answer.", "Open the latest question card or reply to it. New prompts are paused while the active turn is blocked."));
       return true;
     }
     if (status.waitingForApproval) {
@@ -658,9 +678,22 @@ export class MessageRouter {
       case "/status":
         await this.renderConsole(chatId);
         return true;
+      case "/cd": {
+        const body = commandBody(text);
+        if (!body) {
+          await this.renderWorkspaces(chatId);
+        } else {
+          await this.selectOrCreateWorkspace(chatId, body);
+        }
+        return true;
+      }
+      case "/new":
+        await this.sendRendered(chatId, confirmMessage("Start a new Codex session?", "This replaces the current thread binding for the selected cwd."), { replyMarkup: clearConfirmKeyboard() });
+        return true;
       case "/init":
         await this.submitTask(chatId, INIT_PROMPT, userMessageId, "immediate");
         return true;
+      case "/exec":
       case "/ask": {
         const body = commandBody(text);
         if (!body) {
@@ -681,7 +714,7 @@ export class MessageRouter {
       }
       case "/later": {
         const body = commandBody(text);
-        if (!body) throw new Error("/later requires task text.");
+        if (!body) throw new Error("/later requires prompt text.");
         await this.submitTask(chatId, body, userMessageId, "queue");
         return true;
       }
@@ -695,7 +728,11 @@ export class MessageRouter {
         return true;
       }
       case "/queue":
-        await this.renderQueue(chatId);
+        {
+          const body = commandBody(text);
+          if (body) await this.submitTask(chatId, body, userMessageId, "queue");
+          else await this.renderQueue(chatId);
+        }
         return true;
       case "/review":
         await this.runBuiltin(chatId, "review", userMessageId);
@@ -707,7 +744,7 @@ export class MessageRouter {
         await this.renderModelInfo(chatId);
         return true;
       case "/clear":
-        await this.sendRendered(chatId, confirmMessage("Start a new Codex thread?", "The current thread binding for this workspace will be replaced."), { replyMarkup: clearConfirmKeyboard() });
+        await this.sendRendered(chatId, confirmMessage("Start a new Codex session?", "This replaces the current thread binding for the selected cwd."), { replyMarkup: clearConfirmKeyboard() });
         return true;
       case "/resume":
         await this.renderResumeThreads(chatId);
@@ -814,20 +851,20 @@ export class MessageRouter {
     const task = this.deps.store.getTask(taskId);
     if (!task || task.chatId !== message.chatId) throw new Error("Task not found.");
     const workspace = this.requireCurrentWorkspace(message.chatId);
-    if (workspace.name !== task.workspaceName) throw new Error("Task belongs to another workspace.");
+    if (workspace.name !== task.workspaceName) throw new Error("Queued prompt belongs to another cwd.");
     if (action === "del") {
-      if (task.status !== "queued") throw new Error("Only queued tasks can be deleted.");
+      if (task.status !== "queued") throw new Error("Only queued prompts can be deleted.");
       this.deps.store.updateTask(task.id, { status: "cancelled" });
       await this.renderQueueCallback(message);
       return;
     }
     if (action === "run") {
-      if (task.status !== "queued") throw new Error("Only queued tasks can be run.");
+      if (task.status !== "queued") throw new Error("Only queued prompts can be run.");
       const status = await this.ensureAgentStarted(message.chatId, workspace);
       if (status.activeTurnId || status.waitingForApproval || status.waitingForUserInput) {
-        throw new Error("Codex is busy. The task will stay queued.");
+        throw new Error("Codex is busy. The prompt will stay queued.");
       }
-      await this.renderCallbackPage(message, messageWithTitle(`Running task #${task.id}.`), { inline_keyboard: [] });
+      await this.renderCallbackPage(message, messageWithTitle(`Running prompt #${task.id}.`), { inline_keyboard: [] });
       await this.runTask(workspace, task);
       return;
     }
@@ -847,7 +884,7 @@ export class MessageRouter {
     const active = this.deps.store.activeTask(parsed.chatId, parsed.workspaceName);
     if (active && (!turnId || !active.turnId || active.turnId === turnId)) {
       this.deps.store.updateTask(active.id, { status: "done" });
-      await this.sendRendered(parsed.chatId, messageWithTitle(`Task #${active.id} completed.`), { replyMarkup: resultKeyboard() });
+      await this.sendRendered(parsed.chatId, messageWithTitle(`Prompt #${active.id} completed.`), { replyMarkup: resultKeyboard() });
     }
     const workspace = this.currentWorkspace(parsed.chatId);
     if (!workspace || workspace.name !== parsed.workspaceName) return;
@@ -855,7 +892,7 @@ export class MessageRouter {
     if (status?.waitingForApproval || status?.waitingForUserInput || status?.activeTurnId) return;
     const next = this.deps.store.nextQueuedTask(parsed.chatId, parsed.workspaceName);
     if (next) {
-      await this.sendRendered(parsed.chatId, messageWithTitle(`Running queued task #${next.id}.`));
+      await this.sendRendered(parsed.chatId, messageWithTitle(`Running queued prompt #${next.id}.`));
       await this.runTask(workspace, next);
     }
   }
@@ -873,7 +910,7 @@ export class MessageRouter {
 
   private requireCurrentWorkspace(chatId: ChatId): WorkspaceRecord {
     const workspace = this.currentWorkspace(chatId);
-    if (!workspace) throw new Error("No workspace selected. Open /relay to select or create one.");
+    if (!workspace) throw new Error("No cwd selected. Use /cd <name> or /cd to select one.");
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
     return workspace;
   }
@@ -885,7 +922,7 @@ export class MessageRouter {
       path: resolveWorkspacePath(this.deps.config.workspaceRoot, name),
       createdAt: Date.now(),
     };
-    if (!isRealDirectory(workspace.path)) throw new Error(`Workspace '${name}' does not exist. Create it from the relay console first.`);
+    if (!isRealDirectory(workspace.path)) throw new Error(`cwd '${name}' does not exist. Create it with /cd ${name}.`);
     this.deps.store.upsertWorkspace(workspace);
     return workspace;
   }
@@ -901,8 +938,8 @@ export class MessageRouter {
   private async workspaceNameForToken(token: string): Promise<string> {
     const matches = (await this.listAvailableWorkspaces()).filter((workspace) => workspaceCallbackToken(workspace.name) === token);
     if (matches.length === 1) return matches[0]!.name;
-    if (matches.length > 1) throw new Error("Workspace selection token is ambiguous. Refresh Workspaces and try again.");
-    throw new Error("Workspace selection expired. Refresh Workspaces and try again.");
+    if (matches.length > 1) throw new Error("cwd selection token is ambiguous. Refresh cwd and try again.");
+    throw new Error("cwd selection expired. Refresh cwd and try again.");
   }
 
   private rememberResumeThread(chatId: ChatId, workspace: WorkspaceRecord, thread: AgentThreadSummary): string {
@@ -1402,17 +1439,6 @@ function commandBody(text: string): string {
   return firstSpace < 0 ? "" : text.slice(firstSpace + 1).trim();
 }
 
-function unknownCommandMessage(command: string): RenderedTelegramText {
-  return renderTelegramText([
-    bold("Unknown command:"),
-    " ",
-    code(command),
-    "\n\nUse ",
-    code("/ask <task>"),
-    " to send slash-style text to Codex.",
-  ]);
-}
-
 function templatePrompt(command: string, body: string): string {
   switch (command) {
     case "/plan":
@@ -1498,15 +1524,15 @@ function answeredMessage(answer: string, hasNext: boolean): RenderedTelegramText
 
 function queuedTaskMessage(task: RelayTask): RenderedTelegramText {
   return renderTelegramText([
-    bold(`Queued task #${task.id}`),
+    bold(`Queued prompt #${task.id}`),
     "\n\n",
     truncateForTelegramLabel(task.text, 220),
   ]);
 }
 
 function formatQueueMessage(tasks: RelayTask[]): RenderedTelegramText {
-  if (tasks.length === 0) return messageWithTitle("Task queue", "No queued tasks.");
-  const parts: TelegramTextPart[] = [bold("Task queue")];
+  if (tasks.length === 0) return messageWithTitle("Prompt backlog", "No queued prompts.");
+  const parts: TelegramTextPart[] = [bold("Prompt backlog")];
   for (const task of tasks) {
     parts.push("\n\n", bold(`#${task.id}`), " ", truncateForTelegramLabel(task.text, 160));
   }
@@ -1643,19 +1669,19 @@ function statusViewFromParts(
 function formatStatusMessage(status: StatusView): RenderedTelegramText {
   if (!status.workspaceName || !status.workspacePath) {
     return renderTelegramText([
-      bold("Agent Relay"),
+      bold("Codex"),
       "\n\n● Stopped",
-      "\nWorkspace: none",
-      "\nAction: select or create a workspace",
+      "\ncwd: none",
+      "\nUse /cd <name> to select or create a cwd.",
     ]);
   }
   const parts: TelegramTextPart[] = [
-    bold("Agent Relay"),
+    bold("Codex"),
     "\n\n",
     statusDot(status),
     " ",
     statusLabel(status),
-    "\nWorkspace: ",
+    "\ncwd: ",
     code(truncateForTelegramLabel(status.workspaceName, 32)),
     "\nModel: ",
     status.model ? code(truncateForTelegramLabel(status.model, 28)) : "unknown",
@@ -1666,7 +1692,7 @@ function formatStatusMessage(status: StatusView): RenderedTelegramText {
     formatContext(status),
     "\nWaiting: ",
     formatWaiting(status),
-    "\nTasks: ",
+    "\nPrompts: ",
     formatTaskCounts(status),
   );
   if (status.recentOutputAt) parts.push("\nLast output: ", relativeTime(status.recentOutputAt));
@@ -1677,8 +1703,8 @@ function formatStatusMessage(status: StatusView): RenderedTelegramText {
 function formatDetailsMessage(status: StatusView): RenderedTelegramText {
   if (!status.workspaceName || !status.workspacePath) return formatStatusMessage(status);
   const parts: TelegramTextPart[] = [
-    bold("Agent Relay Details"),
-    "\n\nWorkspace: ",
+    bold("Codex status"),
+    "\n\ncwd: ",
     code(status.workspaceName),
     "\nPath: ",
     code(status.workspacePath),
@@ -1699,7 +1725,7 @@ function formatDetailsMessage(status: StatusView): RenderedTelegramText {
     status.sandboxPolicy ?? "unknown",
     "\nWaiting: ",
     formatWaiting(status),
-    "\nTasks: ",
+    "\nPrompts: ",
     formatTaskCounts(status),
     "\nToken usage: ",
     formatTokens(status),
@@ -1775,11 +1801,11 @@ function relativeTime(timestamp: number): string {
 function formatWorkspacesMessage(workspaces: Array<{ name: string; selected: boolean }>, pageIndex: number, totalPages: number): RenderedTelegramText {
   if (workspaces.length === 0) {
     return renderTelegramText([
-      bold("Workspaces"),
-      "\n\nNo workspaces.\nUse 💬 to create one.",
+      bold("Select cwd"),
+      "\n\nNo cwd directories found.\nUse /cd <name> to create one.",
     ]);
   }
-  const parts: TelegramTextPart[] = [bold("Workspaces"), `\n\nPage ${pageIndex + 1}/${totalPages}`];
+  const parts: TelegramTextPart[] = [bold("Select cwd"), `\n\nPage ${pageIndex + 1}/${totalPages}`];
   for (const workspace of workspaces) {
     parts.push("\n", workspace.selected ? "● " : "○ ", code(workspace.name));
   }
@@ -1788,20 +1814,27 @@ function formatWorkspacesMessage(workspaces: Array<{ name: string; selected: boo
 
 function formatRelayHelp(): RenderedTelegramText {
   return renderTelegramText([
-    bold("Relay commands"),
+    bold("Codex commands"),
     "\n\n",
-    code("/relay"),
-    " - open the relay console\n",
+    "Send any message to Codex, like ",
+    code("fix the failing tests"),
+    ". Slash text that is not a relay command is also sent to Codex.\n\n",
+    code("/codex"),
+    " - show the Codex panel\n",
+    code("/cd <name>"),
+    " - select or create the cwd under WORKSPACE_ROOT\n",
     code("/status"),
-    " - show current Codex session status\n",
-    code("/ask"),
-    " - create a new task\n",
+    " - show session status\n",
+    code("/new"),
+    " - start a fresh Codex session\n",
+    code("/exec <prompt>"),
+    " - send a prompt explicitly\n",
     code("/add"),
-    " - add context to the active turn\n",
-    code("/later"),
-    " - queue a task\n",
+    " - add to the active turn\n",
+    code("/queue <prompt>"),
+    " - queue a prompt for later\n",
     code("/queue"),
-    " - show queued tasks\n",
+    " - show queued prompts\n",
     code("/init"),
     " - ask Codex to create AGENTS.md\n",
     code("/review"),
@@ -1811,9 +1844,9 @@ function formatRelayHelp(): RenderedTelegramText {
     code("/model"),
     " - show current and available models\n",
     code("/clear"),
-    " - start a fresh thread\n",
+    " - alias for /new\n",
     code("/resume"),
-    " - resume a saved thread\n\nUnknown slash commands are rejected. Use /ask <text> to send slash-style text to Codex.",
+    " - resume a saved session",
   ]);
 }
 
@@ -1865,27 +1898,27 @@ function consoleKeyboard(status: { workspaceName?: string; running?: boolean }):
   const rows: InlineKeyboardMarkup["inline_keyboard"] = [];
   if (status.workspaceName) {
     rows.push([
-      { text: "💬 New", callback_data: "ar:i" },
-      { text: "➕ Queue", callback_data: "ar:queue" },
+      { text: "✎ Prompt", callback_data: "ar:i" },
       { text: "🔍 Review", callback_data: "ar:review" },
+      { text: "📦 Compact", callback_data: "ar:compact" },
     ]);
     rows.push([
-      { text: "📦 Compact", callback_data: "ar:compact" },
-      { text: "📁 Workspace", callback_data: "ar:w" },
-      { text: "🔁 Resume", callback_data: "ar:rl:0" },
+      { text: "📂 cwd", callback_data: "ar:w" },
+      { text: "⏎ Resume", callback_data: "ar:rl:0" },
+      { text: "🆕 New", callback_data: "ar:clear?" },
     ]);
     rows.push(status.running
       ? [
-        { text: "ℹ️ Details", callback_data: "ar:d" },
+        { text: "ℹ️ Status", callback_data: "ar:d" },
         { text: "🛑 Stop", callback_data: "ar:x?" },
-        { text: "🔄 Refresh", callback_data: "ar:s" },
+        { text: "↻", callback_data: "ar:s" },
       ]
-      : [{ text: "🔄 Refresh", callback_data: "ar:s" }]);
+      : [{ text: "↻", callback_data: "ar:s" }]);
   } else {
     rows.push([
-      { text: "📁 Workspace", callback_data: "ar:w" },
-      { text: "💬 New", callback_data: "ar:n" },
-      { text: "🔄 Refresh", callback_data: "ar:s" },
+      { text: "📂 cwd", callback_data: "ar:w" },
+      { text: "➕ cwd", callback_data: "ar:n" },
+      { text: "↻", callback_data: "ar:s" },
     ]);
   }
   return {
@@ -1898,7 +1931,7 @@ function queueKeyboard(tasks: RelayTask[]): InlineKeyboardMarkup {
     [{ text: `▶ Run #${task.id}`, callback_data: `ar:qt:${task.id}:run` }],
     [{ text: `🗑 Delete #${task.id}`, callback_data: `ar:qt:${task.id}:del` }],
   ]);
-  rows.push([{ text: "🔄 Console", callback_data: "ar:home" }]);
+  rows.push([{ text: "↻ Codex", callback_data: "ar:home" }]);
   return { inline_keyboard: rows };
 }
 
@@ -1908,8 +1941,8 @@ function queuedTaskKeyboard(task: RelayTask): InlineKeyboardMarkup {
       { text: "▶ Run now", callback_data: `ar:qt:${task.id}:run` },
       { text: "🗑 Delete", callback_data: `ar:qt:${task.id}:del` },
     ], [
-      { text: "🧾 Queue", callback_data: "ar:queue" },
-      { text: "🔄 Console", callback_data: "ar:home" },
+      { text: "🧾 Backlog", callback_data: "ar:queue" },
+      { text: "↻ Codex", callback_data: "ar:home" },
     ]],
   };
 }
@@ -1917,9 +1950,9 @@ function queuedTaskKeyboard(task: RelayTask): InlineKeyboardMarkup {
 function resultKeyboard(): InlineKeyboardMarkup {
   return {
     inline_keyboard: [[
-      { text: "💬 New", callback_data: "ar:i" },
-      { text: "🧾 Queue", callback_data: "ar:queue" },
-      { text: "🔄 Console", callback_data: "ar:home" },
+      { text: "✎ Prompt", callback_data: "ar:i" },
+      { text: "🧾 Backlog", callback_data: "ar:queue" },
+      { text: "↻ Codex", callback_data: "ar:home" },
     ]],
   };
 }
@@ -1940,8 +1973,8 @@ function workspacesKeyboard(workspaces: WorkspaceRecord[], selected: string | un
     inline_keyboard: [
       ...rows,
       [
-        { text: "💬", callback_data: "ar:n" },
-        { text: "🔄", callback_data: "ar:s" },
+        { text: "➕ cwd", callback_data: "ar:n" },
+        { text: "↻", callback_data: "ar:s" },
       ],
     ],
   };

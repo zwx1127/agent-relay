@@ -187,7 +187,7 @@ describe("router", () => {
     expect(logLines.join("\n")).toContain('message_text="secret prompt"');
   });
 
-  test("unknown slash text is rejected instead of forwarded", async () => {
+  test("unknown slash text is forwarded as a Codex prompt", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -196,9 +196,8 @@ describe("router", () => {
 
     await router.handle(textMessage("/unknown"));
 
-    expect(agent.sent).toEqual([]);
-    expect(adapter.sent.at(-1)?.text).toContain("Unknown command");
-    expect(adapter.sent.at(-1)?.text).toContain("/ask <task>");
+    expect(agent.sent).toEqual([{ key: "1:demo", text: "/unknown" }]);
+    expect(adapter.sent).toEqual([]);
   });
 
   test("console no longer exposes raw tail action", async () => {
@@ -374,21 +373,21 @@ describe("router", () => {
     expect(adapter.edited.map((message) => message.text)).toEqual(["first second"]);
   });
 
-  test("/relay sends formatted entity console", async () => {
+  test("/codex sends formatted entity panel", async () => {
     const { router, adapter } = fixture();
-    await router.handle(textMessage("/relay"));
+    await router.handle(textMessage("/codex"));
 
-    expect(adapter.sent.at(-1)?.text).toContain("Agent Relay");
-    expect(adapter.sent.at(-1)?.text).toContain("Workspace: none");
+    expect(adapter.sent.at(-1)?.text).toContain("Codex");
+    expect(adapter.sent.at(-1)?.text).toContain("cwd: none");
     expect(adapter.sent.at(-1)?.options?.entities?.[0]?.type).toBe("bold");
-    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["📁 Workspace", "💬 New", "🔄 Refresh"]);
+    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["📂 cwd", "➕ cwd", "↻"]);
   });
 
-  test("/start opens the same console", async () => {
+  test("/start opens the same panel", async () => {
     const { router, adapter } = fixture();
     await router.handle(textMessage("/start"));
 
-    expect(adapter.sent.at(-1)?.text).toContain("Agent Relay");
+    expect(adapter.sent.at(-1)?.text).toContain("Codex");
     expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toContain("ar:n");
   });
 
@@ -411,7 +410,7 @@ describe("router", () => {
       { key: "1:demo", command: "review" },
       { key: "1:demo", command: "compact" },
     ]);
-    expect(adapter.sent.some((message) => message.text.includes("Relay commands"))).toBe(true);
+    expect(adapter.sent.some((message) => message.text.includes("Codex commands"))).toBe(true);
     expect(adapter.sent.some((message) => message.text.includes("Codex model"))).toBe(true);
   });
 
@@ -442,7 +441,7 @@ describe("router", () => {
 
     expect(agent.stopped).toEqual([]);
     expect(store.getSession("1:demo")?.thread_id).toBe("old-thread");
-    expect(adapter.sent.at(-1)?.text).toContain("Start a new Codex thread?");
+    expect(adapter.sent.at(-1)?.text).toContain("Start a new Codex session?");
   });
 
   test("clear callback requires confirmation before replacing the thread", async () => {
@@ -456,7 +455,7 @@ describe("router", () => {
 
     await router.handle(callbackMessage("ar:clear?"));
     expect(agent.stopped).toEqual([]);
-    expect(adapter.edited.at(-1)?.text).toContain("Start a new Codex thread?");
+    expect(adapter.edited.at(-1)?.text).toContain("Start a new Codex session?");
 
     await router.handle(callbackMessage("ar:clear!", 7, "cb-clear", adapter.edited.at(-1)?.options.messageId));
 
@@ -506,7 +505,7 @@ describe("router", () => {
     await router.handle(textMessage("hello"));
 
     expect(agent.sent).toEqual([]);
-    expect(adapter.sent.at(-1)?.text).toContain("Workspace: none");
+    expect(adapter.sent.at(-1)?.text).toContain("cwd: none");
   });
 
   test("new workspace callback uses ForceReply and reply creates binding", async () => {
@@ -551,7 +550,7 @@ describe("router", () => {
     await router.handle(callbackMessage("ar:i"));
     const prompt = adapter.sent.at(-1)!;
 
-    expect(prompt.text).toContain("New task");
+    expect(prompt.text).toContain("Prompt Codex");
     expect(prompt.options?.forceReply).toBe(true);
 
     await router.handle(textMessage("build the feature", 7, prompt.messageId));
@@ -571,14 +570,14 @@ describe("router", () => {
     await router.handle(callbackMessage("ar:i"));
     const prompt = adapter.sent.at(-1)!;
 
-    expect(prompt.text).toContain("Add context");
+    expect(prompt.text).toContain("Add to current turn");
 
     await router.handle(textMessage("also cover tests", 7, prompt.messageId));
 
     expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "also cover tests" });
   });
 
-  test("ordinary text queues a new task while a turn is active", async () => {
+  test("ordinary text adds to the active turn while Codex is busy", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -589,9 +588,9 @@ describe("router", () => {
 
     await router.handle(textMessage("new task while busy"));
 
-    expect(agent.sent).toEqual([]);
-    expect(adapter.sent.at(-1)?.text).toContain("Queued task #");
-    expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(1);
+    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "new task while busy" });
+    expect(adapter.sent).toEqual([]);
+    expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(0);
   });
 
   test("/add steers the active turn instead of queueing", async () => {
@@ -635,7 +634,7 @@ describe("router", () => {
 
     expect(store.getBinding(1)?.workspaceName).toBe("second");
     expect(agent.getStatus("1:second")?.running).toBe(true);
-    expect(adapter.edited.at(-1)?.text).toContain("Workspace: second");
+    expect(adapter.edited.at(-1)?.text).toContain("cwd: second");
     expect(adapter.edited.at(-1)?.options.entities?.some((entity) => entity.type === "code")).toBe(true);
     expect(adapter.edited.at(-1)?.options.messageId).toBe(42);
     expect(adapter.answered).toEqual([{ callbackQueryId: "cb1", text: undefined }]);
@@ -657,6 +656,17 @@ describe("router", () => {
     const callbackData = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data);
     expect(callbackData?.filter((data) => data.startsWith("ar:uh:"))).toHaveLength(2);
     expect(callbackData?.every((data) => new TextEncoder().encode(data).length <= 64)).toBe(true);
+  });
+
+  test("/cd selects or creates cwd directly", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+
+    await router.handle(textMessage("/cd demo"));
+
+    expect(store.getBinding(1)?.workspaceName).toBe("demo");
+    expect(agent.getStatus("1:demo")?.running).toBe(true);
+    expect(adapter.sent.at(-1)?.text).toContain("cwd demo created and selected");
+    expect(existsSync(join(root, "demo", ".git"))).toBe(true);
   });
 
   test("hashed workspace callback selects long unicode names", async () => {
