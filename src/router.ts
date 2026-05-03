@@ -456,7 +456,8 @@ export class MessageRouter {
     }
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
     const key = sessionKey(chatId, workspace.name);
-    await this.ensureAgentStarted(chatId, workspace);
+    const status = await this.ensureAgentStarted(chatId, workspace);
+    if (await this.sendWaitingPromptNotice(chatId, status)) return;
     await this.finalizeSessionOutput(key);
     if (userMessageId) this.lastUserMessageIds.set(key, userMessageId);
     await this.deps.adapter.sendChatAction(chatId, "typing").catch((error) => {
@@ -485,6 +486,18 @@ export class MessageRouter {
       createdAt: Date.now(),
     });
     await this.deps.agent.send(key, text);
+  }
+
+  private async sendWaitingPromptNotice(chatId: ChatId, status: AgentSessionStatus): Promise<boolean> {
+    if (status.waitingForUserInput) {
+      await this.sendRendered(chatId, messageWithTitle("Codex is waiting for your answer.", "Reply to the question message so the answer is sent to the active turn."));
+      return true;
+    }
+    if (status.waitingForApproval) {
+      await this.sendRendered(chatId, messageWithTitle("Codex is waiting for approval.", "Use the approval buttons before sending another instruction."));
+      return true;
+    }
+    return false;
   }
 
   private async ensureAgentStarted(chatId: ChatId, workspace: WorkspaceRecord, threadId?: string): Promise<AgentSessionStatus> {

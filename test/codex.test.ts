@@ -91,6 +91,29 @@ describe("CodexDriver app-server protocol", () => {
     await driver.stop(status.sessionKey);
   });
 
+  test("serializes quick inputs so follow-up steers the active turn", async () => {
+    const fake = fakeCodexBin();
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await Promise.all([
+      driver.send(status.sessionKey, "slow active"),
+      driver.send(status.sessionKey, "second while active"),
+    ]);
+
+    const methods = readLog(fake)
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line).method)
+      .filter((method) => method === "turn/start" || method === "turn/steer");
+    expect(methods).toEqual(["turn/start", "turn/steer"]);
+    await driver.stop(status.sessionKey);
+  });
+
   test("injects developer and base instructions into thread start and resume", async () => {
     const fake = fakeCodexBin();
     const driver = new CodexDriver(
@@ -187,14 +210,20 @@ rl.on("line", (line) => {
     send({ id: msg.id, result: { thread: { id: "thread-1", name: "Initial thread", status: { type: "idle" } }, model: "gpt-5.2", modelProvider: "openai", reasoningEffort: "medium", approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: { type: "workspaceWrite" } } });
   } else if (msg.method === "turn/start") {
     const turnId = "turn-" + (++turnCount);
-    send({ id: msg.id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });
-    if (msg.params.input[0].text === "status please") {
+    const inputText = msg.params.input[0].text;
+    const startTurn = () => send({ id: msg.id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });
+    if (inputText === "slow active") {
+      setTimeout(startTurn, 50);
+    } else {
+      startTurn();
+    }
+    if (inputText === "status please") {
       send({ method: "thread/name/updated", params: { threadId: "thread-1", threadName: "Demo thread" } });
       send({ method: "thread/status/changed", params: { threadId: "thread-1", status: { type: "active", activeFlags: ["waitingOnApproval"] } } });
       send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-1", turnId, tokenUsage: { last: { totalTokens: 7 }, total: { totalTokens: 42 }, modelContextWindow: 100 } } });
-    } else if (msg.params.input[0].text === "ask") {
+    } else if (inputText === "ask") {
       send({ id: 900, method: "item/tool/requestUserInput", params: { threadId: "thread-1", turnId, itemId: "item-1", questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [{ label: "Fast", description: "Quick" }] }] } });
-    } else {
+    } else if (inputText !== "slow active") {
       send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId, itemId: "m1", delta: "hello " } });
       send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", turnId, itemId: "c1", delta: "raw stdout" } });
       send({ method: "item/commandExecution/terminalInteraction", params: { threadId: "thread-1", turnId, itemId: "t1", processId: "p1", stdin: "raw stdin" } });
@@ -202,7 +231,12 @@ rl.on("line", (line) => {
       send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: turnId, status: "completed", items: [] } } });
     }
   } else if (msg.method === "turn/steer") {
-    send({ id: msg.id, error: { code: -32000, message: "no active turn to steer" } });
+    const inputText = msg.params.input[0].text;
+    if (inputText === "second while active") {
+      send({ id: msg.id, result: { turn: { id: msg.params.expectedTurnId, status: "inProgress", items: [] } } });
+    } else {
+      send({ id: msg.id, error: { code: -32000, message: "no active turn to steer" } });
+    }
   } else if (msg.method === "review/start") {
     send({ id: msg.id, result: { reviewThreadId: "thread-1", turn: { id: "review-turn", status: "inProgress", items: [] } } });
   } else if (msg.method === "thread/compact/start") {

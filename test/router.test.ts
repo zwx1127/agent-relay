@@ -668,6 +668,36 @@ describe("router", () => {
     expect(agent.sent).toEqual([]);
   });
 
+  test("ordinary text is not forwarded while Codex waits for user input", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    const status = await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+    status.waitingForUserInput = true;
+
+    await router.handle(textMessage("not a reply"));
+
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Codex is waiting for your answer.");
+  });
+
+  test("ordinary text is not forwarded while Codex waits for approval", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    const status = await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+    status.waitingForApproval = true;
+
+    await router.handle(textMessage("keep going"));
+
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Codex is waiting for approval.");
+  });
+
   test("codex multi-question request waits for all answers", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");

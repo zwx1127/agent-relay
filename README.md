@@ -128,7 +128,9 @@ codex app-server --listen stdio://
 ```
 
 - Each `chat + workspace` starts or resumes a Codex thread with the workspace `cwd`, `CODEX_SANDBOX`, and `CODEX_APPROVAL`.
-- User messages start a new turn with `turn/start`; messages sent while a turn is active are sent with `turn/steer`. Assistant output is visually linked back to the triggering Telegram message via reply metadata. If Codex reports that the locally cached active turn is no longer steerable, the relay clears that stale turn id and retries the same input once with `turn/start`.
+- User messages are serialized per `chat + workspace`. A message starts a new turn with `turn/start`; follow-up messages sent while a turn is active are sent with `turn/steer`, so quick corrections or additions are applied to the current turn instead of queued as unrelated work. If Codex reports that the locally cached active turn is no longer steerable, the relay clears that stale turn id and retries the same input once with `turn/start`.
+- While Codex is waiting for a user-input answer or approval decision, ordinary chat text is not forwarded as a new instruction. The relay prompts the user to reply to the question message or use the approval buttons.
+- Assistant output is visually linked back to the triggering Telegram message via reply metadata.
 - Assistant message deltas from `item/agentMessage/delta` are stored in SQLite, debounced, and rendered into Telegram-sized output pages.
 - Agent output is aggregated per visible interaction segment, flushed after a short quiet period, size/time limit, or `turn/completed`, and usually edits one live Telegram message for the current response.
 - User input, Codex approval prompts, and Codex question prompts close the current output segment before later assistant output is shown.

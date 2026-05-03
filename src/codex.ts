@@ -57,6 +57,7 @@ export class CodexDriver extends BaseAgentDriver {
   private readonly sessions = new Map<string, RunningSession>();
   private readonly threadToSession = new Map<string, string>();
   private readonly pending = new Map<number | string, PendingRpc>();
+  private readonly inputQueues = new Map<string, Promise<void>>();
   private proc?: ChildProcessWithoutNullStreams;
   private nextRequestId = 1;
   private ready?: Promise<void>;
@@ -133,6 +134,17 @@ export class CodexDriver extends BaseAgentDriver {
   }
 
   async send(key: string, text: string): Promise<void> {
+    const previous = this.inputQueues.get(key) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(() => this.sendNow(key, text));
+    this.inputQueues.set(key, current);
+    try {
+      await current;
+    } finally {
+      if (this.inputQueues.get(key) === current) this.inputQueues.delete(key);
+    }
+  }
+
+  private async sendNow(key: string, text: string): Promise<void> {
     const running = this.sessions.get(key);
     if (!running?.status.threadId) {
       this.logger.warn("codex.send_without_session", { session_key: key, text_len: text.length });
@@ -202,6 +214,7 @@ export class CodexDriver extends BaseAgentDriver {
     running.status.running = false;
     if (running.status.threadId) this.threadToSession.delete(running.status.threadId);
     this.sessions.delete(key);
+    this.inputQueues.delete(key);
     this.logger.info("codex.session_stopped", { session_key: key });
   }
 
