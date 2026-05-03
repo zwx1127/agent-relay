@@ -183,16 +183,17 @@ Telegram Bot API HTTP errors include Telegram's `description` field when the res
 
 ```text
 src/
-  agent.ts       Agent driver interface helpers
-  codex.ts       Codex app-server JSON-RPC driver
+  agent.ts       Agent session-key helpers
   config.ts      Environment parsing and allowlist checks
   logger.ts      Text stdout logger and log level parsing
   main.ts        Runtime wiring
-  router.ts      Telegram console and message routing
-  store.ts       SQLite schema and persistence
-  telegram.ts    Telegram long polling adapter and Bot API calls
-  text.ts        Output cleanup, message splitting, and Telegram text rendering helpers
+  types.ts       Shared app, Telegram, Codex, and persistence types
   workspace.ts   Workspace validation, discovery, and creation
+  codex/         Codex app-server driver and protocol handling
+  rendering/     Telegram text entities, Markdown rendering, and splitting
+  router/        Telegram message routing, session parsing, callbacks, and UI flow
+  storage/       SQLite schema, migrations, and persistence methods
+  telegram/      Telegram Bot API adapter, polling, retries, and outbound formatting
 test/
   *.test.ts      Unit, routing, adapter, store, app-server protocol, and smoke tests
 ```

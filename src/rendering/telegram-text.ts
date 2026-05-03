@@ -1,7 +1,4 @@
-import type { AgentTokenUsage, TelegramMessageEntity } from "./types.ts";
-
-const ANSI_PATTERN = /\x1B(?:\][^\x07\x1B]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g;
-const CONTROL_PATTERN = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+import type { AgentTokenUsage, TelegramMessageEntity } from "../types.ts";
 
 export interface RenderedTelegramText {
   text: string;
@@ -65,10 +62,6 @@ export function appendRendered(base: RenderedTelegramText, suffix: RenderedTeleg
       ...suffix.entities.map((entity) => ({ ...entity, offset: entity.offset + offset })),
     ],
   };
-}
-
-export function cleanTerminalOutput(value: string): string {
-  return value.replace(ANSI_PATTERN, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(CONTROL_PATTERN, "");
 }
 
 export function splitForTelegram(text: string, maxChars = 3500): string[] {
@@ -158,11 +151,6 @@ function clipEntity(entity: TelegramMessageEntity, start: number, end: number): 
     offset: clippedStart - start,
     length: clippedEnd - clippedStart,
   };
-}
-
-export function tailLines(text: string, count: number): string {
-  const lines = text.split("\n");
-  return lines.slice(Math.max(0, lines.length - count)).join("\n");
 }
 
 export function renderCodexMarkdownForTelegram(text: string): RenderedTelegramText {

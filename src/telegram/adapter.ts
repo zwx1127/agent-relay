@@ -1,6 +1,6 @@
-import type { ChatId, EditMessageTextOptions, IMAdapter, InboundMessage, SendMessageOptions } from "./types.ts";
-import { splitForTelegram, splitHtmlForTelegram, splitRenderedForTelegram } from "./text.ts";
-import { noopLogger, type Logger } from "./logger.ts";
+import type { ChatId, EditMessageTextOptions, IMAdapter, InboundMessage, SendMessageOptions } from "../types.ts";
+import { splitForTelegram, splitHtmlForTelegram, splitRenderedForTelegram } from "../rendering/telegram-text.ts";
+import { noopLogger, type Logger } from "../logger.ts";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit | BunFetchRequestInit) => Promise<Response>;
 
@@ -82,7 +82,7 @@ export class TelegramAdapter implements IMAdapter {
   private readonly delay: (ms: number) => Promise<void>;
 
   constructor(
-    private readonly token: string,
+    token: string,
     private readonly fetchImpl: FetchLike = fetch,
     private readonly logger: Logger = noopLogger,
     options: TelegramAdapterOptions = {},

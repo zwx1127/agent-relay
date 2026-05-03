@@ -1,8 +1,8 @@
 import { loadConfig } from "./config.ts";
-import { TelegramAdapter } from "./telegram.ts";
-import { Store } from "./store.ts";
-import { CodexDriver } from "./codex.ts";
-import { MessageRouter } from "./router.ts";
+import { TelegramAdapter } from "./telegram/adapter.ts";
+import { Store } from "./storage/store.ts";
+import { CodexDriver } from "./codex/driver.ts";
+import { MessageRouter } from "./router/message-router.ts";
 import { TextLogger } from "./logger.ts";
 
 export async function main(): Promise<void> {

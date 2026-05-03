@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { noopLogger, TextLogger } from "../src/logger.ts";
-import { TelegramAdapter } from "../src/telegram.ts";
+import { TelegramAdapter } from "../src/telegram/adapter.ts";
 
 describe("telegram adapter", () => {
   test("routes long polling text messages", async () => {

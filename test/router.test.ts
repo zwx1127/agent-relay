@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sessionKey } from "../src/agent.ts";
 import type { AppConfig } from "../src/config.ts";
-import { MessageRouter } from "../src/router.ts";
-import { Store } from "../src/store.ts";
+import { MessageRouter } from "../src/router/message-router.ts";
+import { Store } from "../src/storage/store.ts";
 import { TextLogger, type LogLevel } from "../src/logger.ts";
 import type { AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSummary, AgentSessionStatus, AgentThreadListOptions, AgentThreadSummary, ChatId, EditMessageTextOptions, SendMessageOptions } from "../src/types.ts";
 
@@ -148,7 +148,7 @@ describe("router", () => {
   });
 
   test("uses existing workspace and auto-starts session for text", async () => {
-    const { router, store, adapter, agent, root } = fixture();
+    const { router, store, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });

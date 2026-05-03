@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CodexDriver } from "../src/codex.ts";
+import { CodexDriver } from "../src/codex/driver.ts";
 import type { AgentOutputEvent } from "../src/types.ts";
 
 let dirs: string[] = [];

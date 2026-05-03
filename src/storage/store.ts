@@ -1,8 +1,8 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Database } from "bun:sqlite";
-import { noopLogger, type Logger } from "./logger.ts";
-import type { ChatBinding, ChatId, PendingPrompt, PendingPromptKind, RelayTask, TaskStatus, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "./types.ts";
+import { noopLogger, type Logger } from "../logger.ts";
+import type { ChatBinding, ChatId, PendingPrompt, PendingPromptKind, RelayTask, TaskStatus, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "../types.ts";
 
 interface WorkspaceRow {
   name: string;
@@ -254,22 +254,6 @@ export class Store {
     });
   }
 
-  recentTranscript(chatId: ChatId, workspaceName: string, role: TranscriptRole | undefined, limit: number): string {
-    const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
-    const rows = role
-      ? this.db.query<TranscriptRow, [number, string, string, number]>(`
-          SELECT text FROM transcript_events
-          WHERE chat_id = ? AND workspace_name = ? AND role = ?
-          ORDER BY id DESC LIMIT ?
-        `).all(chatId, workspaceName, role, safeLimit)
-      : this.db.query<TranscriptRow, [number, string, number]>(`
-          SELECT text FROM transcript_events
-          WHERE chat_id = ? AND workspace_name = ?
-          ORDER BY id DESC LIMIT ?
-        `).all(chatId, workspaceName, safeLimit);
-    return rows.reverse().map((row) => row.text).join("");
-  }
-
   latestTranscriptEvent(chatId: ChatId, workspaceName: string, role: TranscriptRole): TranscriptEvent | undefined {
     const row = this.db.query<TranscriptRow, [number, string, string]>(`
       SELECT text, created_at FROM transcript_events
@@ -313,10 +297,6 @@ export class Store {
 
   deletePendingPrompt(chatId: ChatId, promptMessageId: number): void {
     this.db.query("DELETE FROM pending_prompts WHERE chat_id = ? AND prompt_message_id = ?").run(chatId, promptMessageId);
-  }
-
-  prunePendingPrompts(olderThan: number): void {
-    this.db.query("DELETE FROM pending_prompts WHERE created_at < ? OR (expires_at IS NOT NULL AND expires_at < ?)").run(olderThan, Date.now());
   }
 
   setPagedOutput(output: PagedOutput): void {

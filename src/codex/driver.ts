@@ -1,11 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
-import { BaseAgentDriver, sessionKey } from "./agent.ts";
-import { noopLogger, type Logger } from "./logger.ts";
+import { sessionKey } from "../agent.ts";
+import { noopLogger, type Logger } from "../logger.ts";
 import type {
   AgentBuiltinCommand,
   AgentBuiltinResult,
   AgentApprovalKind,
+  AgentDriver,
   AgentExitHandler,
   AgentModelSummary,
   AgentOutputHandler,
@@ -15,7 +16,7 @@ import type {
   AgentTokenBreakdown,
   AgentUserInputQuestion,
   StartAgentOptions,
-} from "./types.ts";
+} from "../types.ts";
 
 interface RunningSession {
   status: AgentSessionStatus;
@@ -53,7 +54,7 @@ type PendingRpc = {
   timer: Timer;
 };
 
-export class CodexDriver extends BaseAgentDriver {
+export class CodexDriver implements AgentDriver {
   private readonly sessions = new Map<string, RunningSession>();
   private readonly threadToSession = new Map<string, string>();
   private readonly pending = new Map<number | string, PendingRpc>();
@@ -65,12 +66,10 @@ export class CodexDriver extends BaseAgentDriver {
 
   constructor(
     private readonly options: CodexDriverOptions,
-    onOutput: AgentOutputHandler,
-    onExit: AgentExitHandler,
+    private readonly onOutput: AgentOutputHandler,
+    private readonly onExit: AgentExitHandler,
     private readonly logger: Logger = noopLogger,
-  ) {
-    super(onOutput, onExit);
-  }
+  ) {}
 
   async start(options: StartAgentOptions): Promise<AgentSessionStatus> {
     const key = sessionKey(options.chatId, options.workspaceName);

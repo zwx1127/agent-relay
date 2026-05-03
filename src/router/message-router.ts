@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import type { AppConfig } from "./config.ts";
-import { isAuthorized } from "./config.ts";
-import { sessionKey } from "./agent.ts";
+import type { AppConfig } from "../config.ts";
+import { isAuthorized } from "../config.ts";
+import { sessionKey } from "../agent.ts";
+import { parseSessionKey } from "./session.ts";
 import type {
   AgentApprovalKind,
   AgentApprovalRequestEvent,
@@ -19,11 +20,11 @@ import type {
   RelayTask,
   SendMessageOptions,
   WorkspaceRecord,
-} from "./types.ts";
-import type { Store } from "./store.ts";
-import { createWorkspace, discoverWorkspaceDirectories, isRealDirectory, resolveWorkspacePath, validateWorkspaceName, workspaceDirectoryExists } from "./workspace.ts";
-import { appendRendered, contextUsageBar, renderCodexMarkdownForTelegram, renderTelegramText, splitRenderedForTelegram, truncateForTelegramLabel, type RenderedTelegramText, type StatusView, type TelegramTextPart } from "./text.ts";
-import { noopLogger, type Logger } from "./logger.ts";
+} from "../types.ts";
+import type { Store } from "../storage/store.ts";
+import { createWorkspace, discoverWorkspaceDirectories, isRealDirectory, resolveWorkspacePath, validateWorkspaceName, workspaceDirectoryExists } from "../workspace.ts";
+import { appendRendered, contextUsageBar, renderCodexMarkdownForTelegram, renderTelegramText, splitRenderedForTelegram, truncateForTelegramLabel, type RenderedTelegramText, type StatusView, type TelegramTextPart } from "../rendering/telegram-text.ts";
+import { noopLogger, type Logger } from "../logger.ts";
 
 const CALLBACK_PREFIX = "ar:";
 const CALLBACK_LIMIT_BYTES = 64;
@@ -1468,15 +1469,6 @@ function pagedOutputKeyboard(token: string, pageIndex: number, totalPages: numbe
       { text: "⏭", callback_data: `ar:p:${token}:${totalPages - 1}` },
     ]],
   };
-}
-
-export function parseSessionKey(key: string): { chatId: ChatId; workspaceName: string } | undefined {
-  const index = key.indexOf(":");
-  if (index < 1) return undefined;
-  const chatId = Number(key.slice(0, index));
-  const workspaceName = key.slice(index + 1);
-  if (!Number.isFinite(chatId) || workspaceName.length === 0) return undefined;
-  return { chatId, workspaceName };
 }
 
 function shortToken(): string {

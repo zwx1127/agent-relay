@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store } from "../src/store.ts";
+import { Store } from "../src/storage/store.ts";
 
 let dirs: string[] = [];
 
@@ -32,7 +32,6 @@ describe("store", () => {
     store.bindChat(123, "demo", 2);
     expect(store.getBinding(123)).toEqual({ chatId: 123, workspaceName: "demo", updatedAt: 2 });
     store.appendTranscript({ chatId: 123, workspaceName: "demo", role: "agent", text: "hello\n", createdAt: 3 });
-    expect(store.recentTranscript(123, "demo", "agent", 50)).toBe("hello\n");
     expect(store.latestTranscriptEvent(123, "demo", "agent")).toEqual({
       chatId: 123,
       workspaceName: "demo",
