@@ -22,7 +22,47 @@ describe("config", () => {
     expect(config.sqlitePath).toBe(".data/agent-relay.sqlite");
     expect(config.codexBin).toBe("codex");
     expect(config.logLevel).toBe("info");
+    expect(config.telegramPollTimeoutSeconds).toBe(30);
+    expect(config.telegramRequestRetryMaxAttempts).toBe(3);
+    expect(config.telegramRetryInitialDelayMs).toBe(500);
+    expect(config.telegramRetryMaxDelayMs).toBe(10000);
     expect(config.telegramAllowedUserIds.has(10)).toBe(true);
+  });
+
+  test("loads telegram polling and retry settings", () => {
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: "token",
+      TELEGRAM_ALLOWED_USER_IDS: "10",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+      TELEGRAM_POLL_TIMEOUT_SECONDS: "20",
+      TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS: "5",
+      TELEGRAM_RETRY_INITIAL_DELAY_MS: "100",
+      TELEGRAM_RETRY_MAX_DELAY_MS: "3000",
+    });
+    expect(config.telegramPollTimeoutSeconds).toBe(20);
+    expect(config.telegramRequestRetryMaxAttempts).toBe(5);
+    expect(config.telegramRetryInitialDelayMs).toBe(100);
+    expect(config.telegramRetryMaxDelayMs).toBe(3000);
+  });
+
+  test("rejects invalid telegram polling and retry settings", () => {
+    const baseEnv = {
+      TELEGRAM_BOT_TOKEN: "token",
+      TELEGRAM_ALLOWED_USER_IDS: "10",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+    };
+    for (const name of [
+      "TELEGRAM_POLL_TIMEOUT_SECONDS",
+      "TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS",
+      "TELEGRAM_RETRY_INITIAL_DELAY_MS",
+      "TELEGRAM_RETRY_MAX_DELAY_MS",
+    ]) {
+      expect(() => loadConfig({ ...baseEnv, [name]: "" })).toThrow(name);
+      expect(() => loadConfig({ ...baseEnv, [name]: "0" })).toThrow(name);
+      expect(() => loadConfig({ ...baseEnv, [name]: "-1" })).toThrow(name);
+      expect(() => loadConfig({ ...baseEnv, [name]: "1.5" })).toThrow(name);
+      expect(() => loadConfig({ ...baseEnv, [name]: "nope" })).toThrow(name);
+    }
   });
 
   test("loads log level", () => {

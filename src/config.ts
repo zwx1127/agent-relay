@@ -6,6 +6,10 @@ export interface AppConfig {
   telegramBotToken: string;
   telegramAllowedUserIds: Set<number>;
   telegramAllowedChatIds?: Set<number>;
+  telegramPollTimeoutSeconds: number;
+  telegramRequestRetryMaxAttempts: number;
+  telegramRetryInitialDelayMs: number;
+  telegramRetryMaxDelayMs: number;
   workspaceRoot: string;
   sqlitePath: string;
   codexBin: string;
@@ -82,6 +86,23 @@ function requireEnv(env: Env, name: string): string {
   return value;
 }
 
+function parsePositiveIntegerEnv(env: Env, name: string, defaultValue: number): number {
+  const rawEnvValue = env[name];
+  if (rawEnvValue === undefined) return defaultValue;
+  const rawValue = rawEnvValue.trim();
+  if (!rawValue) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  if (!/^\d+$/.test(rawValue)) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  const value = Number(rawValue);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
 export function loadConfig(env?: Env): AppConfig {
   const effectiveEnv = env ?? { ...loadDotEnvFile(), ...process.env };
   const allowedChats = effectiveEnv.TELEGRAM_ALLOWED_CHAT_IDS?.trim();
@@ -98,6 +119,10 @@ export function loadConfig(env?: Env): AppConfig {
     telegramBotToken: requireEnv(effectiveEnv, "TELEGRAM_BOT_TOKEN"),
     telegramAllowedUserIds: parseIdSet(requireEnv(effectiveEnv, "TELEGRAM_ALLOWED_USER_IDS"), "TELEGRAM_ALLOWED_USER_IDS"),
     telegramAllowedChatIds: allowedChats ? parseIdSet(allowedChats, "TELEGRAM_ALLOWED_CHAT_IDS") : undefined,
+    telegramPollTimeoutSeconds: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_POLL_TIMEOUT_SECONDS", 30),
+    telegramRequestRetryMaxAttempts: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS", 3),
+    telegramRetryInitialDelayMs: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_RETRY_INITIAL_DELAY_MS", 500),
+    telegramRetryMaxDelayMs: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_RETRY_MAX_DELAY_MS", 10000),
     workspaceRoot: requireEnv(effectiveEnv, "WORKSPACE_ROOT"),
     sqlitePath: effectiveEnv.SQLITE_PATH?.trim() || ".data/agent-relay.sqlite",
     codexBin: effectiveEnv.CODEX_BIN?.trim() || "codex",

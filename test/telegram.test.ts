@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { TextLogger } from "../src/logger.ts";
+import { noopLogger, TextLogger } from "../src/logger.ts";
 import { TelegramAdapter } from "../src/telegram.ts";
 
 describe("telegram adapter", () => {
@@ -52,6 +52,69 @@ describe("telegram adapter", () => {
     expect(received).toEqual([{ kind: "message", id: "10", messageId: 10, chatId: 2, userId: 3, text: "new", date: 2 }]);
   });
 
+  test("uses configured long polling timeout", async () => {
+    const requestBodies: unknown[] = [];
+    let calls = 0;
+    const adapter = new TelegramAdapter("token", async (_url, init) => {
+      calls += 1;
+      requestBodies.push(JSON.parse(String(init?.body)));
+      return Response.json({
+        ok: true,
+        result: calls === 1
+          ? []
+          : [{ update_id: 6, message: { message_id: 10, date: 2, text: "new", chat: { id: 2 }, from: { id: 3 } } }],
+      });
+    }, noopLogger, { pollTimeoutSeconds: 12 });
+
+    await adapter.start(async () => {
+      adapter.stop();
+    });
+
+    expect(requestBodies).toEqual([
+      { offset: -1, timeout: 0, allowed_updates: ["message", "callback_query"] },
+      { offset: 0, timeout: 12, allowed_updates: ["message", "callback_query"] },
+    ]);
+  });
+
+  test("keeps polling after transient Telegram failures", async () => {
+    const delays: number[] = [];
+    const requestBodies: unknown[] = [];
+    let calls = 0;
+    const adapter = new TelegramAdapter("token", async (_url, init) => {
+      calls += 1;
+      requestBodies.push(JSON.parse(String(init?.body)));
+      if (calls === 1) {
+        return Response.json({ ok: false, description: "Bad Gateway" }, { status: 502 });
+      }
+      return Response.json({
+        ok: true,
+        result: calls === 3
+          ? [{ update_id: 6, message: { message_id: 10, date: 2, text: "new", chat: { id: 2 }, from: { id: 3 } } }]
+          : [],
+      });
+    }, noopLogger, {
+      retryInitialDelayMs: 25,
+      retryMaxDelayMs: 100,
+      delay: async (ms) => {
+        delays.push(ms);
+      },
+    });
+
+    const received: unknown[] = [];
+    await adapter.start(async (message) => {
+      received.push(message);
+      adapter.stop();
+    });
+
+    expect(delays).toEqual([25]);
+    expect(requestBodies).toEqual([
+      { offset: -1, timeout: 0, allowed_updates: ["message", "callback_query"] },
+      { offset: -1, timeout: 0, allowed_updates: ["message", "callback_query"] },
+      { offset: 0, timeout: 30, allowed_updates: ["message", "callback_query"] },
+    ]);
+    expect(received).toEqual([{ kind: "message", id: "10", messageId: 10, chatId: 2, userId: 3, text: "new", date: 2 }]);
+  });
+
   test("routes long polling callback queries", async () => {
     let calls = 0;
     const adapter = new TelegramAdapter("token", async () => {
@@ -100,6 +163,64 @@ describe("telegram adapter", () => {
     await adapter.sendMessage(1, "x".repeat(3600));
 
     expect(sentBodies).toHaveLength(2);
+  });
+
+  test("retries transient outbound Telegram API failures", async () => {
+    const delays: number[] = [];
+    let calls = 0;
+    const adapter = new TelegramAdapter("token", async () => {
+      calls += 1;
+      return calls === 1
+        ? Response.json({ ok: false, description: "Bad Gateway" }, { status: 502 })
+        : Response.json({ ok: true, result: { message_id: 9 } });
+    }, noopLogger, {
+      requestRetryMaxAttempts: 2,
+      retryInitialDelayMs: 25,
+      retryMaxDelayMs: 100,
+      delay: async (ms) => {
+        delays.push(ms);
+      },
+    });
+
+    await expect(adapter.sendMessage(1, "hi")).resolves.toEqual({ messageId: 9 });
+    expect(calls).toBe(2);
+    expect(delays).toEqual([25]);
+  });
+
+  test("does not retry non-rate-limit client errors", async () => {
+    let calls = 0;
+    const adapter = new TelegramAdapter("token", async () => {
+      calls += 1;
+      return Response.json({ ok: false, description: "Bad Request: can't parse entities" }, { status: 400 });
+    }, noopLogger, {
+      requestRetryMaxAttempts: 3,
+      delay: async () => undefined,
+    });
+
+    await expect(adapter.sendMessage(1, "broken")).rejects.toThrow("can't parse entities");
+    expect(calls).toBe(1);
+  });
+
+  test("uses Telegram retry_after for rate limits", async () => {
+    const delays: number[] = [];
+    let calls = 0;
+    const adapter = new TelegramAdapter("token", async () => {
+      calls += 1;
+      return calls === 1
+        ? Response.json({ ok: false, description: "Too Many Requests", parameters: { retry_after: 7 } }, { status: 429 })
+        : Response.json({ ok: true, result: true });
+    }, noopLogger, {
+      requestRetryMaxAttempts: 2,
+      retryInitialDelayMs: 25,
+      retryMaxDelayMs: 10000,
+      delay: async (ms) => {
+        delays.push(ms);
+      },
+    });
+
+    await expect(adapter.sendChatAction(1)).resolves.toBeUndefined();
+    expect(calls).toBe(2);
+    expect(delays).toEqual([7000]);
   });
 
   test("sends parse mode and reply markup", async () => {

@@ -31,6 +31,11 @@ WORKSPACE_ROOT=/absolute/path/to/workspaces
 # Optional: restrict the bot to one or more chats, comma-separated.
 # TELEGRAM_ALLOWED_CHAT_IDS=-100123456
 
+TELEGRAM_POLL_TIMEOUT_SECONDS=30
+TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS=3
+TELEGRAM_RETRY_INITIAL_DELAY_MS=500
+TELEGRAM_RETRY_MAX_DELAY_MS=10000
+
 SQLITE_PATH=.data/agent-relay.sqlite
 CODEX_BIN=codex
 CODEX_SANDBOX=workspace-write
@@ -115,7 +120,7 @@ If Telegram rejects a menu edit, the relay logs a warning and sends a new messag
 
 - Authorization requires `TELEGRAM_ALLOWED_USER_IDS`; if `TELEGRAM_ALLOWED_CHAT_IDS` is set, both user and chat must match.
 - On startup, pending Telegram updates are skipped before polling begins, so messages sent while the relay was offline are intentionally ignored.
-- Long polling subscribes to Telegram `message` and `callback_query` updates.
+- Long polling subscribes to Telegram `message` and `callback_query` updates. Normal `getUpdates` calls return and immediately start the next request; transient Telegram failures are retried with exponential backoff.
 - Workspace names cannot be empty, `.`, `..`, or contain slashes, backslashes, NUL, or control characters.
 - Workspaces are resolved under `WORKSPACE_ROOT`; path traversal and absolute workspace names are rejected.
 - `Workspaces` discovers existing first-level directories under `WORKSPACE_ROOT`; symlinked directories are ignored.

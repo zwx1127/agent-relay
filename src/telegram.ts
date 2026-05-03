@@ -8,6 +8,9 @@ interface TelegramApiResponse<T> {
   ok: boolean;
   result?: T;
   description?: string;
+  parameters?: {
+    retry_after?: number;
+  };
 }
 
 class TelegramApiError extends Error {
@@ -15,6 +18,7 @@ class TelegramApiError extends Error {
     readonly method: string,
     readonly status: number,
     readonly description: string | undefined,
+    readonly retryAfterSeconds: number | undefined,
   ) {
     super(
       description
@@ -23,6 +27,14 @@ class TelegramApiError extends Error {
     );
     this.name = "TelegramApiError";
   }
+}
+
+export interface TelegramAdapterOptions {
+  pollTimeoutSeconds?: number;
+  requestRetryMaxAttempts?: number;
+  retryInitialDelayMs?: number;
+  retryMaxDelayMs?: number;
+  delay?: (ms: number) => Promise<void>;
 }
 
 interface TelegramUpdate {
@@ -48,18 +60,39 @@ interface TelegramUpdate {
 }
 
 const ALLOWED_UPDATES = ["message", "callback_query"] as const;
+const DEFAULT_POLL_TIMEOUT_SECONDS = 30;
+const DEFAULT_REQUEST_RETRY_MAX_ATTEMPTS = 3;
+const DEFAULT_RETRY_INITIAL_DELAY_MS = 500;
+const DEFAULT_RETRY_MAX_DELAY_MS = 10000;
+const RETRYABLE_HTTP_STATUSES = new Set([429]);
+
+interface RequestOptions {
+  quietMessageNotModified?: boolean;
+  retryForever?: boolean;
+}
 
 export class TelegramAdapter implements IMAdapter {
   private offset = 0;
   private stopped = false;
   private readonly apiBase: string;
+  private readonly pollTimeoutSeconds: number;
+  private readonly requestRetryMaxAttempts: number;
+  private readonly retryInitialDelayMs: number;
+  private readonly retryMaxDelayMs: number;
+  private readonly delay: (ms: number) => Promise<void>;
 
   constructor(
     private readonly token: string,
     private readonly fetchImpl: FetchLike = fetch,
     private readonly logger: Logger = noopLogger,
+    options: TelegramAdapterOptions = {},
   ) {
     this.apiBase = `https://api.telegram.org/bot${token}`;
+    this.pollTimeoutSeconds = options.pollTimeoutSeconds ?? DEFAULT_POLL_TIMEOUT_SECONDS;
+    this.requestRetryMaxAttempts = options.requestRetryMaxAttempts ?? DEFAULT_REQUEST_RETRY_MAX_ATTEMPTS;
+    this.retryInitialDelayMs = options.retryInitialDelayMs ?? DEFAULT_RETRY_INITIAL_DELAY_MS;
+    this.retryMaxDelayMs = options.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS;
+    this.delay = options.delay ?? sleep;
   }
 
   stop(): void {
@@ -71,17 +104,11 @@ export class TelegramAdapter implements IMAdapter {
     this.logger.info("telegram.polling_started");
     await this.skipPendingUpdates();
     while (!this.stopped) {
-      let updates: TelegramUpdate[];
-      try {
-        updates = await this.request<TelegramUpdate[]>("getUpdates", {
-          offset: this.offset,
-          timeout: 30,
-          allowed_updates: ALLOWED_UPDATES,
-        });
-      } catch (error) {
-        this.logger.error("telegram.polling_failed", { error: error instanceof Error ? error : new Error(String(error)) });
-        throw error;
-      }
+      const updates = await this.request<TelegramUpdate[]>("getUpdates", {
+        offset: this.offset,
+        timeout: this.pollTimeoutSeconds,
+        allowed_updates: ALLOWED_UPDATES,
+      }, { retryForever: true });
       if (updates.length > 0) {
         this.logger.debug("telegram.updates_received", { count: updates.length, offset: this.offset });
       }
@@ -119,7 +146,7 @@ export class TelegramAdapter implements IMAdapter {
       offset: -1,
       timeout: 0,
       allowed_updates: ALLOWED_UPDATES,
-    });
+    }, { retryForever: true });
     const lastUpdate = updates.at(-1);
     if (!lastUpdate) return;
 
@@ -230,7 +257,44 @@ export class TelegramAdapter implements IMAdapter {
     return undefined;
   }
 
-  private async request<T>(method: string, body: unknown, options: { quietMessageNotModified?: boolean } = {}): Promise<T> {
+  private async request<T>(method: string, body: unknown, options: RequestOptions = {}): Promise<T> {
+    const maxAttempts = options.retryForever ? Number.POSITIVE_INFINITY : this.requestRetryMaxAttempts;
+    let attempt = 1;
+    let lastError: unknown;
+
+    while (!this.stopped || !options.retryForever) {
+      try {
+        const result = await this.requestOnce<T>(method, body);
+        if (attempt > 1) {
+          this.logger.info("telegram.api_recovered", { method, attempt });
+        }
+        return result;
+      } catch (error) {
+        lastError = error;
+        const retryable = isRetryableTelegramError(error);
+        if (!retryable || attempt >= maxAttempts || (this.stopped && options.retryForever)) {
+          this.logFinalRequestError(method, error, options);
+          throw error;
+        }
+
+        const delayMs = retryDelayMs(error, attempt, this.retryInitialDelayMs, this.retryMaxDelayMs);
+        this.logger.warn("telegram.api_retry_scheduled", {
+          method,
+          attempt,
+          next_attempt: attempt + 1,
+          delay_ms: delayMs,
+          ...retryLogFields(error),
+        });
+        await this.delay(delayMs);
+        attempt += 1;
+      }
+    }
+
+    const error = lastError instanceof Error ? lastError : new Error("Telegram polling stopped");
+    throw error;
+  }
+
+  private async requestOnce<T>(method: string, body: unknown): Promise<T> {
     const response = await this.fetchImpl(`${this.apiBase}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -244,25 +308,33 @@ export class TelegramAdapter implements IMAdapter {
     }
     if (!response.ok) {
       const description = payload?.description;
-      if (!isQuietMessageNotModified(description, options)) {
-        this.logger.error("telegram.api_http_error", {
-          method,
-          status: response.status,
-          description: description || "unknown HTTP error",
-        });
-      }
-      throw new TelegramApiError(method, response.status, description);
+      throw new TelegramApiError(method, response.status, description, payload?.parameters?.retry_after);
     }
     if (!payload) {
       throw new Error(`Telegram ${method} returned an empty response`);
     }
     if (!payload.ok) {
-      if (!isQuietMessageNotModified(payload.description, options)) {
-        this.logger.error("telegram.api_error", { method, description: payload.description || "unknown API error" });
-      }
-      throw new TelegramApiError(method, response.status, payload.description || "unknown API error");
+      throw new TelegramApiError(method, response.status, payload.description || "unknown API error", payload.parameters?.retry_after);
     }
     return payload.result as T;
+  }
+
+  private logFinalRequestError(method: string, error: unknown, options: RequestOptions): void {
+    if (error instanceof TelegramApiError) {
+      if (error.status < 200 || error.status >= 300) {
+        if (!isQuietMessageNotModified(error.description, options)) {
+          this.logger.error("telegram.api_http_error", {
+            method,
+            status: error.status,
+            description: error.description || "unknown HTTP error",
+          });
+        }
+        return;
+      }
+      if (!isQuietMessageNotModified(error.description, options)) {
+        this.logger.error("telegram.api_error", { method, description: error.description || "unknown API error" });
+      }
+    }
   }
 }
 
@@ -279,6 +351,34 @@ function isQuietMessageNotModified(description: string | undefined, options: { q
 
 function isMessageNotModifiedDescription(description: string | undefined): boolean {
   return Boolean(description?.toLowerCase().includes("message is not modified"));
+}
+
+function isRetryableTelegramError(error: unknown): boolean {
+  if (!(error instanceof TelegramApiError)) return error instanceof Error;
+  if (error.retryAfterSeconds && error.retryAfterSeconds > 0) return true;
+  if (error.status >= 500) return true;
+  return RETRYABLE_HTTP_STATUSES.has(error.status);
+}
+
+function retryDelayMs(error: unknown, attempt: number, initialDelayMs: number, maxDelayMs: number): number {
+  if (error instanceof TelegramApiError && error.retryAfterSeconds && error.retryAfterSeconds > 0) {
+    return Math.min(error.retryAfterSeconds * 1000, maxDelayMs);
+  }
+  return Math.min(initialDelayMs * 2 ** (attempt - 1), maxDelayMs);
+}
+
+function retryLogFields(error: unknown): { status?: number; description?: string; error?: Error } {
+  if (error instanceof TelegramApiError) {
+    return {
+      status: error.status,
+      description: error.description || undefined,
+    };
+  }
+  return { error: error instanceof Error ? error : new Error(String(error)) };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function outboundChunks(text: string, options: SendMessageOptions): Array<{ text: string; entities: NonNullable<SendMessageOptions["entities"]> }> {

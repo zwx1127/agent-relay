@@ -9,7 +9,12 @@ export async function main(): Promise<void> {
   const config = loadConfig();
   const logger = new TextLogger(config.logLevel);
   const store = new Store(config.sqlitePath, logger);
-  const telegram = new TelegramAdapter(config.telegramBotToken, fetch, logger);
+  const telegram = new TelegramAdapter(config.telegramBotToken, fetch, logger, {
+    pollTimeoutSeconds: config.telegramPollTimeoutSeconds,
+    requestRetryMaxAttempts: config.telegramRequestRetryMaxAttempts,
+    retryInitialDelayMs: config.telegramRetryInitialDelayMs,
+    retryMaxDelayMs: config.telegramRetryMaxDelayMs,
+  });
   let router: MessageRouter;
   const agent = new CodexDriver(
     {
@@ -41,6 +46,10 @@ export async function main(): Promise<void> {
     codex_bin: config.codexBin,
     codex_sandbox: config.codexSandbox,
     codex_approval: config.codexApproval,
+    telegram_poll_timeout_seconds: config.telegramPollTimeoutSeconds,
+    telegram_request_retry_max_attempts: config.telegramRequestRetryMaxAttempts,
+    telegram_retry_initial_delay_ms: config.telegramRetryInitialDelayMs,
+    telegram_retry_max_delay_ms: config.telegramRetryMaxDelayMs,
     allowed_user_count: config.telegramAllowedUserIds.size,
     allowed_chat_count: config.telegramAllowedChatIds?.size ?? 0,
   });

@@ -108,6 +108,10 @@ function fixture(logLevel: LogLevel = "info"): { router: MessageRouter; store: S
   const config: AppConfig = {
     telegramBotToken: "token",
     telegramAllowedUserIds: new Set([7]),
+    telegramPollTimeoutSeconds: 30,
+    telegramRequestRetryMaxAttempts: 3,
+    telegramRetryInitialDelayMs: 500,
+    telegramRetryMaxDelayMs: 10000,
     workspaceRoot: root,
     sqlitePath: join(data, "db.sqlite"),
     codexBin: "codex",
