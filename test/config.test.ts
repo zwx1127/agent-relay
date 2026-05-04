@@ -26,6 +26,8 @@ describe("config", () => {
     expect(config.telegramRequestRetryMaxAttempts).toBe(3);
     expect(config.telegramRetryInitialDelayMs).toBe(500);
     expect(config.telegramRetryMaxDelayMs).toBe(10000);
+    expect(config.relayControlEnabled).toBe(false);
+    expect(config.relayControlPort).toBe(0);
     expect(config.telegramAllowedUserIds.has(10)).toBe(true);
   });
 
@@ -73,6 +75,30 @@ describe("config", () => {
       LOG_LEVEL: "debug",
     });
     expect(config.logLevel).toBe("debug");
+  });
+
+  test("loads relay control settings", () => {
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: "token",
+      TELEGRAM_ALLOWED_USER_IDS: "10",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+      RELAY_CONTROL_ENABLED: "true",
+      RELAY_CONTROL_PORT: "37281",
+    });
+    expect(config.relayControlEnabled).toBe(true);
+    expect(config.relayControlPort).toBe(37281);
+  });
+
+  test("rejects invalid relay control settings", () => {
+    const baseEnv = {
+      TELEGRAM_BOT_TOKEN: "token",
+      TELEGRAM_ALLOWED_USER_IDS: "10",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+    };
+    expect(() => loadConfig({ ...baseEnv, RELAY_CONTROL_ENABLED: "maybe" })).toThrow("RELAY_CONTROL_ENABLED");
+    expect(() => loadConfig({ ...baseEnv, RELAY_CONTROL_PORT: "" })).toThrow("RELAY_CONTROL_PORT");
+    expect(() => loadConfig({ ...baseEnv, RELAY_CONTROL_PORT: "-1" })).toThrow("RELAY_CONTROL_PORT");
+    expect(() => loadConfig({ ...baseEnv, RELAY_CONTROL_PORT: "1.5" })).toThrow("RELAY_CONTROL_PORT");
   });
 
   test("loads developer and model instructions from env and files", () => {

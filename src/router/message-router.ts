@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, readFile, rm } from "node:fs/promises";
+import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import type { AppConfig } from "../config.ts";
 import { isAuthorized } from "../config.ts";
+import type { SendImageCapabilityRequest } from "../capabilities.ts";
 import { sessionKey } from "../agent.ts";
 import { parseSessionKey } from "./session.ts";
 import { extensionFromTelegramPath, imageBlobFromPath, saveGeneratedImage, saveRelayMedia } from "../media.ts";
@@ -369,22 +370,9 @@ export class MessageRouter {
     const workspace = this.currentWorkspace(parsed.chatId);
     if (!workspace || workspace.name !== parsed.workspaceName) return;
     try {
-      const path = event.path
-        ? await saveRelayMedia(workspace.path, "outgoing", await readFile(event.path), { extension: extensionFromTelegramPath(event.path) })
-        : event.data ? await saveGeneratedImage(workspace.path, event.data) : undefined;
+      const path = event.path ? await this.copyOutgoingImage(workspace.path, event.path) : event.data ? await saveGeneratedImage(workspace.path, event.data) : undefined;
       if (!path) throw new Error("Codex image output did not include image data.");
-      const blob = await imageBlobFromPath(path);
-      await this.deps.adapter.sendPhoto(parsed.chatId, blob, {
-        ...(event.caption ? { caption: truncateTelegramCaption(event.caption) } : {}),
-        ...(this.lastUserMessageIds.get(event.sessionKey) ? { replyToMessageId: this.lastUserMessageIds.get(event.sessionKey) } : {}),
-      });
-      this.deps.store.appendTranscript({
-        chatId: parsed.chatId,
-        workspaceName: parsed.workspaceName,
-        role: "agent",
-        text: `[image: ${path}]\n`,
-        createdAt: Date.now(),
-      });
+      await this.sendStoredImage(parsed.chatId, parsed.workspaceName, path, event.caption, this.lastUserMessageIds.get(event.sessionKey));
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       this.logger.error("router.agent_image_send_failed", {
@@ -395,6 +383,83 @@ export class MessageRouter {
       await this.sendRendered(parsed.chatId, formatErrorMessage(`Could not send image: ${detail}`));
       this.appendSystem(parsed.chatId, `Error: Could not send image: ${detail}\n`);
     }
+  }
+
+  async sendDebugImage(input: SendImageCapabilityRequest): Promise<{ path: string }> {
+    const { sessionKey: sessionKeyValue, workspace } = this.resolveDebugImageSession(input);
+    await this.validateDebugImagePath(input.path, workspace.path);
+    const path = await this.copyOutgoingImage(workspace.path, input.path);
+    const parsed = parseSessionKey(sessionKeyValue);
+    if (!parsed) throw new Error("Invalid session key.");
+    await this.sendStoredImage(parsed.chatId, parsed.workspaceName, path, input.caption, this.lastUserMessageIds.get(sessionKeyValue));
+    this.logger.info("router.debug_image_sent", {
+      chat_id: parsed.chatId,
+      workspace: parsed.workspaceName,
+      session_key: sessionKeyValue,
+      source_path: input.path,
+      stored_path: path,
+    });
+    return { path };
+  }
+
+  private resolveDebugImageSession(input: SendImageCapabilityRequest): { sessionKey: string; workspace: WorkspaceRecord } {
+    if (input.sessionKey) {
+      const parsed = parseSessionKey(input.sessionKey);
+      if (!parsed) throw new Error("sessionKey is invalid");
+      const workspace = this.deps.store.getWorkspace(parsed.workspaceName);
+      if (!workspace) throw new Error("session workspace was not found");
+      const status = this.deps.agent.getStatus(input.sessionKey);
+      if (!status?.running) throw new Error("session is not running");
+      return { sessionKey: input.sessionKey, workspace };
+    }
+
+    const cwd = input.cwd ? resolve(input.cwd) : undefined;
+    const matches = this.deps.store.listRunningSessions()
+      .flatMap((session) => {
+        const workspace = this.deps.store.getWorkspace(session.workspace_name);
+        const key = session.session_key;
+        const status = this.deps.agent.getStatus(key);
+        if (!workspace || !status?.running) return [];
+        if (cwd && !pathContains(workspace.path, cwd)) return [];
+        return [{ sessionKey: key, workspace }];
+      });
+    if (matches.length === 1) return matches[0]!;
+    if (matches.length === 0) throw new Error("No running relay session matches this image request.");
+    throw new Error("Multiple running relay sessions match this image request; pass --session-key.");
+  }
+
+  private async validateDebugImagePath(path: string, workspacePath: string): Promise<void> {
+    if (!isAbsolute(path)) throw new Error("Image path must be absolute.");
+    const resolvedPath = resolve(path);
+    if (!pathContains(workspacePath, resolvedPath)) throw new Error("Image path must stay inside the selected workspace.");
+    const extension = extname(resolvedPath).toLowerCase();
+    if (![".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(extension)) {
+      throw new Error("Image must be a PNG, JPG, WEBP, or GIF file.");
+    }
+    const stat = await lstat(resolvedPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Image path must be a regular file.");
+    if (stat.size > this.deps.config.telegramImageMaxBytes) {
+      throw new Error(`Image is too large (${formatBytes(stat.size)}). Limit: ${formatBytes(this.deps.config.telegramImageMaxBytes)}.`);
+    }
+  }
+
+  private async copyOutgoingImage(workspacePath: string, sourcePath: string): Promise<string> {
+    return await saveRelayMedia(workspacePath, "outgoing", await readFile(sourcePath), { extension: extensionFromTelegramPath(sourcePath) });
+  }
+
+  private async sendStoredImage(chatId: ChatId, workspaceName: string, path: string, caption?: string, replyToMessageId?: number): Promise<void> {
+    const blob = await imageBlobFromPath(path);
+    await this.deps.adapter.sendPhoto(chatId, blob, {
+      ...(caption ? { caption: truncateTelegramCaption(caption) } : {}),
+      ...(replyToMessageId ? { replyToMessageId } : {}),
+    });
+    this.deps.store.appendTranscript({
+      chatId,
+      workspaceName,
+      role: "agent",
+      text: `[image: ${path}]\n`,
+      createdAt: Date.now(),
+    });
   }
 
   private async routeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
@@ -1653,6 +1718,13 @@ function taskInputFromTask(task: RelayTask): AgentTaskInput {
 function transcriptTextForInput(input: AgentTaskInput): string {
   const imageText = input.images?.length ? `\n[${input.images.length} image${input.images.length === 1 ? "" : "s"} attached]\n` : "\n";
   return `${input.text}${imageText}`;
+}
+
+function pathContains(parentPath: string, childPath: string): boolean {
+  const parent = resolve(parentPath);
+  const child = resolve(childPath);
+  const rel = relative(parent, child);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 function formatBytes(bytes: number): string {

@@ -170,6 +170,8 @@ function fixture(logLevel: LogLevel = "info"): { router: MessageRouter; store: S
     codexBin: "codex",
     codexSandbox: "workspace-write",
     codexApproval: "on-request",
+    relayControlEnabled: false,
+    relayControlPort: 0,
     logLevel,
   };
   return { router: new MessageRouter({ config, store, adapter, agent, logger }), store, adapter, agent, root, logLines };
@@ -865,6 +867,66 @@ describe("router", () => {
     const outgoingDayDirs = readdirSync(join(path, ".agent-relay", "media", "outgoing"));
     expect(outgoingDayDirs).toHaveLength(1);
     expect(readFileSync(join(path, ".agent-relay", ".gitignore"), "utf8")).toBe("*\n");
+  });
+
+  test("send_image capability sends workspace screenshot", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    await router.handle(textMessage("debug h5"));
+    const screenshot = join(path, "screen.png");
+    writeFileSync(screenshot, new Uint8Array([1, 2, 3]));
+
+    const result = await router.sendDebugImage({ path: screenshot, cwd: path, caption: "home screen" });
+
+    expect(result.path).toContain(join(path, ".agent-relay", "media", "outgoing"));
+    expect(adapter.photos).toHaveLength(1);
+    expect(adapter.photos[0]?.options).toEqual({ caption: "home screen", replyToMessageId: 1 });
+  });
+
+  test("send_image capability rejects paths outside workspace", async () => {
+    const { router, store, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    await router.handle(textMessage("debug h5"));
+    const screenshot = join(root, "outside.png");
+    writeFileSync(screenshot, new Uint8Array([1, 2, 3]));
+
+    await expect(router.sendDebugImage({ path: screenshot, cwd: path })).rejects.toThrow("inside the selected workspace");
+  });
+
+  test("send_image capability rejects oversized images", async () => {
+    const { router, store, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    await router.handle(textMessage("debug h5"));
+    const screenshot = join(path, "screen.png");
+    writeFileSync(screenshot, new Uint8Array(20 * 1024 * 1024 + 1));
+
+    await expect(router.sendDebugImage({ path: screenshot, cwd: path })).rejects.toThrow("Image is too large");
+  });
+
+  test("send_image capability asks for session key when cwd matches multiple sessions", async () => {
+    const { router, store, agent, root } = fixture();
+    const first = join(root, "demo");
+    const second = join(first, "nested");
+    mkdirSync(second, { recursive: true });
+    store.upsertWorkspace({ name: "demo", path: first, createdAt: 1 });
+    store.upsertWorkspace({ name: "nested", path: second, createdAt: 1 });
+    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: first });
+    await agent.start({ chatId: 2, workspaceName: "nested", workspacePath: second });
+    store.markSessionStarted("1:demo", 1, "demo", 1, "thread-1");
+    store.markSessionStarted("2:nested", 2, "nested", 1, "thread-2");
+    const screenshot = join(second, "screen.png");
+    writeFileSync(screenshot, new Uint8Array([1, 2, 3]));
+
+    await expect(router.sendDebugImage({ path: screenshot, cwd: second })).rejects.toThrow("pass --session-key");
   });
 
   test("backlog callback is no longer supported", async () => {

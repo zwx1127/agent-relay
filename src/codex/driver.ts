@@ -32,6 +32,7 @@ export interface CodexDriverOptions {
   approval: string;
   developerInstructions?: string;
   baseInstructions?: string;
+  env?: Record<string, string>;
 }
 
 interface JsonRpcRequest {
@@ -313,7 +314,7 @@ export class CodexDriver implements AgentDriver {
   private async startServer(): Promise<void> {
     this.stopping = false;
     this.proc = spawn(this.options.codexBin, ["app-server", "--listen", "stdio://"], {
-      env: process.env,
+      env: { ...process.env, ...this.options.env },
       stdio: ["pipe", "pipe", "pipe"],
     });
 

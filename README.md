@@ -68,6 +68,8 @@ The relay loads `.env` first, then overlays shell environment variables, so expo
 | `CODEX_DEVELOPER_INSTRUCTIONS_FILE` | no | | File loaded into Codex developer instructions. |
 | `CODEX_DEVELOPER_INSTRUCTIONS` | no | | Inline developer instructions appended after file instructions. |
 | `CODEX_MODEL_INSTRUCTIONS_FILE` | no | | File loaded into Codex base/model instructions. |
+| `RELAY_CONTROL_ENABLED` | no | `false` | Enables the local Codex-to-relay capability API on `127.0.0.1`. |
+| `RELAY_CONTROL_PORT` | no | `0` | Local capability API port. `0` asks the OS to choose an available port. |
 | `LOG_LEVEL` | no | `info` | One of `debug`, `info`, `warn`, or `error`. |
 
 When both `CODEX_DEVELOPER_INSTRUCTIONS_FILE` and `CODEX_DEVELOPER_INSTRUCTIONS` are set, file contents are sent first, then a blank line, then the inline text. `CODEX_MODEL_INSTRUCTIONS_FILE` is sent as Codex base instructions. The relay does not inject `AGENTS.md`; Codex discovers it normally from the selected cwd.
@@ -116,6 +118,18 @@ Telegram photo messages are supported after a cwd is selected. The relay downloa
 Telegram file/document attachments are intentionally not supported, even when the document MIME type is an image. Codex image outputs are sent back with Telegram `sendPhoto`; the relay does not use `sendDocument` as a fallback.
 
 Stored media lives under `.agent-relay/media/incoming` and `.agent-relay/media/outgoing` inside the selected workspace. The relay automatically writes `.agent-relay/.gitignore` with `*`, so downloaded and generated images do not appear in that workspace's Git status. `TELEGRAM_IMAGE_MAX_BYTES` limits photo downloads before they are sent to Codex.
+
+## Relay Capabilities
+
+When `RELAY_CONTROL_ENABLED=true`, agent-relay starts a local control API bound to `127.0.0.1` and injects a helper plus short capability instructions into Codex. The API is protected with a random bearer token that is generated on relay startup and passed only to the Codex child process.
+
+The first capability is `send_image`, intended for remote H5/web UI debugging. Codex can render a page with Playwright, save a screenshot inside the selected workspace, and send it back to the Telegram chat:
+
+```bash
+"$AGENT_RELAY_HELPER" send-image /absolute/path/to/screen.png --cwd "$PWD" --caption "current home screen"
+```
+
+The helper calls `POST /v1/capabilities/send_image` with `{ path, cwd, sessionKey, caption }`. The relay validates that the image is a regular PNG/JPG/WEBP/GIF inside the selected workspace, enforces `TELEGRAM_IMAGE_MAX_BYTES`, copies it to `.agent-relay/media/outgoing`, and sends it with Telegram `sendPhoto`.
 
 ## Runtime Notes
 

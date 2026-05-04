@@ -31,7 +31,7 @@ interface PendingPromptRow {
   expires_at?: number | null;
 }
 
-interface AgentSessionRow {
+export interface AgentSessionRow {
   session_key: string;
   chat_id: number;
   workspace_name: string;
@@ -279,6 +279,15 @@ export class Store {
       WHERE session_key = ?
     `).get(sessionKey);
     return row ?? undefined;
+  }
+
+  listRunningSessions(): AgentSessionRow[] {
+    return this.db.query<AgentSessionRow, []>(`
+      SELECT session_key, chat_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode
+      FROM agent_sessions
+      WHERE status = 'running'
+      ORDER BY started_at DESC
+    `).all();
   }
 
   appendTranscript(event: TranscriptEvent): void {

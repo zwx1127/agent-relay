@@ -1,0 +1,61 @@
+#!/usr/bin/env bun
+
+const [command, ...args] = process.argv.slice(2);
+
+async function main(): Promise<void> {
+  if (command !== "send-image") {
+    throw new Error("usage: agent-relay-helper send-image <path> [--cwd <cwd>] [--session-key <key>] [--caption <text>]");
+  }
+  const parsed = parseSendImageArgs(args);
+  const url = requiredEnv("AGENT_RELAY_CONTROL_URL");
+  const token = requiredEnv("AGENT_RELAY_CONTROL_TOKEN");
+  const response = await fetch(`${url.replace(/\/+$/, "")}/v1/capabilities/send_image`, {
+    method: "POST",
+    headers: {
+      "authorization": `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(parsed),
+  });
+  const payload = await response.json().catch(() => undefined) as { ok?: boolean; message?: string; error?: string } | undefined;
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error || `agent-relay returned HTTP ${response.status}`);
+  }
+  console.log(payload.message || "image sent");
+}
+
+function parseSendImageArgs(args: string[]): { path: string; cwd?: string; sessionKey?: string; caption?: string } {
+  const path = args.shift();
+  if (!path || path.startsWith("--")) throw new Error("send-image requires a path");
+  const result: { path: string; cwd?: string; sessionKey?: string; caption?: string } = { path };
+  while (args.length > 0) {
+    const flag = args.shift();
+    const value = args.shift();
+    if (!flag || !value) throw new Error(`missing value for ${flag ?? "argument"}`);
+    switch (flag) {
+      case "--cwd":
+        result.cwd = value;
+        break;
+      case "--session-key":
+        result.sessionKey = value;
+        break;
+      case "--caption":
+        result.caption = value;
+        break;
+      default:
+        throw new Error(`unknown option: ${flag}`);
+    }
+  }
+  return result;
+}
+
+function requiredEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name} is not set`);
+  return value;
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});

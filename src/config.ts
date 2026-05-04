@@ -18,6 +18,8 @@ export interface AppConfig {
   codexApproval: string;
   codexDeveloperInstructions?: string;
   codexBaseInstructions?: string;
+  relayControlEnabled: boolean;
+  relayControlPort: number;
   logLevel: LogLevel;
 }
 
@@ -104,6 +106,29 @@ function parsePositiveIntegerEnv(env: Env, name: string, defaultValue: number): 
   return value;
 }
 
+function parseNonNegativeIntegerEnv(env: Env, name: string, defaultValue: number): number {
+  const rawEnvValue = env[name];
+  if (rawEnvValue === undefined) return defaultValue;
+  const rawValue = rawEnvValue.trim();
+  if (!rawValue || !/^\d+$/.test(rawValue)) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+  const value = Number(rawValue);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function parseBooleanEnv(env: Env, name: string, defaultValue: boolean): boolean {
+  const rawEnvValue = env[name];
+  if (rawEnvValue === undefined) return defaultValue;
+  const rawValue = rawEnvValue.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(rawValue)) return true;
+  if (["0", "false", "no", "off"].includes(rawValue)) return false;
+  throw new Error(`${name} must be a boolean`);
+}
+
 export function loadConfig(env?: Env): AppConfig {
   const effectiveEnv = env ?? { ...loadDotEnvFile(), ...process.env };
   const allowedChats = effectiveEnv.TELEGRAM_ALLOWED_CHAT_IDS?.trim();
@@ -132,6 +157,8 @@ export function loadConfig(env?: Env): AppConfig {
     codexApproval: effectiveEnv.CODEX_APPROVAL?.trim() || "on-request",
     ...(developerInstructions ? { codexDeveloperInstructions: developerInstructions } : {}),
     ...(baseInstructions ? { codexBaseInstructions: baseInstructions } : {}),
+    relayControlEnabled: parseBooleanEnv(effectiveEnv, "RELAY_CONTROL_ENABLED", false),
+    relayControlPort: parseNonNegativeIntegerEnv(effectiveEnv, "RELAY_CONTROL_PORT", 0),
     logLevel: parseLogLevel(effectiveEnv.LOG_LEVEL),
   };
 }
