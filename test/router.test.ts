@@ -813,16 +813,32 @@ describe("router", () => {
     expect(adapter.edited.at(-1)?.text).toContain("Error: Unknown callback.");
   });
 
-  test("relay reuses the latest console message when possible", async () => {
+  test("/relay sends a fresh Relay Home message every time", async () => {
     const { router, adapter, store } = fixture();
 
     await router.handle(textMessage("/relay"));
     const firstMessageId = adapter.sent.at(-1)?.messageId;
     await router.handle(textMessage("/relay"));
+    const secondMessageId = adapter.sent.at(-1)?.messageId;
 
-    expect(store.getConsoleMessageId(1)).toBe(firstMessageId);
-    expect(adapter.sent).toHaveLength(1);
-    expect(adapter.edited.at(-1)?.options.messageId).toBe(firstMessageId);
+    expect(secondMessageId).not.toBe(firstMessageId);
+    expect(store.getConsoleMessageId(1)).toBe(secondMessageId);
+    expect(adapter.sent).toHaveLength(2);
+    expect(adapter.edited).toHaveLength(0);
+  });
+
+  test("Relay Home refresh callback edits the current home message", async () => {
+    const { router, adapter, store } = fixture();
+
+    await router.handle(textMessage("/relay"));
+    await router.handle(textMessage("/relay"));
+    const currentMessageId = adapter.sent.at(-1)?.messageId;
+
+    await router.handle(callbackMessage("ar:s", 7, "cb-refresh", currentMessageId));
+
+    expect(store.getConsoleMessageId(1)).toBe(currentMessageId);
+    expect(adapter.sent).toHaveLength(2);
+    expect(adapter.edited.at(-1)?.options.messageId).toBe(currentMessageId);
   });
 
   test("workspace callback switches binding, auto-starts, and edits status", async () => {

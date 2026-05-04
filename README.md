@@ -105,7 +105,7 @@ Telegram inline controls are limited to Relay Home workspace/status/refresh/stop
 
 ## Telegram Interaction
 
-Relay Home is a compact session view. Relay stores the latest home message id for each chat; `/relay` edits that message when possible and sends a replacement only when Telegram rejects the edit. Callbacks from replaced Home messages are treated as stale so older buttons do not accidentally operate on current state.
+Relay Home is a compact session view. Each `/relay` command sends a fresh Home message and records it as the latest Home for that chat. Inline refresh/status actions edit the current Home message when possible. Callbacks from older Home messages are treated as stale so older buttons do not accidentally operate on current state.
 
 Relay Home defaults to a compact view with the selected cwd, Codex state, waiting state, and recent relay error. The Status button toggles a per-chat detailed mode with cwd path, thread, model, reasoning, approval/sandbox policy, token/context usage, prompt counts, recent output time, and recent relay error. Dynamic values such as cwd names and paths are rendered as Telegram code entities instead of HTML.
 

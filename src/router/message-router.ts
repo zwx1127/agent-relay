@@ -132,7 +132,7 @@ export class MessageRouter {
       } else if (pending?.kind === "relay_command") {
         await this.answerRelayCommandPrompt(message.chatId, message.replyToMessageId!, text);
       } else if (command === "/relay") {
-        await this.renderConsole(message.chatId);
+        await this.renderConsole(message.chatId, { forceNewMessage: true });
       } else if (command && await this.handleSlashCommand(message, command, text)) {
         return;
       } else {
@@ -686,14 +686,14 @@ export class MessageRouter {
     });
   }
 
-  private async renderConsole(chatId: ChatId): Promise<void> {
+  private async renderConsole(chatId: ChatId, options: { forceNewMessage?: boolean } = {}): Promise<void> {
     const status = this.statusView(chatId);
     this.logger.info("router.console_rendered", {
       chat_id: chatId,
       workspace: status.workspaceName,
       running: Boolean(status.running),
     });
-    const previousMessageId = this.deps.store.getConsoleMessageId(chatId);
+    const previousMessageId = options.forceNewMessage ? undefined : this.deps.store.getConsoleMessageId(chatId);
     const body = formatHomeMessage(status, this.deps.store.getHomeStatusMode(chatId));
     if (previousMessageId) {
       try {
