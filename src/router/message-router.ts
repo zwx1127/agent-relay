@@ -123,7 +123,7 @@ export class MessageRouter {
         await this.createWorkspaceFromPrompt(message.chatId, message.replyToMessageId!, text);
       } else if (pending?.kind === "codex_user_input") {
         await this.answerCodexFreeText(message.chatId, message.replyToMessageId!, text);
-      } else if (command === "/start") {
+      } else if (command === "/relay") {
         await this.renderConsole(message.chatId);
       } else {
         await this.submitTask(message.chatId, text, message.messageId);

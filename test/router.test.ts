@@ -217,7 +217,7 @@ describe("router", () => {
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
     store.bindChat(1, "demo");
 
-    await router.handle(textMessage("/start"));
+    await router.handle(textMessage("/relay"));
 
     const callbackData = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data);
     expect(callbackData).not.toContain("ar:t50");
@@ -384,9 +384,9 @@ describe("router", () => {
     expect(adapter.edited.map((message) => message.text)).toEqual(["first second"]);
   });
 
-  test("/start sends formatted Relay Home", async () => {
+  test("/relay sends formatted Relay Home", async () => {
     const { router, adapter } = fixture();
-    await router.handle(textMessage("/start"));
+    await router.handle(textMessage("/relay"));
 
     expect(adapter.sent.at(-1)?.text).toContain("Relay Home");
     expect(adapter.sent.at(-1)?.text).toContain("cwd: none");
@@ -395,9 +395,9 @@ describe("router", () => {
     expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["📂", "ℹ️", "🔄"]);
   });
 
-  test("/start opens Relay Home", async () => {
+  test("/relay opens Relay Home", async () => {
     const { router, adapter } = fixture();
-    await router.handle(textMessage("/start"));
+    await router.handle(textMessage("/relay"));
 
     expect(adapter.sent.at(-1)?.text).toContain("Relay Home");
     expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toEqual(["ar:w", "ar:status", "ar:s"]);
@@ -411,18 +411,18 @@ describe("router", () => {
     store.bindChat(1, "demo");
 
     await router.handle(textMessage("/help"));
-    await router.handle(textMessage("/relay"));
     await router.handle(textMessage("/codex"));
     await router.handle(textMessage("/status"));
+    await router.handle(textMessage("/start"));
     await router.handle(textMessage("/review"));
     await router.handle(textMessage("/compact"));
     await router.handle(textMessage("/model"));
 
     expect(agent.sent.map((message) => message.text)).toEqual([
       "/help",
-      "/relay",
       "/codex",
       "/status",
+      "/start",
       "/review",
       "/compact",
       "/model",
@@ -500,13 +500,13 @@ describe("router", () => {
     store.upsertWorkspace({ name: "demo", path: "/tmp/<demo>&", createdAt: 1 });
     store.bindChat(1, "demo");
 
-    await router.handle(textMessage("/start"));
+    await router.handle(textMessage("/relay"));
     await router.handle(callbackMessage("ar:status", 7, "cb-details", adapter.sent.at(-1)?.messageId));
 
     expect(adapter.edited.at(-1)?.text).toContain("/tmp/<demo>&");
     expect(adapter.edited.at(-1)?.options.entities?.some((entity) => entity.type === "code")).toBe(true);
 
-    await router.handle(textMessage("/start"));
+    await router.handle(textMessage("/relay"));
     expect(adapter.edited.at(-1)?.text).toContain("/tmp/<demo>&");
   });
 
@@ -718,9 +718,9 @@ describe("router", () => {
   test("relay reuses the latest console message when possible", async () => {
     const { router, adapter, store } = fixture();
 
-    await router.handle(textMessage("/start"));
+    await router.handle(textMessage("/relay"));
     const firstMessageId = adapter.sent.at(-1)?.messageId;
-    await router.handle(textMessage("/start"));
+    await router.handle(textMessage("/relay"));
 
     expect(store.getConsoleMessageId(1)).toBe(firstMessageId);
     expect(adapter.sent).toHaveLength(1);

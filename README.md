@@ -86,19 +86,23 @@ bun run dev
 
 ## Telegram Flow
 
-The Telegram interaction is workspace-first:
+The Telegram interaction is workspace-first. Relay supports these Telegram-side instructions:
 
-- `/start` opens Relay Home. It is the only Telegram bot command reserved by relay.
-- Every other ordinary text message is Codex input once a cwd is selected, including `/relay`, `/codex`, `/compact`, `/review`, `/help`, and any other slash-style Codex instruction.
-- Telegram inline controls are limited to Relay Home workspace/status/refresh/stop, workspace management, Codex approval decisions, and long-output paging. Other slash-style text stays available to Codex.
-- Replies to Relay forms are handled by the form context instead of being forwarded to Codex.
-- If no cwd is selected, ordinary input opens Relay Home so you can choose or create a cwd.
+| Instruction | When | Behavior |
+| --- | --- | --- |
+| `/relay` | Always | Opens Relay Home. This is the only slash command reserved by relay. |
+| Any ordinary message | No cwd selected | Opens Relay Home so you can choose or create a cwd. |
+| Any ordinary message | cwd selected and Codex is idle | Sends the text to Codex as a new `turn/start` input. |
+| Any ordinary message | cwd selected and Codex is active | Sends the text to Codex as `turn/steer` input for the active turn. |
+| Reply to a Relay form | While a form is pending | Answers the pending workspace or Codex question instead of forwarding the text to Codex. |
 
-Relay does not reserve typed commands such as `/cd`, `/status`, `/model`, or `/resume`; they are ordinary Codex input after a cwd is selected.
+Slash-style text other than `/relay` is not handled by relay after a cwd is selected. It is forwarded to Codex exactly like any other prompt.
+
+Telegram inline controls are limited to Relay Home workspace/status/refresh/stop, workspace management, Codex approval decisions, and long-output paging.
 
 ## Telegram Interaction
 
-Relay Home is a compact session view. Relay stores the latest home message id for each chat; `/start` edits that message when possible and sends a replacement only when Telegram rejects the edit. Callbacks from replaced Home messages are treated as stale so older buttons do not accidentally operate on current state.
+Relay Home is a compact session view. Relay stores the latest home message id for each chat; `/relay` edits that message when possible and sends a replacement only when Telegram rejects the edit. Callbacks from replaced Home messages are treated as stale so older buttons do not accidentally operate on current state.
 
 Relay Home defaults to a compact view with the selected cwd, Codex state, waiting state, and recent relay error. The Status button toggles a per-chat detailed mode with cwd path, thread, model, reasoning, approval/sandbox policy, token/context usage, prompt counts, recent output time, and recent relay error. Dynamic values such as cwd names and paths are rendered as Telegram code entities instead of HTML.
 
