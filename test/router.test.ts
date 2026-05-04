@@ -331,7 +331,7 @@ describe("router", () => {
     });
     const prompt = adapter.sent.at(-1)!;
     const approve = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
-    expect(prompt.options!.replyMarkup!.inline_keyboard[0]!.map((button) => button.text)).toEqual(["✅", "❌"]);
+    expect(prompt.options!.replyMarkup!.inline_keyboard[0]!.map((button) => button.text)).toEqual(["✅", "❎"]);
 
     await router.handle(callbackMessage(approve.callback_data, 7, "cba", prompt.messageId));
     await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "after approval", turnId: "turn-1" });
@@ -767,6 +767,8 @@ describe("router", () => {
     const demoButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:uh:") && button.text.startsWith("▫️ demo"));
     expect(demoButton?.text.endsWith("\u00A0")).toBe(true);
     const callbackData = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data);
+    const createButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:n");
+    expect(createButton?.text).toBe("🆕");
     expect(callbackData?.filter((data) => data.startsWith("ar:uh:"))).toHaveLength(2);
     expect(callbackData?.every((data) => new TextEncoder().encode(data).length <= 64)).toBe(true);
   });
@@ -781,7 +783,7 @@ describe("router", () => {
 
     await router.handle(callbackMessage("ar:w"));
     const deleteButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wd?:"));
-    expect(deleteButton?.text).toBe("➖");
+    expect(deleteButton?.text).toBe("🗑️");
 
     await router.handle(callbackMessage(deleteButton!.callback_data, 7, "cb-delete?", adapter.edited.at(-1)?.options.messageId));
     expect(existsSync(path)).toBe(true);

@@ -118,14 +118,14 @@ Waiting: no
 
 Inline action buttons:
 
-- `📂` opens workspace management. You can select an existing cwd, create one with `➕` and ForceReply, or delete one with `➖` after confirmation. Workspace selection buttons keep cwd names visible for clarity and pad short names so list labels visually align in Telegram; action buttons are emoji-only. Deleting physically removes the directory under `WORKSPACE_ROOT`.
+- `📂` opens workspace management. You can select an existing cwd, create one with `🆕` and ForceReply, or delete one with `🗑️` after confirmation. Workspace selection buttons keep cwd names visible for clarity and pad short names so list labels visually align in Telegram; action buttons are emoji-only. Deleting physically removes the directory under `WORKSPACE_ROOT`.
 - `ℹ️` toggles the current chat between compact and detailed Relay Home modes.
 - `🔄` redraws Relay Home.
 - `🛑` stops the current cwd's Codex session and clears the cwd selection.
-- `✅` and `❌` answer approval prompts.
+- `✅` and `❎` answer approval prompts.
 - `⏮️`, `◀️`, `▶️`, and `⏭️` navigate long assistant output pages.
 
-Codex user-input questions are sent as ForceReply prompts. Codex approval requests keep inline `✅` and `❌` buttons.
+Codex user-input questions are sent as ForceReply prompts. Codex approval requests keep inline `✅` and `❎` buttons.
 Prompt state is shown with a bot reaction on the triggering user message: `🫡` queued, `✍` processing, `🤔` waiting for input or approval, `😎` completed, and `😱` failed or cancelled.
 
 System, home, approval, question, and assistant responses are sent as Telegram text plus message entities instead of HTML parse mode. Dynamic values such as cwd names, paths, and errors are rendered as plain text or code entities, avoiding HTML parse failures while preserving readable formatting.
@@ -142,7 +142,7 @@ When Codex asks the user a structured question via `request_user_input`, relay m
 - Multi-question requests are shown sequentially, one question at a time, and relay waits until all answers are collected before replying to Codex.
 - Expired prompt replies are marked expired and are not forwarded as normal Codex prompts.
 
-Codex approval requests for commands, file changes, and permissions are shown as concise Telegram messages with `✅` and `❌` buttons. The underlying command output is not sent to Telegram, and the approval card is edited to show the decision while preserving the original request details after a tap.
+Codex approval requests for commands, file changes, and permissions are shown as concise Telegram messages with `✅` and `❎` buttons. The underlying command output is not sent to Telegram, and the approval card is edited to show the decision while preserving the original request details after a tap.
 
 If Telegram rejects a menu edit, the relay logs a warning and sends a new message instead. Telegram's `message is not modified` edit response is treated as harmless and is not logged as an error, including the HTTP 400 form returned when an edit would leave both text and buttons unchanged. Other edit failures still fall back to sending a new message.
 
