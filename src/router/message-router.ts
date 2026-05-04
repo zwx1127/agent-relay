@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { rm } from "node:fs/promises";
 import type { AppConfig } from "../config.ts";
 import { isAuthorized } from "../config.ts";
 import { sessionKey } from "../agent.ts";
@@ -9,10 +10,10 @@ import type {
   AgentDriver,
   AgentOutputEvent,
   AgentSessionStatus,
-  AgentThreadSummary,
   AgentUserInputQuestion,
   AgentUserInputRequestEvent,
   ChatId,
+  HomeStatusMode,
   IMAdapter,
   InboundMessage,
   InlineKeyboardMarkup,
@@ -33,7 +34,6 @@ const STREAM_FLUSH_CHARS = 3400;
 const CODEX_PROMPT_TTL_MS = 30 * 60 * 1000;
 const PAGE_MAX_CHARS = 3200;
 const PAGED_OUTPUT_TTL_MS = 24 * 60 * 60 * 1000;
-const RESUME_THREAD_TTL_MS = 10 * 60 * 1000;
 const LIST_PAGE_SIZE = 8;
 
 export interface RouterDeps {
@@ -104,8 +104,6 @@ export class MessageRouter {
         : undefined;
       if (pending?.kind === "workspace_name") {
         await this.createWorkspaceFromPrompt(message.chatId, message.replyToMessageId!, text);
-      } else if (pending?.kind === "agent_instruction") {
-        await this.answerAgentInstructionPrompt(message.chatId, message.replyToMessageId!, text, message.messageId);
       } else if (pending?.kind === "codex_user_input") {
         await this.answerCodexFreeText(message.chatId, message.replyToMessageId!, text);
       } else if (command === "/start") {
@@ -232,15 +230,7 @@ export class MessageRouter {
       return;
     }
     if (payload === "s") {
-      await this.renderStatusCallback(message);
-      return;
-    }
-    if (payload === "queue") {
-      await this.renderQueueCallback(message);
-      return;
-    }
-    if (payload.startsWith("qt:")) {
-      await this.routeTaskCallback(message, payload);
+      await this.renderHomeCallback(message);
       return;
     }
     if (payload === "w") {
@@ -251,12 +241,8 @@ export class MessageRouter {
       await this.promptForWorkspaceName(message.chatId);
       return;
     }
-    if (payload === "i") {
-      await this.promptForAgentInstruction(message.chatId);
-      return;
-    }
-    if (payload.startsWith("q:")) {
-      await this.answerCodexOption(message, payload);
+    if (payload === "status") {
+      await this.toggleStatusModeCallback(message);
       return;
     }
     if (payload.startsWith("a:")) {
@@ -267,82 +253,42 @@ export class MessageRouter {
       await this.renderPagedOutputCallback(message, payload);
       return;
     }
-    if (payload.startsWith("r:")) {
-      await this.resumeThreadCallback(message, payload);
-      return;
-    }
     if (payload.startsWith("wl:")) {
       await this.renderWorkspacesCallback(message, Number(payload.slice("wl:".length)));
       return;
     }
-    if (payload.startsWith("rl:")) {
-      await this.renderResumeThreadsCallback(message, Number(payload.slice("rl:".length)));
-      return;
-    }
-    if (payload === "d") {
-      await this.renderDetailsCallback(message);
-      return;
-    }
-    if (payload === "clear?") {
-      await this.renderCallbackPage(message, confirmMessage("Start a new Codex session?", "This replaces the current thread binding for the selected cwd."), clearConfirmKeyboard());
-      return;
-    }
-    if (payload === "clear!") {
-      await this.clearThread(message.chatId, message);
-      return;
-    }
-    if (payload === "review") {
-      await this.runBuiltin(message.chatId, "review");
-      return;
-    }
-    if (payload === "compact") {
-      await this.runBuiltin(message.chatId, "compact");
-      return;
-    }
-    if (payload === "x?") {
-      await this.renderCallbackPage(message, confirmMessage("Stop Codex session?", "The selected cwd stays active."), exitConfirmKeyboard());
-      return;
-    }
-    if (payload === "x!") {
+    if (payload === "stop") {
       await this.stopFromCallback(message);
       return;
     }
-    if (payload === "c") {
-      await this.renderStatusCallback(message);
+    if (payload.startsWith("wd?:")) {
+      await this.confirmDeleteWorkspaceCallback(message, payload.slice("wd?:".length));
+      return;
+    }
+    if (payload.startsWith("wd!:")) {
+      await this.deleteWorkspaceCallback(message, payload.slice("wd!:".length));
       return;
     }
     if (payload.startsWith("uh:")) {
       const token = payload.slice("uh:".length);
-      const name = await this.workspaceNameForToken(token);
-      const workspace = this.requireWorkspace(name);
-      this.deps.store.bindChat(message.chatId, workspace.name);
-      this.logger.info("router.workspace_selected", { chat_id: message.chatId, workspace: workspace.name, path: workspace.path });
-      await this.ensureAgentStarted(message.chatId, workspace);
-      await this.renderStatusCallback(message);
-      return;
-    }
-    if (payload.startsWith("u:")) {
-      const name = payload.slice("u:".length);
-      const workspace = this.requireWorkspace(name);
-      this.deps.store.bindChat(message.chatId, workspace.name);
-      this.logger.info("router.workspace_selected", { chat_id: message.chatId, workspace: workspace.name, path: workspace.path });
-      await this.ensureAgentStarted(message.chatId, workspace);
-      await this.renderStatusCallback(message);
+      await this.selectWorkspaceFromToken(message, token);
       return;
     }
 
     throw new Error("Unknown callback.");
   }
 
-  private async renderStatusCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
+  private async renderHomeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     const status = this.statusView(message.chatId);
-    await this.renderCallbackPage(message, formatStatusMessage(status), consoleKeyboard(status));
+    await this.renderCallbackPage(message, formatHomeMessage(status, this.deps.store.getHomeStatusMode(message.chatId)), consoleKeyboard(status));
     if (message.messageId) this.deps.store.setConsoleMessageId(message.chatId, message.messageId);
   }
 
-  private async renderDetailsCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
+  private async toggleStatusModeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
+    const nextMode: HomeStatusMode = this.deps.store.getHomeStatusMode(message.chatId) === "compact" ? "details" : "compact";
+    this.deps.store.setHomeStatusMode(message.chatId, nextMode);
     const status = this.statusView(message.chatId);
-    await this.renderCallbackPage(message, formatDetailsMessage(status), consoleKeyboard(status));
+    await this.renderCallbackPage(message, formatHomeMessage(status, nextMode), consoleKeyboard(status));
     if (message.messageId) this.deps.store.setConsoleMessageId(message.chatId, message.messageId);
   }
 
@@ -356,14 +302,56 @@ export class MessageRouter {
     })), page.pageIndex, page.totalPages), workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages));
   }
 
+  private async selectWorkspaceFromToken(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string): Promise<void> {
+    const name = await this.workspaceNameForToken(token);
+    const workspace = this.requireWorkspace(name);
+    this.deps.store.bindChat(message.chatId, workspace.name);
+    this.logger.info("router.workspace_selected", { chat_id: message.chatId, workspace: workspace.name, path: workspace.path });
+    await this.ensureAgentStarted(message.chatId, workspace);
+    const status = this.statusView(message.chatId);
+    await this.renderCallbackPage(message, formatHomeMessage(status, this.deps.store.getHomeStatusMode(message.chatId)), consoleKeyboard(status));
+    if (message.messageId) this.deps.store.setConsoleMessageId(message.chatId, message.messageId);
+  }
+
+  private async confirmDeleteWorkspaceCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string): Promise<void> {
+    const name = await this.workspaceNameForToken(token);
+    const workspace = this.requireWorkspace(name);
+    await this.renderCallbackPage(
+      message,
+      confirmMessage("Delete workspace?", `This permanently deletes ${workspace.path}.`),
+      deleteWorkspaceConfirmKeyboard(workspace.name),
+    );
+  }
+
+  private async deleteWorkspaceCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string): Promise<void> {
+    const name = await this.workspaceNameForToken(token);
+    const workspace = this.requireWorkspace(name);
+    const key = sessionKey(message.chatId, workspace.name);
+    await this.finalizeSessionOutput(key);
+    await this.deps.agent.stop(key).catch((error) => {
+      this.logger.warn("router.workspace_delete_stop_failed", {
+        chat_id: message.chatId,
+        workspace: workspace.name,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    });
+    this.deps.store.markSessionStopped(key);
+    await rm(workspace.path, { recursive: true, force: true });
+    this.deps.store.deleteWorkspace(workspace.name);
+    this.logger.info("router.workspace_deleted", { chat_id: message.chatId, workspace: workspace.name, path: workspace.path });
+    await this.renderWorkspacesCallback(message, 0);
+  }
+
   private async stopFromCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     const workspace = this.requireCurrentWorkspace(message.chatId);
     const key = sessionKey(message.chatId, workspace.name);
     await this.finalizeSessionOutput(key);
     await this.deps.agent.stop(key);
     this.deps.store.markSessionStopped(key);
+    this.deps.store.clearBinding(message.chatId);
     this.logger.info("router.session_stopped", { chat_id: message.chatId, workspace: workspace.name, session_key: key });
-    await this.renderCallbackPage(message, messageWithTitle("Codex session stopped."), consoleKeyboard(this.statusView(message.chatId)));
+    const status = this.statusView(message.chatId);
+    await this.renderCallbackPage(message, formatHomeMessage(status, this.deps.store.getHomeStatusMode(message.chatId)), consoleKeyboard(status));
   }
 
   private async renderCallbackPage(
@@ -430,9 +418,10 @@ export class MessageRouter {
       running: Boolean(status.running),
     });
     const previousMessageId = this.deps.store.getConsoleMessageId(chatId);
+    const body = formatHomeMessage(status, this.deps.store.getHomeStatusMode(chatId));
     if (previousMessageId) {
       try {
-        await this.editRendered(chatId, formatStatusMessage(status), {
+        await this.editRendered(chatId, body, {
           messageId: previousMessageId,
           replyMarkup: consoleKeyboard(status),
         });
@@ -445,7 +434,7 @@ export class MessageRouter {
         });
       }
     }
-    const result = await this.sendRendered(chatId, formatStatusMessage(status), { replyMarkup: consoleKeyboard(status) });
+    const result = await this.sendRendered(chatId, body, { replyMarkup: consoleKeyboard(status) });
     if (result.messageId) this.deps.store.setConsoleMessageId(chatId, result.messageId);
   }
 
@@ -464,40 +453,6 @@ export class MessageRouter {
       createdAt: Date.now(),
     });
     this.logger.info("router.workspace_prompt_created", { chat_id: chatId, prompt_message_id: result.messageId });
-  }
-
-  private async promptForAgentInstruction(chatId: ChatId): Promise<void> {
-    const workspace = this.currentWorkspace(chatId);
-    if (!workspace) {
-      await this.promptForWorkspaceName(chatId);
-      return;
-    }
-    const status = await this.ensureAgentStarted(chatId, workspace);
-    if (await this.sendWaitingPromptNotice(chatId, status)) return;
-    const active = Boolean(status.activeTurnId);
-    const result = await this.sendRendered(chatId, renderTelegramText([
-      bold(active ? "Add to current turn" : "Prompt Codex"),
-      "\n\nReply with the ",
-      active ? "follow-up for " : "prompt for ",
-      code(workspace.name),
-      ".",
-    ]), {
-      forceReply: true,
-      disableWebPagePreview: true,
-    });
-    if (!result.messageId) {
-      throw new Error("Telegram did not return a prompt message id.");
-    }
-    this.deps.store.setPendingPrompt({
-      chatId,
-      promptMessageId: result.messageId,
-      kind: "agent_instruction",
-      createdAt: Date.now(),
-      sessionKey: status.sessionKey,
-      payloadJson: JSON.stringify({ mode: active ? "follow_up" : "new_task" }),
-      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
-    });
-    this.logger.info("router.agent_instruction_prompt_created", { chat_id: chatId, prompt_message_id: result.messageId, workspace: workspace.name });
   }
 
   private async createWorkspaceFromPrompt(chatId: ChatId, promptMessageId: number, name: string): Promise<void> {
@@ -524,22 +479,6 @@ export class MessageRouter {
     });
   }
 
-  private async answerAgentInstructionPrompt(chatId: ChatId, promptMessageId: number, text: string, userMessageId?: number): Promise<void> {
-    const pending = this.deps.store.getPendingPrompt(chatId, promptMessageId);
-    if (!pending || pending.kind !== "agent_instruction" || isExpired(pending)) {
-      this.deps.store.deletePendingPrompt(chatId, promptMessageId);
-      await this.sendRendered(chatId, textMessage("Prompt expired."));
-      return;
-    }
-    this.deps.store.deletePendingPrompt(chatId, promptMessageId);
-    const data = parsePromptPayload(pending.payloadJson);
-    if (data?.mode === "follow_up") {
-      await this.addContextToAgent(chatId, text, userMessageId);
-    } else {
-      await this.submitTask(chatId, text, userMessageId, "immediate");
-    }
-  }
-
   private async submitTask(chatId: ChatId, text: string, userMessageId?: number, preference: "auto" | "immediate" | "queue" = "auto"): Promise<void> {
     if (!text) return;
     const workspace = this.currentWorkspace(chatId);
@@ -564,21 +503,10 @@ export class MessageRouter {
       userMessageId,
     });
     if (shouldQueue) {
-      await this.sendRendered(chatId, queuedTaskMessage(task), { replyMarkup: queuedTaskKeyboard(task) });
+      await this.sendRendered(chatId, queuedTaskMessage(task));
       return;
     }
     await this.runTask(workspace, task);
-  }
-
-  private async addContextToAgent(chatId: ChatId, text: string, userMessageId?: number): Promise<void> {
-    if (!text) return;
-    const workspace = this.requireCurrentWorkspace(chatId);
-    const status = await this.ensureAgentStarted(chatId, workspace);
-    if (!status.activeTurnId) {
-      await this.submitTask(chatId, text, userMessageId, "immediate");
-      return;
-    }
-    await this.sendToAgent(chatId, workspace, text, userMessageId, this.deps.store.activeTask(chatId, workspace.name));
   }
 
   private async runTask(workspace: WorkspaceRecord, task: RelayTask): Promise<void> {
@@ -650,100 +578,6 @@ export class MessageRouter {
     return status;
   }
 
-  private async runBuiltin(chatId: ChatId, command: "review" | "compact"): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(chatId);
-    const status = await this.ensureAgentStarted(chatId, workspace);
-    if (!this.deps.agent.runBuiltinCommand) throw new Error("Codex app-server does not support this built-in command.");
-    await this.finalizeSessionOutput(status.sessionKey);
-    const result = await this.deps.agent.runBuiltinCommand(status.sessionKey, command);
-    await this.sendRendered(chatId, messageWithTitle(result.message));
-  }
-
-  private async clearThread(chatId: ChatId, callback?: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(chatId);
-    const key = sessionKey(chatId, workspace.name);
-    await this.finalizeSessionOutput(key);
-    await this.deps.agent.stop(key);
-    this.deps.store.markSessionStopped(key);
-    this.deps.store.clearSessionThreadId(key);
-    await this.ensureAgentStarted(chatId, workspace);
-    const body = messageWithTitle("Started a new Codex thread.");
-    if (callback) {
-      await this.renderCallbackPage(callback, body, consoleKeyboard(this.statusView(chatId)));
-    } else {
-      await this.sendRendered(chatId, body, { replyMarkup: consoleKeyboard(this.statusView(chatId)) });
-    }
-  }
-
-  private async renderResumeThreadsCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, rawPageIndex: number): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(message.chatId);
-    if (!this.deps.agent.listThreads) throw new Error("Codex app-server does not support thread listing.");
-    const threads = await this.deps.agent.listThreads({ workspacePath: workspace.path, limit: 10 });
-    const totalPages = Math.max(1, Math.ceil(threads.length / LIST_PAGE_SIZE));
-    const pageIndex = clampPage(rawPageIndex, totalPages);
-    await this.renderCallbackPage(
-      message,
-      formatResumeThreads(threads, pageIndex, totalPages),
-      resumeThreadsKeyboard(message.chatId, workspace, threads, pageIndex, this.rememberResumeThread.bind(this)),
-    );
-  }
-
-  private async resumeThreadCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
-    const token = payload.slice("r:".length);
-    const entry = this.resumeThreads.get(token);
-    if (!entry || entry.chatId !== message.chatId || entry.expiresAt < Date.now()) {
-      this.resumeThreads.delete(token);
-      throw new Error("Resume option expired. Open Resume again.");
-    }
-    const workspace = this.requireCurrentWorkspace(message.chatId);
-    if (workspace.name !== entry.workspaceName || workspace.path !== entry.workspacePath) {
-      throw new Error("Workspace changed. Open Resume again.");
-    }
-    const key = sessionKey(message.chatId, workspace.name);
-    await this.finalizeSessionOutput(key);
-    await this.deps.agent.stop(key);
-    this.deps.store.markSessionStopped(key);
-    const status = await this.ensureAgentStarted(message.chatId, workspace, entry.threadId);
-    await this.renderCallbackPage(message, renderTelegramText([
-      bold("Resumed thread:"),
-      " ",
-      code(status.threadName ?? entry.threadName ?? entry.threadId),
-    ]), consoleKeyboard(this.statusView(message.chatId)));
-  }
-
-  private async renderQueueCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(message.chatId);
-    const tasks = this.deps.store.listTasks(message.chatId, workspace.name, ["queued"], LIST_PAGE_SIZE);
-    await this.renderCallbackPage(message, formatQueueMessage(tasks), queueKeyboard(tasks));
-  }
-
-  private async routeTaskCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
-    const [, rawId, action] = payload.split(":");
-    const taskId = Number(rawId);
-    if (!Number.isInteger(taskId)) throw new Error("Invalid task.");
-    const task = this.deps.store.getTask(taskId);
-    if (!task || task.chatId !== message.chatId) throw new Error("Task not found.");
-    const workspace = this.requireCurrentWorkspace(message.chatId);
-    if (workspace.name !== task.workspaceName) throw new Error("Queued prompt belongs to another cwd.");
-    if (action === "del") {
-      if (task.status !== "queued") throw new Error("Only queued prompts can be deleted.");
-      this.deps.store.updateTask(task.id, { status: "cancelled" });
-      await this.renderQueueCallback(message);
-      return;
-    }
-    if (action === "run") {
-      if (task.status !== "queued") throw new Error("Only queued prompts can be run.");
-      const status = await this.ensureAgentStarted(message.chatId, workspace);
-      if (status.activeTurnId || status.waitingForApproval || status.waitingForUserInput) {
-        throw new Error("Codex is busy. The prompt will stay queued.");
-      }
-      await this.renderCallbackPage(message, messageWithTitle(`Running prompt #${task.id}.`), { inline_keyboard: [] });
-      await this.runTask(workspace, task);
-      return;
-    }
-    throw new Error("Unknown task action.");
-  }
-
   private markActiveTask(sessionKeyValue: string, status: "blocked" | "running"): void {
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) return;
@@ -757,7 +591,7 @@ export class MessageRouter {
     const active = this.deps.store.activeTask(parsed.chatId, parsed.workspaceName);
     if (active && (!turnId || !active.turnId || active.turnId === turnId)) {
       this.deps.store.updateTask(active.id, { status: "done" });
-      await this.sendRendered(parsed.chatId, messageWithTitle(`Prompt #${active.id} completed.`), { replyMarkup: resultKeyboard() });
+      await this.sendRendered(parsed.chatId, messageWithTitle(`Prompt #${active.id} completed.`));
     }
     const workspace = this.currentWorkspace(parsed.chatId);
     if (!workspace || workspace.name !== parsed.workspaceName) return;
@@ -815,22 +649,6 @@ export class MessageRouter {
     throw new Error("cwd selection expired. Refresh cwd and try again.");
   }
 
-  private rememberResumeThread(chatId: ChatId, workspace: WorkspaceRecord, thread: AgentThreadSummary): string {
-    for (const [token, entry] of this.resumeThreads) {
-      if (entry.expiresAt < Date.now()) this.resumeThreads.delete(token);
-    }
-    const token = shortToken();
-    this.resumeThreads.set(token, {
-      chatId,
-      workspaceName: workspace.name,
-      workspacePath: workspace.path,
-      threadId: thread.id,
-      threadName: thread.name,
-      expiresAt: Date.now() + RESUME_THREAD_TTL_MS,
-    });
-    return token;
-  }
-
   private appendSystem(chatId: ChatId, text: string): void {
     const workspace = this.currentWorkspace(chatId);
     if (!workspace) return;
@@ -858,15 +676,6 @@ export class MessageRouter {
 
   private readonly lastUserMessageIds = new Map<string, number>();
   private nextOutputSegmentId = 1;
-
-  private readonly resumeThreads = new Map<string, {
-    chatId: ChatId;
-    workspaceName: string;
-    workspacePath: string;
-    threadId: string;
-    threadName?: string;
-    expiresAt: number;
-  }>();
 
   private readonly codexRequests = new Map<string, {
     sessionKey: string;
@@ -935,12 +744,10 @@ export class MessageRouter {
     });
     const request = this.codexRequests.get(codexRequestKey(sessionKeyValue, requestId));
     const totalQuestions = request?.questions.length ?? 1;
-    const result = question.isSecret || options.length === 0
-      ? await this.sendRendered(chatId, formatCodexQuestion(question, questionIndex, totalQuestions), { forceReply: true, disableWebPagePreview: true })
-      : await this.sendRendered(chatId, formatCodexQuestion(question, questionIndex, totalQuestions), {
-        replyMarkup: codexQuestionKeyboard(token, questionIndex, options),
-        disableWebPagePreview: true,
-      });
+    const result = await this.sendRendered(chatId, formatCodexQuestion(question, questionIndex, totalQuestions), {
+      forceReply: true,
+      disableWebPagePreview: true,
+    });
     if (!result.messageId) throw new Error("Telegram did not return a prompt message id.");
     this.deps.store.setPendingPrompt({
       chatId,
@@ -970,52 +777,6 @@ export class MessageRouter {
     const token = typeof data.token === "string" ? data.token : shortToken();
     await this.sendCodexQuestion(chatId, pending.sessionKey, requestId, next, nextIndex, token, pending.expiresAt ?? Date.now() + CODEX_PROMPT_TTL_MS);
     return true;
-  }
-
-  private async answerCodexOption(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
-    const parts = payload.split(":");
-    const [, token, rawQuestionIndex, rawOptionIndex] = parts;
-    const pending = message.messageId ? this.deps.store.getPendingPrompt(message.chatId, message.messageId) : undefined;
-    const data = parsePromptPayload(pending?.payloadJson);
-    if (!pending || pending.kind !== "codex_user_input" || !data || data.token !== token || isExpired(pending)) {
-      await this.expireCallbackPrompt(message);
-      return;
-    }
-
-    const questionIndex = Number(rawQuestionIndex);
-    const optionIndex = Number(rawOptionIndex);
-    const options = Array.isArray(data.options) ? data.options : [];
-    if (!Number.isInteger(questionIndex) || questionIndex !== data.questionIndex || !Number.isInteger(optionIndex)) {
-      throw new Error("Invalid question answer.");
-    }
-
-    if (optionIndex === options.length) {
-      const result = await this.sendRendered(message.chatId, textMessage("Reply with your answer."), {
-        forceReply: true,
-        disableWebPagePreview: true,
-      });
-      if (!result.messageId) throw new Error("Telegram did not return a prompt message id.");
-      this.deps.store.setPendingPrompt({
-        chatId: message.chatId,
-        promptMessageId: result.messageId,
-        kind: "codex_user_input",
-        createdAt: Date.now(),
-        sessionKey: pending.sessionKey,
-        payloadJson: pending.payloadJson,
-        expiresAt: pending.expiresAt,
-      });
-      this.deps.store.deletePendingPrompt(message.chatId, pending.promptMessageId);
-      await this.renderCallbackPage(message, messageWithTitle("Waiting for custom answer."), { inline_keyboard: [] });
-      return;
-    }
-
-    const option = options[optionIndex] as { label?: unknown } | undefined;
-    if (!option || typeof option.label !== "string") throw new Error("Invalid question option.");
-    const response = await this.recordCodexAnswer(pending, data, option.label);
-    if (response === "expired") return;
-    const hasNext = !response && await this.sendNextCodexQuestion(message.chatId, pending, data);
-    await this.renderCallbackPage(message, answeredMessage(option.label, hasNext), { inline_keyboard: [] });
-    if (response) await this.respondToCodexPrompt(response);
   }
 
   private async answerCodexFreeText(chatId: ChatId, promptMessageId: number, text: string): Promise<void> {
@@ -1374,15 +1135,6 @@ function queuedTaskMessage(task: RelayTask): RenderedTelegramText {
   ]);
 }
 
-function formatQueueMessage(tasks: RelayTask[]): RenderedTelegramText {
-  if (tasks.length === 0) return messageWithTitle("Prompt backlog", "No queued prompts.");
-  const parts: TelegramTextPart[] = [bold("Prompt backlog")];
-  for (const task of tasks) {
-    parts.push("\n\n", bold(`#${task.id}`), " ", truncateForTelegramLabel(task.text, 160));
-  }
-  return renderTelegramText(parts);
-}
-
 function formatErrorMessage(detail: string): RenderedTelegramText {
   return renderTelegramText([bold("Error:"), " ", detail]);
 }
@@ -1430,15 +1182,6 @@ function formatApprovalMessage(title: string, body: string): RenderedTelegramTex
     }
   }
   return renderTelegramText(parts);
-}
-
-function codexQuestionKeyboard(token: string, questionIndex: number, options: Array<{ label: string }>): InlineKeyboardMarkup {
-  const rows: InlineKeyboardMarkup["inline_keyboard"] = [];
-  for (const [index, option] of options.entries()) {
-    rows.push([{ text: option.label, callback_data: `ar:q:${token}:${questionIndex}:${index}` }]);
-  }
-  rows.push([{ text: "💬", callback_data: `ar:q:${token}:${questionIndex}:${options.length}` }]);
-  return { inline_keyboard: rows };
 }
 
 function approvalKeyboard(token: string): InlineKeyboardMarkup {
@@ -1510,13 +1253,17 @@ function statusViewFromParts(
   };
 }
 
+function formatHomeMessage(status: StatusView, mode: HomeStatusMode): RenderedTelegramText {
+  return mode === "details" ? formatDetailsMessage(status) : formatStatusMessage(status);
+}
+
 function formatStatusMessage(status: StatusView): RenderedTelegramText {
   if (!status.workspaceName || !status.workspacePath) {
     return renderTelegramText([
       bold("Relay Home"),
       "\n\n● Stopped",
       "\ncwd: none",
-      "\nUse the cwd buttons below to select or create a workspace.",
+      "\nWaiting: no",
     ]);
   }
   const parts: TelegramTextPart[] = [
@@ -1527,19 +1274,9 @@ function formatStatusMessage(status: StatusView): RenderedTelegramText {
     statusLabel(status),
     "\ncwd: ",
     code(truncateForTelegramLabel(status.workspaceName, 32)),
-    "\nModel: ",
-    status.model ? code(truncateForTelegramLabel(status.model, 28)) : "unknown",
-  ];
-  if (status.reasoningEffort) parts.push(" / ", status.reasoningEffort);
-  parts.push(
-    "\nContext: ",
-    formatContext(status),
     "\nWaiting: ",
     formatWaiting(status),
-    "\nPrompts: ",
-    formatTaskCounts(status),
-  );
-  if (status.recentOutputAt) parts.push("\nLast output: ", relativeTime(status.recentOutputAt));
+  ];
   if (status.recentError) parts.push("\nError: ", truncateForTelegramLabel(status.recentError.trim(), 120));
   return renderTelegramText(parts);
 }
@@ -1547,7 +1284,7 @@ function formatStatusMessage(status: StatusView): RenderedTelegramText {
 function formatDetailsMessage(status: StatusView): RenderedTelegramText {
   if (!status.workspaceName || !status.workspacePath) return formatStatusMessage(status);
   const parts: TelegramTextPart[] = [
-    bold("Relay status"),
+    bold("Relay Home"),
     "\n\ncwd: ",
     code(status.workspaceName),
     "\nPath: ",
@@ -1571,9 +1308,13 @@ function formatDetailsMessage(status: StatusView): RenderedTelegramText {
     formatWaiting(status),
     "\nPrompts: ",
     formatTaskCounts(status),
+    "\nContext: ",
+    formatContext(status),
     "\nToken usage: ",
     formatTokens(status),
   );
+  if (status.recentOutputAt) parts.push("\nLast output: ", relativeTime(status.recentOutputAt));
+  if (status.recentError) parts.push("\nError: ", truncateForTelegramLabel(status.recentError.trim(), 120));
   return renderTelegramText(parts);
 }
 
@@ -1645,108 +1386,40 @@ function relativeTime(timestamp: number): string {
 function formatWorkspacesMessage(workspaces: Array<{ name: string; selected: boolean }>, pageIndex: number, totalPages: number): RenderedTelegramText {
   if (workspaces.length === 0) {
     return renderTelegramText([
-      bold("Select cwd"),
+      bold("Workspace"),
       "\n\nNo cwd directories found.\nUse the new cwd button to create one.",
     ]);
   }
-  const parts: TelegramTextPart[] = [bold("Select cwd"), `\n\nPage ${pageIndex + 1}/${totalPages}`];
+  const parts: TelegramTextPart[] = [bold("Workspace"), `\n\nPage ${pageIndex + 1}/${totalPages}`];
   for (const workspace of workspaces) {
     parts.push("\n", workspace.selected ? "● " : "○ ", code(workspace.name));
   }
   return renderTelegramText(parts);
 }
 
-function formatResumeThreads(threads: AgentThreadSummary[], pageIndex: number, totalPages: number): RenderedTelegramText {
-  if (threads.length === 0) {
-    return renderTelegramText([
-      bold("Resume session"),
-      "\n\nNo saved sessions were found for the current workspace.",
-    ]);
-  }
-  const start = pageIndex * LIST_PAGE_SIZE;
-  const items = threads.slice(start, start + LIST_PAGE_SIZE);
-  const parts: TelegramTextPart[] = [bold("Resume session"), `\n\nPage ${pageIndex + 1}/${totalPages}`];
-  for (const [index, thread] of items.entries()) {
-    const title = thread.name || thread.preview || thread.id;
-    const updated = thread.updatedAt ? ` ${new Date(thread.updatedAt * 1000).toISOString()}` : "";
-    parts.push(`\n${start + index + 1}. `, code(title.slice(0, 80)), updated);
-  }
-  return renderTelegramText(parts);
-}
-
-function resumeThreadButtonText(thread: AgentThreadSummary): string {
-  const value = thread.name || thread.preview || thread.id;
-  return value.length > 40 ? `${value.slice(0, 37)}...` : value;
-}
-
 function consoleKeyboard(status: { workspaceName?: string; running?: boolean }): InlineKeyboardMarkup {
   const rows: InlineKeyboardMarkup["inline_keyboard"] = [];
+  rows.push([
+    { text: "📂 Workspace", callback_data: "ar:w" },
+    { text: "ℹ Status", callback_data: "ar:status" },
+    { text: "↻", callback_data: "ar:s" },
+  ]);
   if (status.workspaceName) {
-    rows.push([
-      { text: "✎ Prompt", callback_data: "ar:i" },
-      { text: "🔍 Review", callback_data: "ar:review" },
-      { text: "📦 Compact", callback_data: "ar:compact" },
-    ]);
-    rows.push([
-      { text: "📂 cwd", callback_data: "ar:w" },
-      { text: "⏎ Resume", callback_data: "ar:rl:0" },
-      { text: "🆕 New", callback_data: "ar:clear?" },
-    ]);
-    rows.push(status.running
-      ? [
-        { text: "ℹ️ Status", callback_data: "ar:d" },
-        { text: "🛑 Stop", callback_data: "ar:x?" },
-        { text: "↻", callback_data: "ar:s" },
-      ]
-      : [{ text: "↻", callback_data: "ar:s" }]);
-  } else {
-    rows.push([
-      { text: "📂 cwd", callback_data: "ar:w" },
-      { text: "➕ cwd", callback_data: "ar:n" },
-      { text: "↻", callback_data: "ar:s" },
-    ]);
+    rows.push([{ text: "🛑 Stop", callback_data: "ar:stop" }]);
   }
   return {
     inline_keyboard: rows,
   };
 }
 
-function queueKeyboard(tasks: RelayTask[]): InlineKeyboardMarkup {
-  const rows = tasks.flatMap((task) => [
-    [{ text: `▶ Run #${task.id}`, callback_data: `ar:qt:${task.id}:run` }],
-    [{ text: `🗑 Delete #${task.id}`, callback_data: `ar:qt:${task.id}:del` }],
-  ]);
-  rows.push([{ text: "↻ Home", callback_data: "ar:home" }]);
-  return { inline_keyboard: rows };
-}
-
-function queuedTaskKeyboard(task: RelayTask): InlineKeyboardMarkup {
-  return {
-    inline_keyboard: [[
-      { text: "▶ Run now", callback_data: `ar:qt:${task.id}:run` },
-      { text: "🗑 Delete", callback_data: `ar:qt:${task.id}:del` },
-    ], [
-      { text: "🧾 Backlog", callback_data: "ar:queue" },
-      { text: "↻ Home", callback_data: "ar:home" },
-    ]],
-  };
-}
-
-function resultKeyboard(): InlineKeyboardMarkup {
-  return {
-    inline_keyboard: [[
-      { text: "✎ Prompt", callback_data: "ar:i" },
-      { text: "🧾 Backlog", callback_data: "ar:queue" },
-      { text: "↻ Home", callback_data: "ar:home" },
-    ]],
-  };
-}
-
 function workspacesKeyboard(workspaces: WorkspaceRecord[], selected: string | undefined, pageIndex: number, totalPages: number): InlineKeyboardMarkup {
-  const rows = workspaces.map((workspace) => [{
-    text: `${workspace.name === selected ? "● " : "○ "}${buttonLabel(workspace.name)}`,
-    callback_data: workspaceCallbackData(workspace.name),
-  }]);
+  const rows = workspaces.map((workspace) => [
+    {
+      text: `${workspace.name === selected ? "● " : "○ "}${buttonLabel(workspace.name)}`,
+      callback_data: workspaceCallbackData(workspace.name),
+    },
+    { text: "🗑", callback_data: deleteWorkspaceCallbackData(workspace.name, false) },
+  ]);
   if (totalPages > 1) {
     rows.push([
       { text: "◀", callback_data: `ar:wl:${Math.max(0, pageIndex - 1)}` },
@@ -1759,41 +1432,9 @@ function workspacesKeyboard(workspaces: WorkspaceRecord[], selected: string | un
       ...rows,
       [
         { text: "➕ cwd", callback_data: "ar:n" },
-        { text: "↻", callback_data: "ar:s" },
+        { text: "↻", callback_data: "ar:w" },
       ],
     ],
-  };
-}
-
-function resumeThreadsKeyboard(
-  chatId: ChatId,
-  workspace: WorkspaceRecord,
-  threads: AgentThreadSummary[],
-  pageIndex: number,
-  remember: (chatId: ChatId, workspace: WorkspaceRecord, thread: AgentThreadSummary) => string,
-): InlineKeyboardMarkup {
-  const totalPages = Math.max(1, Math.ceil(threads.length / LIST_PAGE_SIZE));
-  const start = pageIndex * LIST_PAGE_SIZE;
-  const rows = threads.slice(start, start + LIST_PAGE_SIZE).map((thread) => {
-    const token = remember(chatId, workspace, thread);
-    return [{ text: resumeThreadButtonText(thread), callback_data: `ar:r:${token}` }];
-  });
-  if (totalPages > 1) {
-    rows.push([
-      { text: "◀", callback_data: `ar:rl:${Math.max(0, pageIndex - 1)}` },
-      { text: "▶", callback_data: `ar:rl:${Math.min(totalPages - 1, pageIndex + 1)}` },
-    ]);
-  }
-  rows.push([{ text: "🔄", callback_data: "ar:rl:0" }]);
-  return { inline_keyboard: rows.length > 0 ? rows : [[{ text: "🔄", callback_data: "ar:s" }]] };
-}
-
-function clearConfirmKeyboard(): InlineKeyboardMarkup {
-  return {
-    inline_keyboard: [[
-      { text: "🆕", callback_data: "ar:clear!" },
-      { text: "⬅", callback_data: "ar:c" },
-    ]],
   };
 }
 
@@ -1829,6 +1470,23 @@ function workspaceCallbackData(name: string): string {
   return callbackData;
 }
 
+function deleteWorkspaceCallbackData(name: string, confirmed: boolean): string {
+  const callbackData = `ar:${confirmed ? "wd!" : "wd?"}:${workspaceCallbackToken(name)}`;
+  if (new TextEncoder().encode(callbackData).length > CALLBACK_LIMIT_BYTES) {
+    throw new Error("Workspace callback data is too long.");
+  }
+  return callbackData;
+}
+
+function deleteWorkspaceConfirmKeyboard(name: string): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [[
+      { text: "🗑 Delete", callback_data: deleteWorkspaceCallbackData(name, true) },
+      { text: "⬅ Workspace", callback_data: "ar:w" },
+    ]],
+  };
+}
+
 function workspaceCallbackToken(name: string): string {
   return createHash("sha256").update(name).digest("hex").slice(0, 16);
 }
@@ -1837,26 +1495,10 @@ function isConsolePayload(payload: string): boolean {
   return payload === "s"
     || payload === "w"
     || payload === "n"
-    || payload === "i"
-    || payload === "d"
-    || payload === "review"
-    || payload === "compact"
-    || payload === "x?"
-    || payload === "clear?"
-    || payload === "queue"
+    || payload === "status"
+    || payload === "stop"
     || payload.startsWith("wl:")
-    || payload.startsWith("rl:")
-    || payload.startsWith("uh:")
-    || payload.startsWith("u:");
-}
-
-function exitConfirmKeyboard(): InlineKeyboardMarkup {
-  return {
-    inline_keyboard: [
-      [
-        { text: "🛑", callback_data: "ar:x!" },
-        { text: "⬅", callback_data: "ar:c" },
-      ],
-    ],
-  };
+    || payload.startsWith("wd?:")
+    || payload.startsWith("wd!:")
+    || payload.startsWith("uh:");
 }

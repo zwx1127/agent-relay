@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import { noopLogger, type Logger } from "../logger.ts";
-import type { ChatBinding, ChatId, PendingPrompt, PendingPromptKind, RelayTask, TaskStatus, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "../types.ts";
+import type { ChatBinding, ChatId, HomeStatusMode, PendingPrompt, PendingPromptKind, RelayTask, TaskStatus, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "../types.ts";
 
 interface WorkspaceRow {
   name: string;
@@ -53,6 +53,7 @@ interface PagedOutputRow {
 interface ChatUiStateRow {
   chat_id: number;
   console_message_id?: number | null;
+  home_status_mode?: string | null;
 }
 
 interface TaskRow {
@@ -150,7 +151,8 @@ export class Store {
     this.db.run(`
       CREATE TABLE IF NOT EXISTS chat_ui_state (
         chat_id INTEGER PRIMARY KEY,
-        console_message_id INTEGER
+        console_message_id INTEGER,
+        home_status_mode TEXT NOT NULL DEFAULT 'compact'
       )
     `);
     this.db.run(`
@@ -170,6 +172,7 @@ export class Store {
     this.addColumnIfMissing("pending_prompts", "session_key", "TEXT");
     this.addColumnIfMissing("pending_prompts", "payload_json", "TEXT");
     this.addColumnIfMissing("pending_prompts", "expires_at", "INTEGER");
+    this.addColumnIfMissing("chat_ui_state", "home_status_mode", "TEXT NOT NULL DEFAULT 'compact'");
     this.logger.debug("store.migrated");
   }
 
@@ -190,6 +193,13 @@ export class Store {
     return row ? rowToWorkspace(row) : undefined;
   }
 
+  deleteWorkspace(name: string): void {
+    this.db.transaction(() => {
+      this.db.query("DELETE FROM chat_bindings WHERE workspace_name = ?").run(name);
+      this.db.query("DELETE FROM workspaces WHERE name = ?").run(name);
+    })();
+  }
+
   bindChat(chatId: ChatId, workspaceName: string, updatedAt = Date.now()): void {
     this.db.query(`
       INSERT INTO chat_bindings (chat_id, workspace_name, updated_at)
@@ -201,6 +211,14 @@ export class Store {
   getBinding(chatId: ChatId): ChatBinding | undefined {
     const row = this.db.query<BindingRow, [number]>("SELECT chat_id, workspace_name, updated_at FROM chat_bindings WHERE chat_id = ?").get(chatId);
     return row ? { chatId: row.chat_id, workspaceName: row.workspace_name, updatedAt: row.updated_at } : undefined;
+  }
+
+  clearBinding(chatId: ChatId): void {
+    this.db.query("DELETE FROM chat_bindings WHERE chat_id = ?").run(chatId);
+  }
+
+  clearBindingsForWorkspace(workspaceName: string): void {
+    this.db.query("DELETE FROM chat_bindings WHERE workspace_name = ?").run(workspaceName);
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string): void {
@@ -348,6 +366,19 @@ export class Store {
       VALUES (?, ?)
       ON CONFLICT(chat_id) DO UPDATE SET console_message_id = excluded.console_message_id
     `).run(chatId, messageId);
+  }
+
+  getHomeStatusMode(chatId: ChatId): HomeStatusMode {
+    const row = this.db.query<ChatUiStateRow, [number]>("SELECT chat_id, home_status_mode FROM chat_ui_state WHERE chat_id = ?").get(chatId);
+    return row?.home_status_mode === "details" ? "details" : "compact";
+  }
+
+  setHomeStatusMode(chatId: ChatId, mode: HomeStatusMode): void {
+    this.db.query(`
+      INSERT INTO chat_ui_state (chat_id, home_status_mode)
+      VALUES (?, ?)
+      ON CONFLICT(chat_id) DO UPDATE SET home_status_mode = excluded.home_status_mode
+    `).run(chatId, mode);
   }
 
   createTask(task: {

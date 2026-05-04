@@ -15,7 +15,7 @@ Telegram-to-Codex relay built with Bun, TypeScript, SQLite, and Codex app-server
 bun install
 ```
 
-Create a local `.env` file:
+Create a local `.env` file from the tracked template:
 
 ```bash
 cp .env.example .env
@@ -47,7 +47,28 @@ CODEX_APPROVAL=on-request
 LOG_LEVEL=info
 ```
 
-Shell environment variables still override values from `.env`.
+Shell environment variables override values from `.env`.
+
+## Configuration
+
+| Variable | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `TELEGRAM_BOT_TOKEN` | yes | | Telegram bot token from BotFather. |
+| `TELEGRAM_ALLOWED_USER_IDS` | yes | | Comma-separated Telegram user IDs allowed to use the relay. |
+| `TELEGRAM_ALLOWED_CHAT_IDS` | no | any chat | Optional comma-separated chat IDs; when set, both user and chat must match. |
+| `WORKSPACE_ROOT` | yes | | Parent directory containing selectable workspaces. Workspace deletion removes directories under this root. |
+| `SQLITE_PATH` | no | `.data/agent-relay.sqlite` | SQLite database path. |
+| `TELEGRAM_POLL_TIMEOUT_SECONDS` | no | `30` | Telegram long-poll timeout. |
+| `TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS` | no | `3` | Retry attempts for transient Telegram API failures. |
+| `TELEGRAM_RETRY_INITIAL_DELAY_MS` | no | `500` | Initial Telegram retry backoff. |
+| `TELEGRAM_RETRY_MAX_DELAY_MS` | no | `10000` | Maximum Telegram retry backoff. |
+| `CODEX_BIN` | no | `codex` | Codex CLI binary. |
+| `CODEX_SANDBOX` | no | `workspace-write` | Sandbox policy passed to Codex app-server thread creation. |
+| `CODEX_APPROVAL` | no | `on-request` | Approval policy passed to Codex app-server thread creation. |
+| `CODEX_DEVELOPER_INSTRUCTIONS_FILE` | no | | File loaded into Codex developer instructions. |
+| `CODEX_DEVELOPER_INSTRUCTIONS` | no | | Inline developer instructions appended after file instructions. |
+| `CODEX_MODEL_INSTRUCTIONS_FILE` | no | | File loaded into Codex base/model instructions. |
+| `LOG_LEVEL` | no | `info` | `debug`, `info`, `warn`, or `error`. |
 
 When both `CODEX_DEVELOPER_INSTRUCTIONS_FILE` and `CODEX_DEVELOPER_INSTRUCTIONS` are set, relay sends Codex the file contents, a blank line, then the inline text. `CODEX_MODEL_INSTRUCTIONS_FILE` is read and sent as Codex base/model instructions. `AGENTS.md` is not injected by relay; Codex discovers it normally from the selected cwd.
 
@@ -63,25 +84,23 @@ Development:
 bun run dev
 ```
 
-## Telegram Commands
+## Telegram Flow
 
 The Telegram interaction is workspace-first:
 
 - `/start` opens Relay Home. It is the only Telegram bot command reserved by relay.
 - Every other ordinary text message is Codex input once a cwd is selected, including `/relay`, `/codex`, `/compact`, `/review`, `/help`, and any other slash-style Codex instruction.
-- Relay controls such as cwd selection, new thread, resume, review, compact, stop, backlog, and approvals are handled through inline buttons and ForceReply forms.
+- Telegram inline controls are limited to Relay Home workspace/status/refresh/stop, workspace management, Codex approval decisions, and long-output paging. Other slash-style text stays available to Codex.
 - Replies to Relay forms are handled by the form context instead of being forwarded to Codex.
 - If no cwd is selected, ordinary input opens Relay Home so you can choose or create a cwd.
 
-Relay no longer uses typed commands such as `/cd`, `/status`, `/model`, or `/resume`. This keeps the whole ordinary-message namespace available to Codex, so no `//` escaping is needed.
-
-After upgrading, restart the relay process so Telegram polling uses the new routing code. If `/relay` or `/codex` still opens Relay Home while a cwd is selected, the running bot process is not on the current build.
+Relay does not reserve typed commands such as `/cd`, `/status`, `/model`, or `/resume`; they are ordinary Codex input after a cwd is selected.
 
 ## Telegram Interaction
 
-Relay Home is a compact session view. Relay stores the latest home message id for each chat; `/start` edits that message when possible and sends a replacement only when Telegram rejects the edit. Old home callbacks are treated as stale so older buttons do not accidentally operate on current state.
+Relay Home is a compact session view. Relay stores the latest home message id for each chat; `/start` edits that message when possible and sends a replacement only when Telegram rejects the edit. Callbacks from replaced Home messages are treated as stale so older buttons do not accidentally operate on current state.
 
-Relay Home shows the selected cwd, Codex state, waiting state, prompt counts, model, token/context usage, recent output time, and recent relay error. Dynamic values such as cwd names and paths are rendered as Telegram code entities instead of HTML. Long values are truncated in the main home view and shown in full from Status.
+Relay Home defaults to a compact view with the selected cwd, Codex state, waiting state, and recent relay error. The Status button toggles a per-chat detailed mode with cwd path, thread, model, reasoning, approval/sandbox policy, token/context usage, prompt counts, recent output time, and recent relay error. Dynamic values such as cwd names and paths are rendered as Telegram code entities instead of HTML.
 
 Example home view:
 
@@ -90,29 +109,19 @@ Relay Home
 
 ● Running
 cwd: agent-relay
-Model: gpt-5.2 / high
-Context: ▰▰▱▱▱ 42%
 Waiting: no
-Prompts: none
-Last output: 2m ago
 ```
 
-Inline action buttons use Codex-oriented labels:
+Inline action buttons:
 
-- `✎ Prompt` opens a ForceReply prompt. With an idle session it starts a new turn; with an active turn it adds context.
-- `🔍 Review` starts a Codex review of uncommitted changes.
-- `📦 Compact` starts Codex thread compaction.
-- `📂 cwd` opens a paged cwd list with the current cwd pinned first.
-- `⏎ Resume` opens a paged saved-session picker for the selected cwd.
-- `🆕 New` confirms replacing the current stored Codex thread binding with a new session.
-- `ℹ️ Status` opens the expanded status view.
-- `🛑 Stop` opens a confirmation view before stopping the current Codex session.
+- `📂 Workspace` opens workspace management. You can select an existing cwd, create one with ForceReply, or delete one after confirmation. Deleting physically removes the directory under `WORKSPACE_ROOT`.
+- `ℹ Status` toggles the current chat between compact and detailed Relay Home modes.
 - `↻` redraws Relay Home.
+- `🛑 Stop` stops the current cwd's Codex session and clears the cwd selection.
 - `✅` and `❌` answer approval prompts.
-- `⬅` returns to the status view from confirmation views.
 - `⏮`, `◀`, `▶`, and `⏭` navigate long assistant output pages.
 
-cwd, saved-session, backlog, and Codex question option buttons keep descriptive labels because otherwise choices cannot be distinguished; `💬` is used for a custom answer.
+Codex user-input questions are sent as ForceReply prompts. Codex approval requests keep inline `✅` and `❌` buttons.
 
 System, home, approval, question, and assistant responses are sent as Telegram text plus message entities instead of HTML parse mode. Dynamic values such as cwd names, paths, and errors are rendered as plain text or code entities, avoiding HTML parse failures while preserving readable formatting.
 
@@ -124,8 +133,7 @@ Raw Codex terminal output is intentionally hidden from Telegram. Command stdout/
 
 When Codex asks the user a structured question via `request_user_input`, relay maps it to Telegram UI:
 
-- Questions with options are sent with inline keyboard buttons.
-- Free-text, secret, and `💬` custom answers use Telegram ForceReply.
+- Questions with options, free-text questions, and secret questions use Telegram ForceReply.
 - Multi-question requests are shown sequentially, one question at a time, and relay waits until all answers are collected before replying to Codex.
 - Expired prompt replies are marked expired and are not forwarded as normal Codex prompts.
 
@@ -140,9 +148,10 @@ If Telegram rejects a menu edit, the relay logs a warning and sends a new messag
 - Long polling subscribes to Telegram `message` and `callback_query` updates. Normal `getUpdates` calls return and immediately start the next request; transient Telegram failures are retried with exponential backoff.
 - cwd names cannot be empty, `.`, `..`, or contain slashes, backslashes, NUL, or control characters.
 - cwd names are resolved under `WORKSPACE_ROOT`; path traversal and absolute names are rejected.
-- `📂 cwd` discovers existing first-level directories under `WORKSPACE_ROOT`; symlinked directories are ignored.
+- `📂 Workspace` discovers existing first-level directories under `WORKSPACE_ROOT`; symlinked directories are ignored.
 - The new-cwd form creates the directory and runs `git init` only when the directory does not already exist.
 - Selecting or creating a cwd immediately starts the Codex thread for that `chat + cwd`. If the session is already running, relay reuses it. If SQLite has a stored Codex `thread_id`, relay resumes it first.
+- Deleting a cwd from Workspace management requires a confirmation tap, stops the current chat's session for that cwd, removes the directory, and clears chat bindings that pointed at it.
 - Codex starts one app-server process:
 
 ```bash
@@ -151,14 +160,14 @@ codex app-server --listen stdio://
 
 - Each `chat + cwd` starts or resumes a Codex thread with that directory as `cwd`, plus `CODEX_SANDBOX` and `CODEX_APPROVAL`.
 - User messages are serialized per `chat + cwd`. When Codex is idle, ordinary text starts a Codex turn with `turn/start`. When a turn is active, ordinary text is sent as `turn/steer`, matching the interactive Codex habit of adding context to the current session. If Codex reports that the locally cached active turn is no longer steerable, relay clears that stale turn id and retries the same input once with `turn/start`.
-- Queued prompts are stored in SQLite and dispatched FIFO after the active turn completes, as long as Codex is not waiting for user input or approval. Backlog cards can run or delete individual queued prompts.
+- Prompt task state is stored in SQLite so active, blocked, and completed turns can be tracked. No Telegram controls are exposed for task queues.
 - While Codex is waiting for a user-input answer or approval decision, ordinary chat text is not forwarded as a new instruction. The relay prompts the user to reply to the question message or use the approval buttons.
 - Assistant output is visually linked back to the triggering Telegram message via reply metadata.
 - Assistant message deltas from `item/agentMessage/delta` are stored in SQLite, debounced, and rendered into Telegram-sized output pages.
 - Agent output is aggregated per visible interaction segment, flushed after a short quiet period, size/time limit, or `turn/completed`, and usually edits one live Telegram message for the current response.
 - User input, Codex approval prompts, and Codex question prompts close the current output segment before later assistant output is shown.
 - Long Codex output is rendered as a paged Telegram message with emoji-only navigation buttons instead of flooding the chat with continuation messages. While streaming, the live message follows the newest page; after `turn/completed`, it returns to page 1 for easier reading from the top.
-- The `🛑` inline button sends `turn/interrupt` for the active turn. It requires a second confirmation tap.
+- The `🛑 Stop` inline button sends `turn/interrupt` for the current cwd session and clears the chat's cwd selection.
 
 ## Logging
 
@@ -166,7 +175,7 @@ Runtime logs are written to stdout as text lines. Set `LOG_LEVEL` to `debug`, `i
 
 At `info` and above, logs include operational metadata such as chat ID, user ID, workspace, command name, text length, session key, and process exit status. They do not include the Telegram bot token, Telegram message text, or Codex output.
 
-At `debug`, logs also include raw Telegram messages and Codex input text. Use it only in environments where those logs are protected.
+At `debug`, logs also include raw Telegram messages, Codex input text, and Codex output chunks. Use it only in environments where those logs are protected.
 
 Telegram Bot API HTTP errors include Telegram's `description` field when the response body provides one. This makes 400 errors such as malformed HTML, non-editable messages, or other Bot API validation failures visible in `telegram.api_http_error` logs.
 
@@ -196,8 +205,8 @@ SQLite stores:
 - cwd records
 - chat-to-cwd bindings
 - agent session status and Codex thread IDs
-- latest Relay Home message IDs
-- queued/running/blocked/done task records
+- latest Relay Home message IDs and per-chat compact/detailed status mode
+- prompt task state
 - transcript events for user, agent, and system messages
 - pending ForceReply prompts for cwd creation and Codex questions
 - pending Codex approval metadata

@@ -265,7 +265,7 @@ export interface TranscriptEvent {
   createdAt: number;
 }
 
-export type PendingPromptKind = "workspace_name" | "codex_user_input" | "codex_approval" | "agent_instruction";
+export type PendingPromptKind = "workspace_name" | "codex_user_input" | "codex_approval";
 
 export interface PendingPrompt {
   chatId: ChatId;
@@ -276,6 +276,8 @@ export interface PendingPrompt {
   payloadJson?: string;
   expiresAt?: number;
 }
+
+export type HomeStatusMode = "compact" | "details";
 
 export type TaskStatus = "queued" | "running" | "blocked" | "done" | "failed" | "cancelled";
 

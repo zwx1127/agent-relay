@@ -380,7 +380,7 @@ describe("router", () => {
     expect(adapter.sent.at(-1)?.text).toContain("Relay Home");
     expect(adapter.sent.at(-1)?.text).toContain("cwd: none");
     expect(adapter.sent.at(-1)?.options?.entities?.[0]?.type).toBe("bold");
-    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["📂 cwd", "➕ cwd", "↻"]);
+    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["📂 Workspace", "ℹ Status", "↻"]);
   });
 
   test("/start opens Relay Home", async () => {
@@ -388,7 +388,7 @@ describe("router", () => {
     await router.handle(textMessage("/start"));
 
     expect(adapter.sent.at(-1)?.text).toContain("Relay Home");
-    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toContain("ar:n");
+    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toEqual(["ar:w", "ar:status", "ar:s"]);
   });
 
   test("slash commands are forwarded as Codex prompts when a workspace is selected", async () => {
@@ -448,7 +448,7 @@ describe("router", () => {
     expect(adapter.sent).toEqual([]);
   });
 
-  test("clear callback requires confirmation before replacing the thread", async () => {
+  test("clear callback is no longer supported", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -458,17 +458,13 @@ describe("router", () => {
     await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path, threadId: "old-thread" });
 
     await router.handle(callbackMessage("ar:clear?"));
+
     expect(agent.stopped).toEqual([]);
-    expect(adapter.edited.at(-1)?.text).toContain("Start a new Codex session?");
-
-    await router.handle(callbackMessage("ar:clear!", 7, "cb-clear", adapter.edited.at(-1)?.options.messageId));
-
-    expect(agent.stopped).toEqual(["1:demo"]);
-    expect(store.getSession("1:demo")?.thread_id).not.toBe("old-thread");
-    expect(adapter.edited.at(-1)?.text).toContain("Started a new Codex thread.");
+    expect(store.getSession("1:demo")?.thread_id).toBe("old-thread");
+    expect(adapter.edited.at(-1)?.text).toContain("Error: Unknown callback.");
   });
 
-  test("resume callback lists workspace threads and resumes selected thread", async () => {
+  test("resume callback is no longer supported", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -479,28 +475,25 @@ describe("router", () => {
 
     await router.handle(callbackMessage("ar:rl:0"));
 
-    expect(agent.threadLists).toEqual([{ workspacePath: path, limit: 10 }]);
-    const button = adapter.edited.at(-1)?.options?.replyMarkup?.inline_keyboard[0]?.[0];
-    expect(button?.callback_data).toMatch(/^ar:r:/);
-
-    await router.handle(callbackMessage(button!.callback_data, 7, "resume-cb", adapter.edited.at(-1)?.options.messageId));
-
-    expect(agent.stopped).toEqual(["1:demo"]);
-    expect(agent.getStatus("1:demo")?.threadId).toBe("saved-thread");
-    expect(store.getSession("1:demo")?.thread_id).toBe("saved-thread");
-    expect(adapter.edited.at(-1)?.text).toContain("Resumed thread");
+    expect(agent.threadLists).toEqual([]);
+    expect(agent.stopped).toEqual([]);
+    expect(agent.getStatus("1:demo")?.threadId).toBe("current-thread");
+    expect(adapter.edited.at(-1)?.text).toContain("Error: Unknown callback.");
   });
 
-  test("console details render dynamic workspace values as code entities", async () => {
+  test("status toggle renders details and persists by chat", async () => {
     const { router, store, adapter } = fixture();
     store.upsertWorkspace({ name: "demo", path: "/tmp/<demo>&", createdAt: 1 });
     store.bindChat(1, "demo");
 
     await router.handle(textMessage("/start"));
-    await router.handle(callbackMessage("ar:d", 7, "cb-details", adapter.sent.at(-1)?.messageId));
+    await router.handle(callbackMessage("ar:status", 7, "cb-details", adapter.sent.at(-1)?.messageId));
 
     expect(adapter.edited.at(-1)?.text).toContain("/tmp/<demo>&");
     expect(adapter.edited.at(-1)?.options.entities?.some((entity) => entity.type === "code")).toBe(true);
+
+    await router.handle(textMessage("/start"));
+    expect(adapter.edited.at(-1)?.text).toContain("/tmp/<demo>&");
   });
 
   test("input without a workspace opens Relay Home", async () => {
@@ -555,7 +548,7 @@ describe("router", () => {
     expect(existsSync(join(root, workspaceName, ".git"))).toBe(false);
   });
 
-  test("quick task button uses ForceReply and forwards the reply", async () => {
+  test("prompt callback is no longer supported", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -563,17 +556,12 @@ describe("router", () => {
     store.bindChat(1, "demo");
 
     await router.handle(callbackMessage("ar:i"));
-    const prompt = adapter.sent.at(-1)!;
 
-    expect(prompt.text).toContain("Prompt Codex");
-    expect(prompt.options?.forceReply).toBe(true);
-
-    await router.handle(textMessage("build the feature", 7, prompt.messageId));
-
-    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "build the feature" });
+    expect(adapter.edited.at(-1)?.text).toContain("Error: Unknown callback.");
+    expect(agent.sent).toEqual([]);
   });
 
-  test("quick task button becomes add context during an active turn", async () => {
+  test("prompt callback stays unsupported during an active turn", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -583,13 +571,9 @@ describe("router", () => {
     status.activeTurnId = "turn-1";
 
     await router.handle(callbackMessage("ar:i"));
-    const prompt = adapter.sent.at(-1)!;
 
-    expect(prompt.text).toContain("Add to current turn");
-
-    await router.handle(textMessage("also cover tests", 7, prompt.messageId));
-
-    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "also cover tests" });
+    expect(adapter.edited.at(-1)?.text).toContain("Error: Unknown callback.");
+    expect(agent.sent).toEqual([]);
   });
 
   test("ordinary text adds to the active turn while Codex is busy", async () => {
@@ -623,7 +607,7 @@ describe("router", () => {
     expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(0);
   });
 
-  test("completed prompt card returns to Relay Home", async () => {
+  test("completed prompt card has no relay action buttons", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -633,11 +617,11 @@ describe("router", () => {
     await router.handle(textMessage("run task"));
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-1" });
 
-    const buttons = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text);
-    expect(buttons).toContain("↻ Home");
+    expect(adapter.sent.at(-1)?.text).toContain("Prompt #1 completed.");
+    expect(adapter.sent.at(-1)?.options?.replyMarkup).toBeUndefined();
   });
 
-  test("backlog card returns to Relay Home", async () => {
+  test("backlog callback is no longer supported", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -647,8 +631,7 @@ describe("router", () => {
 
     await router.handle(callbackMessage("ar:queue"));
 
-    const buttons = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.text);
-    expect(buttons).toContain("↻ Home");
+    expect(adapter.edited.at(-1)?.text).toContain("Error: Unknown callback.");
   });
 
   test("relay reuses the latest console message when possible", async () => {
@@ -673,14 +656,18 @@ describe("router", () => {
     store.upsertWorkspace({ name: "second", path: second, createdAt: 1 });
     store.bindChat(1, "first");
 
-    await router.handle(callbackMessage("ar:u:second"));
+    await router.handle(callbackMessage("ar:w"));
+    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((candidate) => candidate.text === "○ second");
+    expect(button?.callback_data).toMatch(/^ar:uh:/);
+
+    await router.handle(callbackMessage(button!.callback_data, 7, "cb2", adapter.edited.at(-1)?.options.messageId));
 
     expect(store.getBinding(1)?.workspaceName).toBe("second");
     expect(agent.getStatus("1:second")?.running).toBe(true);
     expect(adapter.edited.at(-1)?.text).toContain("cwd: second");
     expect(adapter.edited.at(-1)?.options.entities?.some((entity) => entity.type === "code")).toBe(true);
     expect(adapter.edited.at(-1)?.options.messageId).toBe(42);
-    expect(adapter.answered).toEqual([{ callbackQueryId: "cb1", text: undefined }]);
+    expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb2", text: undefined });
   });
 
   test("workspaces callback discovers existing directories and uses short buttons", async () => {
@@ -699,6 +686,32 @@ describe("router", () => {
     const callbackData = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data);
     expect(callbackData?.filter((data) => data.startsWith("ar:uh:"))).toHaveLength(2);
     expect(callbackData?.every((data) => new TextEncoder().encode(data).length <= 64)).toBe(true);
+  });
+
+  test("workspace delete requires confirmation and removes directory and binding", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+
+    await router.handle(callbackMessage("ar:w"));
+    const deleteButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wd?:"));
+    expect(deleteButton?.text).toBe("🗑");
+
+    await router.handle(callbackMessage(deleteButton!.callback_data, 7, "cb-delete?", adapter.edited.at(-1)?.options.messageId));
+    expect(existsSync(path)).toBe(true);
+    expect(adapter.edited.at(-1)?.text).toContain("Delete workspace?");
+
+    const confirmButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wd!:"));
+    await router.handle(callbackMessage(confirmButton!.callback_data, 7, "cb-delete!", adapter.edited.at(-1)?.options.messageId));
+
+    expect(existsSync(path)).toBe(false);
+    expect(store.getWorkspace("demo")).toBeUndefined();
+    expect(store.getBinding(1)).toBeUndefined();
+    expect(agent.stopped).toEqual(["1:demo"]);
+    expect(adapter.edited.at(-1)?.text).toContain("No cwd directories found.");
   });
 
   test("/cd without a workspace opens Relay Home instead of creating cwd directly", async () => {
@@ -728,7 +741,7 @@ describe("router", () => {
     expect(adapter.edited.at(-1)?.text).toContain("客户 repo");
   });
 
-  test("stop callback requires confirmation before stopping", async () => {
+  test("stop callback stops current workspace and clears selection", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -736,13 +749,11 @@ describe("router", () => {
     store.bindChat(1, "demo");
     await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
 
-    await router.handle(callbackMessage("ar:x?"));
-    expect(agent.stopped).toEqual([]);
-    expect(adapter.edited.at(-1)?.text).toContain("Stop Codex session?");
+    await router.handle(callbackMessage("ar:stop"));
 
-    await router.handle(callbackMessage("ar:x!", 7, "cb2"));
     expect(agent.stopped).toEqual(["1:demo"]);
-    expect(adapter.edited.at(-1)?.text).toContain("Codex session stopped.");
+    expect(store.getBinding(1)).toBeUndefined();
+    expect(adapter.edited.at(-1)?.text).toContain("cwd: none");
   });
 
   test("unknown callback answers and renders formatted error", async () => {
@@ -754,7 +765,7 @@ describe("router", () => {
     expect(adapter.edited.at(-1)?.options.entities?.[0]?.type).toBe("bold");
   });
 
-  test("codex option question uses inline keyboard and responds with selected label", async () => {
+  test("codex option question uses ForceReply and responds with typed answer", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -776,17 +787,25 @@ describe("router", () => {
     const prompt = adapter.sent.at(-1)!;
     expect(prompt.text).toContain("Mode");
     expect(prompt.options?.entities?.[0]?.type).toBe("bold");
-    const button = prompt.options?.replyMarkup?.inline_keyboard[0]?.[0];
-    expect(button?.text).toBe("Fast");
+    expect(prompt.options?.forceReply).toBe(true);
+    expect(prompt.options?.replyMarkup).toBeUndefined();
 
-    await router.handle(callbackMessage(button!.callback_data, 7, "cbq", prompt.messageId ?? 100));
+    await router.handle(textMessage("Fast", 7, prompt.messageId));
 
     expect(agent.responses).toEqual([{
       key: "1:demo",
       requestId: 77,
       result: { answers: { choice: { answers: ["Fast"] } } },
     }]);
-    expect(adapter.edited.at(-1)?.text).toContain("Answered");
+    expect(adapter.sent.at(-1)?.text).toContain("Answered");
+  });
+
+  test("codex user input callback buttons are no longer supported", async () => {
+    const { router, adapter } = fixture();
+
+    await router.handle(callbackMessage("ar:q:old:0:0"));
+
+    expect(adapter.edited.at(-1)?.text).toContain("Error: Unknown callback.");
   });
 
   test("codex free text question uses ForceReply and reply is not forwarded as prompt", async () => {
@@ -863,12 +882,13 @@ describe("router", () => {
     });
     const first = adapter.sent.at(-1)!;
 
-    await router.handle(callbackMessage(first.options!.replyMarkup!.inline_keyboard[0]![0]!.callback_data, 7, "cb-first", first.messageId));
+    expect(first.options?.forceReply).toBe(true);
+    await router.handle(textMessage("A", 7, first.messageId));
     expect(agent.responses).toEqual([]);
     const second = adapter.sent.at(-1)!;
     expect(second.text).toContain("Second");
 
-    await router.handle(callbackMessage(second.options!.replyMarkup!.inline_keyboard[0]![0]!.callback_data, 7, "cb-second", second.messageId));
+    await router.handle(textMessage("B", 7, second.messageId));
     expect(agent.responses.at(-1)?.result).toEqual({
       answers: {
         first: { answers: ["A"] },

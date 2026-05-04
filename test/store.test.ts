@@ -23,6 +23,10 @@ describe("store", () => {
     store.upsertWorkspace({ name: "demo", path: "/tmp/demo", createdAt: 1 });
     expect(store.getWorkspace("demo")).toEqual({ name: "demo", path: "/tmp/demo", createdAt: 1 });
     expect(store.listWorkspaces()).toHaveLength(1);
+    store.bindChat(1, "demo");
+    store.deleteWorkspace("demo");
+    expect(store.getWorkspace("demo")).toBeUndefined();
+    expect(store.getBinding(1)).toBeUndefined();
     store.close();
   });
 
@@ -31,6 +35,11 @@ describe("store", () => {
     store.upsertWorkspace({ name: "demo", path: "/tmp/demo", createdAt: 1 });
     store.bindChat(123, "demo", 2);
     expect(store.getBinding(123)).toEqual({ chatId: 123, workspaceName: "demo", updatedAt: 2 });
+    store.clearBinding(123);
+    expect(store.getBinding(123)).toBeUndefined();
+    store.bindChat(123, "demo", 2);
+    store.clearBindingsForWorkspace("demo");
+    expect(store.getBinding(123)).toBeUndefined();
     store.appendTranscript({ chatId: 123, workspaceName: "demo", role: "agent", text: "hello\n", createdAt: 3 });
     expect(store.latestTranscriptEvent(123, "demo", "agent")).toEqual({
       chatId: 123,
@@ -105,6 +114,9 @@ describe("store", () => {
     const store = tempStore();
     store.setConsoleMessageId(1, 101);
     expect(store.getConsoleMessageId(1)).toBe(101);
+    expect(store.getHomeStatusMode(1)).toBe("compact");
+    store.setHomeStatusMode(1, "details");
+    expect(store.getHomeStatusMode(1)).toBe("details");
 
     const first = store.createTask({ chatId: 1, workspaceName: "demo", text: "first", status: "queued", createdAt: 1 });
     const second = store.createTask({ chatId: 1, workspaceName: "demo", text: "second", status: "queued", createdAt: 2 });
