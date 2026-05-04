@@ -107,19 +107,19 @@ Example home view:
 ```text
 Relay Home
 
-● Running
+🟢 Running
 cwd: agent-relay
 Waiting: no
 ```
 
 Inline action buttons:
 
-- `📂 Workspace` opens workspace management. You can select an existing cwd, create one with ForceReply, or delete one after confirmation. Deleting physically removes the directory under `WORKSPACE_ROOT`.
-- `ℹ Status` toggles the current chat between compact and detailed Relay Home modes.
-- `↻` redraws Relay Home.
-- `🛑 Stop` stops the current cwd's Codex session and clears the cwd selection.
+- `📂` opens workspace management. You can select an existing cwd, create one with ForceReply, or delete one after confirmation. Workspace selection buttons keep cwd names visible for clarity; action buttons are emoji-only. Deleting physically removes the directory under `WORKSPACE_ROOT`.
+- `ℹ️` toggles the current chat between compact and detailed Relay Home modes.
+- `🔄` redraws Relay Home.
+- `🛑` stops the current cwd's Codex session and clears the cwd selection.
 - `✅` and `❌` answer approval prompts.
-- `⏮`, `◀`, `▶`, and `⏭` navigate long assistant output pages.
+- `⏮️`, `◀️`, `▶️`, and `⏭️` navigate long assistant output pages.
 
 Codex user-input questions are sent as ForceReply prompts. Codex approval requests keep inline `✅` and `❌` buttons.
 
@@ -148,7 +148,7 @@ If Telegram rejects a menu edit, the relay logs a warning and sends a new messag
 - Long polling subscribes to Telegram `message` and `callback_query` updates. Normal `getUpdates` calls return and immediately start the next request; transient Telegram failures are retried with exponential backoff.
 - cwd names cannot be empty, `.`, `..`, or contain slashes, backslashes, NUL, or control characters.
 - cwd names are resolved under `WORKSPACE_ROOT`; path traversal and absolute names are rejected.
-- `📂 Workspace` discovers existing first-level directories under `WORKSPACE_ROOT`; symlinked directories are ignored.
+- `📂` discovers existing first-level directories under `WORKSPACE_ROOT`; symlinked directories are ignored.
 - The new-cwd form creates the directory and runs `git init` only when the directory does not already exist.
 - Selecting or creating a cwd immediately starts the Codex thread for that `chat + cwd`. If the session is already running, relay reuses it. If SQLite has a stored Codex `thread_id`, relay resumes it first.
 - Deleting a cwd from Workspace management requires a confirmation tap, stops the current chat's session for that cwd, removes the directory, and clears chat bindings that pointed at it.
@@ -167,7 +167,7 @@ codex app-server --listen stdio://
 - Agent output is aggregated per visible interaction segment, flushed after a short quiet period, size/time limit, or `turn/completed`, and usually edits one live Telegram message for the current response.
 - User input, Codex approval prompts, and Codex question prompts close the current output segment before later assistant output is shown.
 - Long Codex output is rendered as a paged Telegram message with emoji-only navigation buttons instead of flooding the chat with continuation messages. While streaming, the live message follows the newest page; after `turn/completed`, it returns to page 1 for easier reading from the top.
-- The `🛑 Stop` inline button sends `turn/interrupt` for the current cwd session and clears the chat's cwd selection.
+- The `🛑` inline button sends `turn/interrupt` for the current cwd session and clears the chat's cwd selection.
 
 ## Logging
 

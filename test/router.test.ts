@@ -282,9 +282,9 @@ describe("router", () => {
     const paged = adapter.sent.at(-1)!;
     expect(adapter.sent).toHaveLength(1);
     expect(paged.text).toMatch(/Page \d+\/\d+$/);
-    expect(paged.options?.replyMarkup?.inline_keyboard[0]?.map((button) => button.text)).toEqual(["⏮", "◀", "▶", "⏭"]);
+    expect(paged.options?.replyMarkup?.inline_keyboard[0]?.map((button) => button.text)).toEqual(["⏮️", "◀️", "▶️", "⏭️"]);
 
-    const previous = paged.options!.replyMarkup!.inline_keyboard[0]!.find((button) => button.text === "◀")!;
+    const previous = paged.options!.replyMarkup!.inline_keyboard[0]!.find((button) => button.text === "◀️")!;
     await router.handle(callbackMessage(previous.callback_data, 7, "cb-page", paged.messageId));
 
     expect(adapter.edited.at(-1)?.options.messageId).toBe(paged.messageId);
@@ -380,7 +380,8 @@ describe("router", () => {
     expect(adapter.sent.at(-1)?.text).toContain("Relay Home");
     expect(adapter.sent.at(-1)?.text).toContain("cwd: none");
     expect(adapter.sent.at(-1)?.options?.entities?.[0]?.type).toBe("bold");
-    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["📂 Workspace", "ℹ Status", "↻"]);
+    expect(adapter.sent.at(-1)?.text).toContain("⚪ Stopped");
+    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["📂", "ℹ️", "🔄"]);
   });
 
   test("/start opens Relay Home", async () => {
@@ -657,7 +658,7 @@ describe("router", () => {
     store.bindChat(1, "first");
 
     await router.handle(callbackMessage("ar:w"));
-    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((candidate) => candidate.text === "○ second");
+    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((candidate) => candidate.text === "▫️ second");
     expect(button?.callback_data).toMatch(/^ar:uh:/);
 
     await router.handle(callbackMessage(button!.callback_data, 7, "cb2", adapter.edited.at(-1)?.options.messageId));
@@ -698,7 +699,7 @@ describe("router", () => {
 
     await router.handle(callbackMessage("ar:w"));
     const deleteButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wd?:"));
-    expect(deleteButton?.text).toBe("🗑");
+    expect(deleteButton?.text).toBe("🗑️");
 
     await router.handle(callbackMessage(deleteButton!.callback_data, 7, "cb-delete?", adapter.edited.at(-1)?.options.messageId));
     expect(existsSync(path)).toBe(true);
@@ -732,7 +733,7 @@ describe("router", () => {
     mkdirSync(join(root, workspaceName));
 
     await router.handle(callbackMessage("ar:w"));
-    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((candidate) => candidate.text.startsWith("○ 客户 repo"));
+    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((candidate) => candidate.text.startsWith("▫️ 客户 repo"));
     expect(button?.callback_data).toMatch(/^ar:uh:/);
 
     await router.handle(callbackMessage(button!.callback_data, 7, "cb2"));

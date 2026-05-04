@@ -35,6 +35,22 @@ const CODEX_PROMPT_TTL_MS = 30 * 60 * 1000;
 const PAGE_MAX_CHARS = 3200;
 const PAGED_OUTPUT_TTL_MS = 24 * 60 * 60 * 1000;
 const LIST_PAGE_SIZE = 8;
+const UI_BUTTON = {
+  workspace: "📂",
+  status: "ℹ️",
+  refresh: "🔄",
+  stop: "🛑",
+  create: "➕",
+  delete: "🗑️",
+  approve: "✅",
+  deny: "❌",
+  firstPage: "⏮️",
+  previousPage: "◀️",
+  nextPage: "▶️",
+  lastPage: "⏭️",
+  selected: "✅",
+  unselected: "▫️",
+} as const;
 
 export interface RouterDeps {
   config: AppConfig;
@@ -221,7 +237,7 @@ export class MessageRouter {
     if (!message.data.startsWith(CALLBACK_PREFIX)) throw new Error("Unknown callback.");
     const payload = message.data.slice(CALLBACK_PREFIX.length);
     if (this.isStaleConsoleCallback(message, payload)) {
-      await this.renderCallbackPage(message, messageWithTitle("Stale Relay Home.", "Open the latest Relay Home."), { inline_keyboard: [[{ text: "🔄 Open latest", callback_data: "ar:home" }]] });
+      await this.renderCallbackPage(message, messageWithTitle("Stale Relay Home.", "Open the latest Relay Home."), { inline_keyboard: [[{ text: UI_BUTTON.refresh, callback_data: "ar:home" }]] });
       return;
     }
 
@@ -1076,10 +1092,10 @@ function pagedOutputKeyboard(token: string, pageIndex: number, totalPages: numbe
   if (totalPages <= 1) return { inline_keyboard: [] };
   return {
     inline_keyboard: [[
-      { text: "⏮", callback_data: `ar:p:${token}:0` },
-      { text: "◀", callback_data: `ar:p:${token}:${Math.max(0, pageIndex - 1)}` },
-      { text: "▶", callback_data: `ar:p:${token}:${Math.min(totalPages - 1, pageIndex + 1)}` },
-      { text: "⏭", callback_data: `ar:p:${token}:${totalPages - 1}` },
+      { text: UI_BUTTON.firstPage, callback_data: `ar:p:${token}:0` },
+      { text: UI_BUTTON.previousPage, callback_data: `ar:p:${token}:${Math.max(0, pageIndex - 1)}` },
+      { text: UI_BUTTON.nextPage, callback_data: `ar:p:${token}:${Math.min(totalPages - 1, pageIndex + 1)}` },
+      { text: UI_BUTTON.lastPage, callback_data: `ar:p:${token}:${totalPages - 1}` },
     ]],
   };
 }
@@ -1187,8 +1203,8 @@ function formatApprovalMessage(title: string, body: string): RenderedTelegramTex
 function approvalKeyboard(token: string): InlineKeyboardMarkup {
   return {
     inline_keyboard: [[
-      { text: "✅", callback_data: `ar:a:${token}:y` },
-      { text: "❌", callback_data: `ar:a:${token}:n` },
+      { text: UI_BUTTON.approve, callback_data: `ar:a:${token}:y` },
+      { text: UI_BUTTON.deny, callback_data: `ar:a:${token}:n` },
     ]],
   };
 }
@@ -1261,7 +1277,7 @@ function formatStatusMessage(status: StatusView): RenderedTelegramText {
   if (!status.workspaceName || !status.workspacePath) {
     return renderTelegramText([
       bold("Relay Home"),
-      "\n\n● Stopped",
+      `\n\n${statusIcon(status)} ${statusLabel(status)}`,
       "\ncwd: none",
       "\nWaiting: no",
     ]);
@@ -1269,7 +1285,7 @@ function formatStatusMessage(status: StatusView): RenderedTelegramText {
   const parts: TelegramTextPart[] = [
     bold("Relay Home"),
     "\n\n",
-    statusDot(status),
+    statusIcon(status),
     " ",
     statusLabel(status),
     "\ncwd: ",
@@ -1285,6 +1301,10 @@ function formatDetailsMessage(status: StatusView): RenderedTelegramText {
   if (!status.workspaceName || !status.workspacePath) return formatStatusMessage(status);
   const parts: TelegramTextPart[] = [
     bold("Relay Home"),
+    "\n\n",
+    statusIcon(status),
+    " ",
+    statusLabel(status),
     "\n\ncwd: ",
     code(status.workspaceName),
     "\nPath: ",
@@ -1318,10 +1338,10 @@ function formatDetailsMessage(status: StatusView): RenderedTelegramText {
   return renderTelegramText(parts);
 }
 
-function statusDot(status: StatusView): string {
-  if (status.recentError) return "●";
-  if (status.waitingForApproval || status.waitingForUserInput) return "●";
-  return status.running ? "●" : "●";
+function statusIcon(status: StatusView): string {
+  if (status.recentError) return "🔴";
+  if (status.waitingForApproval || status.waitingForUserInput) return "🟡";
+  return status.running ? "🟢" : "⚪";
 }
 
 function statusLabel(status: StatusView): string {
@@ -1387,12 +1407,12 @@ function formatWorkspacesMessage(workspaces: Array<{ name: string; selected: boo
   if (workspaces.length === 0) {
     return renderTelegramText([
       bold("Workspace"),
-      "\n\nNo cwd directories found.\nUse the new cwd button to create one.",
+      `\n\nNo cwd directories found.\nUse ${UI_BUTTON.create} to create one.`,
     ]);
   }
-  const parts: TelegramTextPart[] = [bold("Workspace"), `\n\nPage ${pageIndex + 1}/${totalPages}`];
+  const parts: TelegramTextPart[] = [bold("Workspace"), `\n\nPage ${pageIndex + 1}/${totalPages}\n`];
   for (const workspace of workspaces) {
-    parts.push("\n", workspace.selected ? "● " : "○ ", code(workspace.name));
+    parts.push("\n", workspace.selected ? `${UI_BUTTON.selected} ` : `${UI_BUTTON.unselected} `, code(workspace.name));
   }
   return renderTelegramText(parts);
 }
@@ -1400,12 +1420,12 @@ function formatWorkspacesMessage(workspaces: Array<{ name: string; selected: boo
 function consoleKeyboard(status: { workspaceName?: string; running?: boolean }): InlineKeyboardMarkup {
   const rows: InlineKeyboardMarkup["inline_keyboard"] = [];
   rows.push([
-    { text: "📂 Workspace", callback_data: "ar:w" },
-    { text: "ℹ Status", callback_data: "ar:status" },
-    { text: "↻", callback_data: "ar:s" },
+    { text: UI_BUTTON.workspace, callback_data: "ar:w" },
+    { text: UI_BUTTON.status, callback_data: "ar:status" },
+    { text: UI_BUTTON.refresh, callback_data: "ar:s" },
   ]);
   if (status.workspaceName) {
-    rows.push([{ text: "🛑 Stop", callback_data: "ar:stop" }]);
+    rows.push([{ text: UI_BUTTON.stop, callback_data: "ar:stop" }]);
   }
   return {
     inline_keyboard: rows,
@@ -1415,15 +1435,15 @@ function consoleKeyboard(status: { workspaceName?: string; running?: boolean }):
 function workspacesKeyboard(workspaces: WorkspaceRecord[], selected: string | undefined, pageIndex: number, totalPages: number): InlineKeyboardMarkup {
   const rows = workspaces.map((workspace) => [
     {
-      text: `${workspace.name === selected ? "● " : "○ "}${buttonLabel(workspace.name)}`,
+      text: `${workspace.name === selected ? `${UI_BUTTON.selected} ` : `${UI_BUTTON.unselected} `}${buttonLabel(workspace.name)}`,
       callback_data: workspaceCallbackData(workspace.name),
     },
-    { text: "🗑", callback_data: deleteWorkspaceCallbackData(workspace.name, false) },
+    { text: UI_BUTTON.delete, callback_data: deleteWorkspaceCallbackData(workspace.name, false) },
   ]);
   if (totalPages > 1) {
     rows.push([
-      { text: "◀", callback_data: `ar:wl:${Math.max(0, pageIndex - 1)}` },
-      { text: "▶", callback_data: `ar:wl:${Math.min(totalPages - 1, pageIndex + 1)}` },
+      { text: UI_BUTTON.previousPage, callback_data: `ar:wl:${Math.max(0, pageIndex - 1)}` },
+      { text: UI_BUTTON.nextPage, callback_data: `ar:wl:${Math.min(totalPages - 1, pageIndex + 1)}` },
     ]);
   }
 
@@ -1431,8 +1451,8 @@ function workspacesKeyboard(workspaces: WorkspaceRecord[], selected: string | un
     inline_keyboard: [
       ...rows,
       [
-        { text: "➕ cwd", callback_data: "ar:n" },
-        { text: "↻", callback_data: "ar:w" },
+        { text: UI_BUTTON.create, callback_data: "ar:n" },
+        { text: UI_BUTTON.refresh, callback_data: "ar:w" },
       ],
     ],
   };
@@ -1481,8 +1501,8 @@ function deleteWorkspaceCallbackData(name: string, confirmed: boolean): string {
 function deleteWorkspaceConfirmKeyboard(name: string): InlineKeyboardMarkup {
   return {
     inline_keyboard: [[
-      { text: "🗑 Delete", callback_data: deleteWorkspaceCallbackData(name, true) },
-      { text: "⬅ Workspace", callback_data: "ar:w" },
+      { text: UI_BUTTON.delete, callback_data: deleteWorkspaceCallbackData(name, true) },
+      { text: UI_BUTTON.workspace, callback_data: "ar:w" },
     ]],
   };
 }
