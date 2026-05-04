@@ -45,6 +45,25 @@ export interface SendMessageResult {
   messageId?: number;
 }
 
+export interface SendPhotoOptions {
+  caption?: string;
+  replyToMessageId?: number;
+}
+
+export interface TelegramInboundPhoto {
+  fileId: string;
+  fileUniqueId?: string;
+  width: number;
+  height: number;
+  fileSize?: number;
+}
+
+export interface TelegramDownloadedFile {
+  bytes: ArrayBuffer;
+  filePath?: string;
+  fileSize?: number;
+}
+
 export interface TextInboundMessage {
   kind: "message";
   id: string;
@@ -52,6 +71,19 @@ export interface TextInboundMessage {
   chatId: ChatId;
   userId: UserId;
   text: string;
+  replyToMessageId?: number;
+  date?: number;
+}
+
+export interface MediaInboundMessage {
+  kind: "media";
+  id: string;
+  messageId: number;
+  chatId: ChatId;
+  userId: UserId;
+  caption?: string;
+  photos: TelegramInboundPhoto[];
+  mediaGroupId?: string;
   replyToMessageId?: number;
   date?: number;
 }
@@ -67,15 +99,17 @@ export interface CallbackInboundMessage {
   date?: number;
 }
 
-export type InboundMessage = TextInboundMessage | CallbackInboundMessage;
+export type InboundMessage = TextInboundMessage | MediaInboundMessage | CallbackInboundMessage;
 
 export interface IMAdapter {
   start(onMessage: (message: InboundMessage) => Promise<void>): Promise<void>;
   sendMessage(chatId: ChatId, text: string, options?: SendMessageOptions): Promise<SendMessageResult>;
+  sendPhoto(chatId: ChatId, photo: Blob, options?: SendPhotoOptions): Promise<SendMessageResult>;
   editMessageText(chatId: ChatId, text: string, options: EditMessageTextOptions): Promise<void>;
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void>;
   sendChatAction(chatId: ChatId, action?: "typing"): Promise<void>;
   setMessageReaction(chatId: ChatId, messageId: number, emoji?: string): Promise<void>;
+  downloadFile(fileId: string): Promise<TelegramDownloadedFile>;
 }
 
 export type AgentOutputHandler = (event: AgentOutputEvent) => void | Promise<void>;
@@ -83,6 +117,7 @@ export type AgentExitHandler = (event: AgentExitEvent) => void | Promise<void>;
 
 export type AgentOutputEvent =
   | AgentMessageOutputEvent
+  | AgentImageOutputEvent
   | AgentTurnCompletedEvent
   | AgentUserInputRequestEvent
   | AgentApprovalRequestEvent;
@@ -91,6 +126,17 @@ export interface AgentMessageOutputEvent {
   type?: "message";
   sessionKey: string;
   chunk: string;
+  turnId?: string;
+  itemId?: string;
+}
+
+export interface AgentImageOutputEvent {
+  type: "image";
+  sessionKey: string;
+  path?: string;
+  data?: string;
+  mimeType?: string;
+  caption?: string;
   turnId?: string;
   itemId?: string;
 }
@@ -198,9 +244,20 @@ export interface AgentDriver {
 
 export interface AgentSendOptions {
   collaborationMode?: AgentCollaborationMode;
+  images?: AgentImageInput[];
 }
 
 export type AgentCollaborationMode = "default" | "plan";
+
+export interface AgentImageInput {
+  path: string;
+  caption?: string;
+}
+
+export interface AgentTaskInput {
+  text: string;
+  images?: AgentImageInput[];
+}
 
 export interface AgentSendResult {
   turnId?: string;
@@ -310,6 +367,7 @@ export interface RelayTask {
   chatId: ChatId;
   workspaceName: string;
   text: string;
+  inputJson?: string;
   status: TaskStatus;
   createdAt: number;
   updatedAt: number;

@@ -60,6 +60,7 @@ The relay loads `.env` first, then overlays shell environment variables, so expo
 | `TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS` | no | `3` | Retry attempts for non-polling Telegram API calls. |
 | `TELEGRAM_RETRY_INITIAL_DELAY_MS` | no | `500` | Initial retry backoff for transient Telegram API failures. |
 | `TELEGRAM_RETRY_MAX_DELAY_MS` | no | `10000` | Maximum Telegram retry backoff. |
+| `TELEGRAM_IMAGE_MAX_BYTES` | no | `20971520` | Maximum Telegram photo download size in bytes. |
 | `SQLITE_PATH` | no | `.data/agent-relay.sqlite` | SQLite database path. Parent directories are created automatically. |
 | `CODEX_BIN` | no | `codex` | Codex CLI executable. |
 | `CODEX_SANDBOX` | no | `workspace-write` | Sandbox policy passed to Codex thread start, resume, and fork calls. |
@@ -82,7 +83,7 @@ Relay Home actions:
 - Refresh: redraw the current Relay Home message.
 - Stop: interrupt the current cwd session and clear the chat's cwd selection.
 
-After a cwd is selected, ordinary Telegram messages are sent to Codex. If Codex is idle, the message starts a new turn. If a Codex turn is active, the message is sent as steering input for that turn. If no cwd is selected, ordinary text opens Relay Home instead.
+After a cwd is selected, ordinary Telegram messages are sent to Codex. Telegram photo messages are downloaded into the selected cwd and sent to Codex as image inputs; photo captions become the prompt, and photos without captions use a default inspection prompt. Telegram file/document attachments are not supported. If Codex is idle, the message starts a new turn. If a Codex turn is active, the message is sent as steering input for that turn. If no cwd is selected, ordinary text or photos open Relay Home instead.
 
 Relay-handled slash commands after a cwd is selected:
 
@@ -108,6 +109,14 @@ Codex questions are shown as ForceReply prompts. Multi-question requests are sen
 
 Assistant output is rendered as Telegram text entities rather than HTML parse mode. Common Markdown is supported, including headings, lists, task lists, blockquotes, emphasis, inline code, code blocks, and HTTP/HTTPS links. Long output is stored and shown as paged Telegram messages.
 
+## Image Support
+
+Telegram photo messages are supported after a cwd is selected. The relay downloads the largest Telegram photo variant, stores it in the selected workspace, and sends the local image path to Codex as a `localImage` input. Photo captions are used as the Codex prompt; photos without captions use `Please inspect the attached image(s).`
+
+Telegram file/document attachments are intentionally not supported, even when the document MIME type is an image. Codex image outputs are sent back with Telegram `sendPhoto`; the relay does not use `sendDocument` as a fallback.
+
+Stored media lives under `.agent-relay/media/incoming` and `.agent-relay/media/outgoing` inside the selected workspace. The relay automatically writes `.agent-relay/.gitignore` with `*`, so downloaded and generated images do not appear in that workspace's Git status. `TELEGRAM_IMAGE_MAX_BYTES` limits photo downloads before they are sent to Codex.
+
 ## Runtime Notes
 
 - Authorization requires `TELEGRAM_ALLOWED_USER_IDS`; if `TELEGRAM_ALLOWED_CHAT_IDS` is set, both the user and chat must match.
@@ -119,6 +128,7 @@ Assistant output is rendered as Telegram text entities rather than HTML parse mo
 - Workspace discovery uses real first-level directories and ignores symlinked directories.
 - Creating a missing workspace makes the directory and runs `git init`.
 - Deleting a workspace physically removes that directory under `WORKSPACE_ROOT` and clears chat bindings that pointed at it.
+- Telegram photos and Codex-generated images are stored under `.agent-relay/media` inside the selected workspace. The relay writes `.agent-relay/.gitignore` with `*` so media does not appear in the workspace's Git status.
 - The relay starts one Codex app-server process and creates or resumes one Codex thread per `chat + cwd`.
 - SQLite stores workspaces, chat bindings, Codex thread IDs, Plan mode state, Relay Home UI state, prompt/task state, transcript events, approval metadata, and paged assistant output.
 - Runtime logs go to stdout. `debug` logs include raw Telegram messages, Codex input text, and Codex output chunks.

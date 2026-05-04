@@ -119,9 +119,17 @@ describe("store", () => {
     expect(store.getHomeStatusMode(1)).toBe("details");
 
     const first = store.createTask({ chatId: 1, workspaceName: "demo", text: "first", status: "queued", createdAt: 1 });
-    const second = store.createTask({ chatId: 1, workspaceName: "demo", text: "second", status: "queued", createdAt: 2 });
+    const second = store.createTask({
+      chatId: 1,
+      workspaceName: "demo",
+      text: "second",
+      input: { text: "second", images: [{ path: "/tmp/image.jpg" }] },
+      status: "queued",
+      createdAt: 2,
+    });
 
     expect(store.nextQueuedTask(1, "demo")?.id).toBe(first.id);
+    expect(store.getTask(second.id)?.inputJson).toBe(JSON.stringify({ text: "second", images: [{ path: "/tmp/image.jpg" }] }));
     expect(store.countTasks(1, "demo", ["queued"])).toBe(2);
     store.updateTask(first.id, { status: "running", turnId: "turn-1", statusMessageId: 501 });
     expect(store.activeTask(1, "demo")?.turnId).toBe("turn-1");

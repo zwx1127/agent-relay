@@ -209,6 +209,51 @@ describe("CodexDriver app-server protocol", () => {
     await driver.stop(status.sessionKey);
   });
 
+  test("sends local images as Codex turn input", async () => {
+    const fake = fakeCodexBin();
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "inspect", { images: [{ path: "/tmp/image.jpg" }] });
+
+    const turnStart = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((message) => message.method === "turn/start");
+    expect(turnStart.params.input).toEqual([
+      { type: "text", text: "inspect", text_elements: [] },
+      { type: "localImage", path: "/tmp/image.jpg" },
+    ]);
+    await driver.stop(status.sessionKey);
+  });
+
+  test("emits image generation outputs", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => {
+        events.push(event);
+      },
+      () => undefined,
+    );
+
+    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "image output");
+    await sleep(100);
+
+    expect(events).toContainEqual({
+      type: "image",
+      sessionKey: "1:demo",
+      data: "aW1hZ2U=",
+      caption: "revised",
+      turnId: "turn-1",
+      itemId: "img1",
+    });
+    await driver.stop(status.sessionKey);
+  });
+
   test("updates session status from app-server metadata notifications", async () => {
     const fake = fakeCodexBin();
     const driver = new CodexDriver(
@@ -270,6 +315,9 @@ rl.on("line", (line) => {
     } else if (inputText === "plan please") {
       send({ method: "item/plan/delta", params: { threadId: "thread-1", turnId, itemId: "p1", delta: "Plan item" } });
       send({ method: "item/completed", params: { threadId: "thread-1", turnId, item: { type: "exitedReviewMode", id: "r1", review: "Review summary" } } });
+      send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: turnId, status: "completed", items: [] } } });
+    } else if (inputText === "image output") {
+      send({ method: "rawResponseItem/completed", params: { threadId: "thread-1", turnId, item: { type: "image_generation_call", id: "img1", status: "completed", revised_prompt: "revised", result: "aW1hZ2U=" } } });
       send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: turnId, status: "completed", items: [] } } });
     } else if (inputText !== "slow active") {
       send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId, itemId: "m1", delta: "hello " } });

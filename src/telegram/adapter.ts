@@ -1,4 +1,4 @@
-import type { ChatId, EditMessageTextOptions, IMAdapter, InboundMessage, SendMessageOptions } from "../types.ts";
+import type { ChatId, EditMessageTextOptions, IMAdapter, InboundMessage, SendMessageOptions, SendPhotoOptions, TelegramDownloadedFile } from "../types.ts";
 import { splitForTelegram, splitHtmlForTelegram, splitRenderedForTelegram } from "../rendering/telegram-text.ts";
 import { noopLogger, type Logger } from "../logger.ts";
 
@@ -43,6 +43,15 @@ interface TelegramUpdate {
     message_id: number;
     date: number;
     text?: string;
+    caption?: string;
+    media_group_id?: string;
+    photo?: Array<{
+      file_id: string;
+      file_unique_id?: string;
+      width: number;
+      height: number;
+      file_size?: number;
+    }>;
     chat: { id: number };
     from?: { id: number };
     reply_to_message?: { message_id: number };
@@ -120,20 +129,21 @@ export class TelegramAdapter implements IMAdapter {
             update_id: update.update_id,
             has_message: Boolean(update.message),
             has_text: Boolean(update.message?.text),
+            has_photo: Boolean(update.message?.photo?.length),
             has_from: Boolean(update.message?.from || update.callback_query?.from),
             has_callback_query: Boolean(update.callback_query),
             has_callback_data: Boolean(update.callback_query?.data),
           });
           continue;
         }
-        this.logger.debug(inbound.kind === "message" ? "telegram.message_received" : "telegram.callback_query_received", {
+        this.logger.debug(inbound.kind === "message" ? "telegram.message_received" : inbound.kind === "media" ? "telegram.media_received" : "telegram.callback_query_received", {
           update_id: update.update_id,
           message_id: inbound.kind === "message" ? inbound.id : inbound.messageId,
           chat_id: inbound.chatId,
           user_id: inbound.userId,
           kind: inbound.kind,
-          text_len: inbound.kind === "message" ? inbound.text.length : inbound.data.length,
-          message_text: inbound.kind === "message" ? inbound.text : inbound.data,
+          text_len: inbound.kind === "message" ? inbound.text.length : inbound.kind === "media" ? inbound.caption?.length ?? 0 : inbound.data.length,
+          message_text: inbound.kind === "message" ? inbound.text : inbound.kind === "media" ? inbound.caption ?? "" : inbound.data,
         });
         await onMessage(inbound);
       }
@@ -185,6 +195,21 @@ export class TelegramAdapter implements IMAdapter {
     return { messageId: lastMessageId };
   }
 
+  async sendPhoto(chatId: ChatId, photo: Blob, options: SendPhotoOptions = {}): Promise<{ messageId?: number }> {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("photo", photo, "image.jpg");
+    if (options.caption) form.append("caption", options.caption);
+    if (options.replyToMessageId) {
+      form.append("reply_parameters", JSON.stringify({
+        message_id: options.replyToMessageId,
+        allow_sending_without_reply: true,
+      }));
+    }
+    const result = await this.request<{ message_id?: number }>("sendPhoto", form);
+    return { messageId: result?.message_id };
+  }
+
   async editMessageText(chatId: ChatId, text: string, options: EditMessageTextOptions): Promise<void> {
     try {
       await this.request("editMessageText", {
@@ -233,6 +258,20 @@ export class TelegramAdapter implements IMAdapter {
     });
   }
 
+  async downloadFile(fileId: string): Promise<TelegramDownloadedFile> {
+    const file = await this.request<{ file_path?: string; file_size?: number }>("getFile", { file_id: fileId });
+    if (!file?.file_path) throw new Error("Telegram getFile did not return a file path.");
+    const response = await this.fetchImpl(`${this.apiBase.replace("/bot", "/file/bot")}/${file.file_path}`);
+    if (!response.ok) {
+      throw new TelegramApiError("downloadFile", response.status, response.statusText || "download failed", undefined);
+    }
+    return {
+      bytes: await response.arrayBuffer(),
+      filePath: file.file_path,
+      fileSize: typeof file.file_size === "number" ? file.file_size : undefined,
+    };
+  }
+
   private toInboundMessage(update: TelegramUpdate): InboundMessage | undefined {
     const message = update.message;
     if (message?.text && message.from) {
@@ -243,6 +282,27 @@ export class TelegramAdapter implements IMAdapter {
         chatId: message.chat.id,
         userId: message.from.id,
         text: message.text,
+        ...(message.reply_to_message ? { replyToMessageId: message.reply_to_message.message_id } : {}),
+        date: message.date,
+      };
+    }
+
+    if (message?.photo?.length && message.from) {
+      return {
+        kind: "media",
+        id: String(message.message_id),
+        messageId: message.message_id,
+        chatId: message.chat.id,
+        userId: message.from.id,
+        ...(message.caption ? { caption: message.caption } : {}),
+        photos: message.photo.map((photo) => ({
+          fileId: photo.file_id,
+          ...(photo.file_unique_id ? { fileUniqueId: photo.file_unique_id } : {}),
+          width: photo.width,
+          height: photo.height,
+          ...(typeof photo.file_size === "number" ? { fileSize: photo.file_size } : {}),
+        })),
+        ...(message.media_group_id ? { mediaGroupId: message.media_group_id } : {}),
         ...(message.reply_to_message ? { replyToMessageId: message.reply_to_message.message_id } : {}),
         date: message.date,
       };
@@ -303,10 +363,11 @@ export class TelegramAdapter implements IMAdapter {
   }
 
   private async requestOnce<T>(method: string, body: unknown): Promise<T> {
+    const isForm = body instanceof FormData;
     const response = await this.fetchImpl(`${this.apiBase}/${method}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      ...(isForm ? {} : { headers: { "content-type": "application/json" } }),
+      body: isForm ? body : JSON.stringify(body),
     });
     let payload: TelegramApiResponse<T> | undefined;
     try {

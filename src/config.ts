@@ -10,6 +10,7 @@ export interface AppConfig {
   telegramRequestRetryMaxAttempts: number;
   telegramRetryInitialDelayMs: number;
   telegramRetryMaxDelayMs: number;
+  telegramImageMaxBytes: number;
   workspaceRoot: string;
   sqlitePath: string;
   codexBin: string;
@@ -123,6 +124,7 @@ export function loadConfig(env?: Env): AppConfig {
     telegramRequestRetryMaxAttempts: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS", 3),
     telegramRetryInitialDelayMs: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_RETRY_INITIAL_DELAY_MS", 500),
     telegramRetryMaxDelayMs: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_RETRY_MAX_DELAY_MS", 10000),
+    telegramImageMaxBytes: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_IMAGE_MAX_BYTES", 20 * 1024 * 1024),
     workspaceRoot: requireEnv(effectiveEnv, "WORKSPACE_ROOT"),
     sqlitePath: effectiveEnv.SQLITE_PATH?.trim() || ".data/agent-relay.sqlite",
     codexBin: effectiveEnv.CODEX_BIN?.trim() || "codex",

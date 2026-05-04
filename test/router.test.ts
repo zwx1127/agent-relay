@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sessionKey } from "../src/agent.ts";
@@ -11,10 +11,12 @@ import type { AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSu
 
 class FakeAdapter {
   sent: Array<{ chatId: ChatId; text: string; options?: SendMessageOptions; messageId?: number }> = [];
+  photos: Array<{ chatId: ChatId; photo: Blob; options?: unknown; messageId?: number }> = [];
   edited: Array<{ chatId: ChatId; text: string; options: EditMessageTextOptions }> = [];
   answered: Array<{ callbackQueryId: string; text?: string }> = [];
   chatActions: Array<{ chatId: ChatId; action?: "typing" }> = [];
   reactions: Array<{ chatId: ChatId; messageId: number; emoji?: string }> = [];
+  downloads = new Map<string, ArrayBuffer>();
   nextMessageId = 100;
   sendMessageDelayMs = 0;
   failReaction?: Error;
@@ -24,6 +26,19 @@ class FakeAdapter {
     const messageId = this.nextMessageId++;
     this.sent.push({ chatId, text, options, messageId });
     return { messageId };
+  }
+
+  async sendPhoto(chatId: ChatId, photo: Blob, options?: unknown): Promise<{ messageId?: number }> {
+    const messageId = this.nextMessageId++;
+    this.photos.push({ chatId, photo, options, messageId });
+    return { messageId };
+  }
+
+  async downloadFile(fileId: string): Promise<{ bytes: ArrayBuffer; filePath?: string; fileSize?: number }> {
+    return {
+      bytes: this.downloads.get(fileId) ?? new TextEncoder().encode("image").buffer,
+      filePath: "photos/image.jpg",
+    };
   }
 
   async editMessageText(chatId: ChatId, text: string, options: EditMessageTextOptions): Promise<void> {
@@ -149,6 +164,7 @@ function fixture(logLevel: LogLevel = "info"): { router: MessageRouter; store: S
     telegramRequestRetryMaxAttempts: 3,
     telegramRetryInitialDelayMs: 500,
     telegramRetryMaxDelayMs: 10000,
+    telegramImageMaxBytes: 20 * 1024 * 1024,
     workspaceRoot: root,
     sqlitePath: join(data, "db.sqlite"),
     codexBin: "codex",
@@ -800,6 +816,57 @@ describe("router", () => {
     ]);
   });
 
+  test("photo prompt is saved under relay media and sent to agent", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    adapter.downloads.set("photo-large", new Uint8Array([1, 2, 3]).buffer);
+
+    await router.handle(mediaMessage("inspect this"));
+
+    expect(agent.sent).toHaveLength(1);
+    expect(agent.sent[0]?.key).toBe("1:demo");
+    expect(agent.sent[0]?.text).toBe("inspect this");
+    const imagePath = agent.sent[0]?.options?.images?.[0]?.path;
+    expect(imagePath).toContain(join(path, ".agent-relay", "media", "incoming"));
+    expect(existsSync(imagePath!)).toBe(true);
+    expect(readFileSync(join(path, ".agent-relay", ".gitignore"), "utf8")).toBe("*\n");
+    expect(agent.sent[0]?.options?.images?.[0]?.caption).toBe("inspect this");
+  });
+
+  test("photo prompt without caption uses default image prompt", async () => {
+    const { router, store, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await router.handle(mediaMessage());
+
+    expect(agent.sent[0]?.text).toBe("Please inspect the attached image(s).");
+    expect(agent.sent[0]?.options?.images).toHaveLength(1);
+  });
+
+  test("codex image output is sent as photo and copied to outgoing media", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    await router.handle(textMessage("make image"));
+    const generated = join(path, "generated.png");
+    writeFileSync(generated, new Uint8Array([1, 2, 3]));
+
+    await router.handleAgentOutput({ type: "image", sessionKey: "1:demo", path: generated, caption: "result" });
+
+    expect(adapter.photos).toHaveLength(1);
+    const outgoingDayDirs = readdirSync(join(path, ".agent-relay", "media", "outgoing"));
+    expect(outgoingDayDirs).toHaveLength(1);
+    expect(readFileSync(join(path, ".agent-relay", ".gitignore"), "utf8")).toBe("*\n");
+  });
+
   test("backlog callback is no longer supported", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
@@ -1163,6 +1230,21 @@ describe("router", () => {
 
 function textMessage(text: string, userId = 7, replyToMessageId?: number) {
   return { kind: "message" as const, id: "1", messageId: 1, chatId: 1, userId, text, replyToMessageId };
+}
+
+function mediaMessage(caption?: string, userId = 7) {
+  return {
+    kind: "media" as const,
+    id: "1",
+    messageId: 1,
+    chatId: 1,
+    userId,
+    ...(caption ? { caption } : {}),
+    photos: [
+      { fileId: "photo-small", width: 10, height: 10, fileSize: 10 },
+      { fileId: "photo-large", fileUniqueId: "unique-large", width: 100, height: 100, fileSize: 100 },
+    ],
+  };
 }
 
 function callbackMessage(data: string, userId = 7, callbackQueryId = "cb1", messageId = 42) {

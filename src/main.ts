@@ -50,6 +50,7 @@ export async function main(): Promise<void> {
     telegram_request_retry_max_attempts: config.telegramRequestRetryMaxAttempts,
     telegram_retry_initial_delay_ms: config.telegramRetryInitialDelayMs,
     telegram_retry_max_delay_ms: config.telegramRetryMaxDelayMs,
+    telegram_image_max_bytes: config.telegramImageMaxBytes,
     allowed_user_count: config.telegramAllowedUserIds.size,
     allowed_chat_count: config.telegramAllowedChatIds?.size ?? 0,
   });

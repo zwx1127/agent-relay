@@ -25,6 +25,64 @@ describe("telegram adapter", () => {
     expect(received).toEqual([{ kind: "message", id: "9", messageId: 9, chatId: 2, userId: 3, text: "hi", date: 1 }]);
   });
 
+  test("routes long polling photo messages", async () => {
+    let calls = 0;
+    const adapter = new TelegramAdapter("token", async () => {
+      calls += 1;
+      return Response.json({
+        ok: true,
+        result: calls === 2
+          ? [{
+            update_id: 5,
+            message: {
+              message_id: 9,
+              date: 1,
+              caption: "inspect",
+              media_group_id: "album-1",
+              chat: { id: 2 },
+              from: { id: 3 },
+              photo: [
+                { file_id: "small", width: 10, height: 10 },
+                { file_id: "large", file_unique_id: "unique", width: 100, height: 100, file_size: 123 },
+              ],
+            },
+          }]
+          : [],
+      });
+    });
+
+    const received: unknown[] = [];
+    await adapter.start(async (message) => {
+      received.push(message);
+      adapter.stop();
+    });
+
+    expect(received).toEqual([{
+      kind: "media",
+      id: "9",
+      messageId: 9,
+      chatId: 2,
+      userId: 3,
+      caption: "inspect",
+      mediaGroupId: "album-1",
+      photos: [
+        { fileId: "small", width: 10, height: 10 },
+        { fileId: "large", fileUniqueId: "unique", width: 100, height: 100, fileSize: 123 },
+      ],
+      date: 1,
+    }]);
+  });
+
+  test("ignores image documents", async () => {
+    const adapter = new TelegramAdapter("token", async () => Response.json({ ok: true, result: [] }));
+    const inbound = (adapter as any).toInboundMessage({
+      update_id: 5,
+      message: { message_id: 9, date: 1, chat: { id: 2 }, from: { id: 3 }, document: { file_id: "doc", mime_type: "image/png" } },
+    });
+
+    expect(inbound).toBeUndefined();
+  });
+
   test("skips pending messages before polling", async () => {
     const requestBodies: unknown[] = [];
     let calls = 0;
@@ -270,6 +328,47 @@ describe("telegram adapter", () => {
       ],
       reply_markup: { force_reply: true, selective: true },
     });
+  });
+
+  test("downloads Telegram files", async () => {
+    const requests: Array<{ url: string; body?: unknown }> = [];
+    const adapter = new TelegramAdapter("token", async (url, init) => {
+      requests.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      if (String(url).includes("/getFile")) {
+        return Response.json({ ok: true, result: { file_path: "photos/image.jpg", file_size: 3 } });
+      }
+      return new Response(new Uint8Array([1, 2, 3]));
+    });
+
+    const file = await adapter.downloadFile("abc");
+
+    expect(file.filePath).toBe("photos/image.jpg");
+    expect(file.fileSize).toBe(3);
+    expect([...new Uint8Array(file.bytes)]).toEqual([1, 2, 3]);
+    expect(requests).toEqual([
+      { url: "https://api.telegram.org/bottoken/getFile", body: { file_id: "abc" } },
+      { url: "https://api.telegram.org/file/bottoken/photos/image.jpg", body: undefined },
+    ]);
+  });
+
+  test("sends photos as multipart", async () => {
+    const requests: Array<{ method: string; body: FormData }> = [];
+    const adapter = new TelegramAdapter("token", async (url, init) => {
+      requests.push({ method: String(url).split("/").at(-1) || "", body: init?.body as FormData });
+      return Response.json({ ok: true, result: { message_id: 12 } });
+    });
+
+    const result = await adapter.sendPhoto(1, new Blob([new Uint8Array([1, 2, 3])]), {
+      caption: "caption",
+      replyToMessageId: 99,
+    });
+
+    expect(result).toEqual({ messageId: 12 });
+    expect(requests[0]?.method).toBe("sendPhoto");
+    expect(requests[0]?.body.get("chat_id")).toBe("1");
+    expect(requests[0]?.body.get("caption")).toBe("caption");
+    expect(requests[0]?.body.get("reply_parameters")).toBe(JSON.stringify({ message_id: 99, allow_sending_without_reply: true }));
+    expect(requests[0]?.body.get("photo")).toBeInstanceOf(Blob);
   });
 
   test("sends reply parameters only on the first outbound chunk", async () => {

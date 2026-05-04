@@ -6,6 +6,7 @@ import type {
   AgentBuiltinCommand,
   AgentBuiltinResult,
   AgentSendOptions,
+  AgentImageInput,
   AgentApprovalKind,
   AgentDriver,
   AgentExitHandler,
@@ -153,7 +154,7 @@ export class CodexDriver implements AgentDriver {
       throw new Error("Codex session is not running.");
     }
 
-    const input = [{ type: "text", text }];
+    const input = userInputPayload(text, options?.images);
     const method = running.status.activeTurnId ? "turn/steer" : "turn/start";
     const collaborationMode = options?.collaborationMode === "plan" ? planCollaborationMode(running.status) : undefined;
     const params = running.status.activeTurnId
@@ -415,6 +416,17 @@ export class CodexDriver implements AgentDriver {
       const item = asRecord(params?.item);
       if (item?.type === "exitedReviewMode" && typeof item.review === "string" && item.review) {
         await this.onOutput({ type: "message", sessionKey: key, chunk: item.review, turnId: getTurnId(params), itemId: getString(item, "id") });
+      }
+      if (item?.type === "imageGeneration") {
+        await this.onOutput(imageOutputEvent(key, item, getTurnId(params)));
+      }
+      return;
+    }
+
+    if (message.method === "rawResponseItem/completed") {
+      const item = asRecord(params?.item);
+      if (item?.type === "image_generation_call") {
+        await this.onOutput(imageOutputEvent(key, item, getTurnId(params)));
       }
       return;
     }
@@ -710,6 +722,36 @@ function toTokenBreakdown(record: Record<string, unknown> | undefined): AgentTok
 function getNumber(record: Record<string, unknown>, key: string): number | undefined {
   const value = record[key];
   return typeof value === "number" ? value : undefined;
+}
+
+function userInputPayload(text: string, images: AgentImageInput[] | undefined): unknown[] {
+  const input: unknown[] = [{ type: "text", text, text_elements: [] }];
+  for (const image of images ?? []) {
+    input.push({ type: "localImage", path: image.path });
+  }
+  return input;
+}
+
+function imageOutputEvent(sessionKey: string, item: Record<string, unknown>, turnId: string | undefined): {
+  type: "image";
+  sessionKey: string;
+  path?: string;
+  data?: string;
+  caption?: string;
+  turnId?: string;
+  itemId?: string;
+} {
+  const savedPath = getString(item, "savedPath");
+  const result = getString(item, "result");
+  const revisedPrompt = getString(item, "revisedPrompt") ?? getString(item, "revised_prompt");
+  return {
+    type: "image",
+    sessionKey,
+    ...(savedPath ? { path: savedPath } : result ? { data: result } : {}),
+    ...(revisedPrompt ? { caption: revisedPrompt } : {}),
+    ...(turnId ? { turnId } : {}),
+    ...(getString(item, "id") ? { itemId: getString(item, "id") } : {}),
+  };
 }
 
 function summarizeUnknown(value: unknown): string | undefined {

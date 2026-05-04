@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import { noopLogger, type Logger } from "../logger.ts";
-import type { AgentCollaborationMode, ChatBinding, ChatId, HomeStatusMode, PendingPrompt, PendingPromptKind, RelayTask, TaskStatus, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "../types.ts";
+import type { AgentCollaborationMode, AgentTaskInput, ChatBinding, ChatId, HomeStatusMode, PendingPrompt, PendingPromptKind, RelayTask, TaskStatus, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "../types.ts";
 
 interface WorkspaceRow {
   name: string;
@@ -62,6 +62,7 @@ interface TaskRow {
   chat_id: number;
   workspace_name: string;
   text: string;
+  input_json?: string | null;
   status: string;
   created_at: number;
   updated_at: number;
@@ -163,6 +164,7 @@ export class Store {
         chat_id INTEGER NOT NULL,
         workspace_name TEXT NOT NULL,
         text TEXT NOT NULL,
+        input_json TEXT,
         status TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
@@ -177,6 +179,7 @@ export class Store {
     this.addColumnIfMissing("pending_prompts", "expires_at", "INTEGER");
     this.addColumnIfMissing("chat_ui_state", "home_status_mode", "TEXT NOT NULL DEFAULT 'compact'");
     this.addColumnIfMissing("tasks", "status_message_id", "INTEGER");
+    this.addColumnIfMissing("tasks", "input_json", "TEXT");
     this.logger.debug("store.migrated");
   }
 
@@ -404,18 +407,21 @@ export class Store {
     chatId: ChatId;
     workspaceName: string;
     text: string;
+    input?: AgentTaskInput;
     status: TaskStatus;
     createdAt?: number;
     userMessageId?: number;
   }): RelayTask {
     const now = task.createdAt ?? Date.now();
+    const inputJson = task.input ? JSON.stringify(task.input) : null;
     const result = this.db.query(`
-      INSERT INTO tasks (chat_id, workspace_name, text, status, created_at, updated_at, user_message_id)
-      VALUES ($chatId, $workspaceName, $text, $status, $createdAt, $updatedAt, $userMessageId)
+      INSERT INTO tasks (chat_id, workspace_name, text, input_json, status, created_at, updated_at, user_message_id)
+      VALUES ($chatId, $workspaceName, $text, $inputJson, $status, $createdAt, $updatedAt, $userMessageId)
     `).run({
       $chatId: task.chatId,
       $workspaceName: task.workspaceName,
       $text: task.text,
+      $inputJson: inputJson,
       $status: task.status,
       $createdAt: now,
       $updatedAt: now,
@@ -427,7 +433,7 @@ export class Store {
 
   getTask(id: number): RelayTask | undefined {
     const row = this.db.query<TaskRow, [number]>(`
-      SELECT id, chat_id, workspace_name, text, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+      SELECT id, chat_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
       FROM tasks WHERE id = ?
     `).get(id);
     return row ? rowToTask(row) : undefined;
@@ -438,14 +444,14 @@ export class Store {
     if (statuses && statuses.length > 0) {
       const placeholders = statuses.map(() => "?").join(", ");
       return this.db.query<TaskRow, any>(`
-        SELECT id, chat_id, workspace_name, text, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+        SELECT id, chat_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
         FROM tasks
         WHERE chat_id = ? AND workspace_name = ? AND status IN (${placeholders})
         ORDER BY id ASC LIMIT ?
       `).all(chatId, workspaceName, ...statuses, safeLimit).map(rowToTask);
     }
     return this.db.query<TaskRow, [number, string, number]>(`
-      SELECT id, chat_id, workspace_name, text, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+      SELECT id, chat_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
       FROM tasks
       WHERE chat_id = ? AND workspace_name = ?
       ORDER BY id DESC LIMIT ?
@@ -454,7 +460,7 @@ export class Store {
 
   nextQueuedTask(chatId: ChatId, workspaceName: string): RelayTask | undefined {
     const row = this.db.query<TaskRow, [number, string]>(`
-      SELECT id, chat_id, workspace_name, text, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+      SELECT id, chat_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
       FROM tasks
       WHERE chat_id = ? AND workspace_name = ? AND status = 'queued'
       ORDER BY id ASC LIMIT 1
@@ -464,7 +470,7 @@ export class Store {
 
   activeTask(chatId: ChatId, workspaceName: string): RelayTask | undefined {
     const row = this.db.query<TaskRow, [number, string]>(`
-      SELECT id, chat_id, workspace_name, text, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+      SELECT id, chat_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
       FROM tasks
       WHERE chat_id = ? AND workspace_name = ? AND status IN ('running', 'blocked')
       ORDER BY id DESC LIMIT 1
@@ -532,6 +538,7 @@ function rowToTask(row: TaskRow): RelayTask {
     chatId: row.chat_id,
     workspaceName: row.workspace_name,
     text: row.text,
+    ...(row.input_json ? { inputJson: row.input_json } : {}),
     status: row.status as TaskStatus,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

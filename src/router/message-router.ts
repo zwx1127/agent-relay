@@ -1,12 +1,16 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { AppConfig } from "../config.ts";
 import { isAuthorized } from "../config.ts";
 import { sessionKey } from "../agent.ts";
 import { parseSessionKey } from "./session.ts";
+import { extensionFromTelegramPath, imageBlobFromPath, saveGeneratedImage, saveRelayMedia } from "../media.ts";
 import type {
+  AgentImageInput,
+  AgentImageOutputEvent,
+  AgentTaskInput,
   AgentApprovalKind,
   AgentApprovalRequestEvent,
   AgentBuiltinCommand,
@@ -14,6 +18,7 @@ import type {
   AgentDriver,
   AgentOutputEvent,
   AgentReviewTarget,
+  AgentSendOptions,
   AgentSessionStatus,
   AgentThreadSummary,
   AgentUserInputQuestion,
@@ -23,8 +28,10 @@ import type {
   IMAdapter,
   InboundMessage,
   InlineKeyboardMarkup,
+  MediaInboundMessage,
   RelayTask,
   SendMessageOptions,
+  TelegramInboundPhoto,
   WorkspaceRecord,
 } from "../types.ts";
 import type { Store } from "../storage/store.ts";
@@ -42,6 +49,8 @@ const PAGE_MAX_CHARS = 3200;
 const PAGED_OUTPUT_TTL_MS = 24 * 60 * 60 * 1000;
 const LIST_PAGE_SIZE = 8;
 const WORKSPACE_BUTTON_LABEL_WIDTH = 40;
+const DEFAULT_IMAGE_PROMPT = "Please inspect the attached image(s).";
+const MEDIA_GROUP_QUIET_MS = 900;
 const UI_BUTTON = {
   workspace: "📂",
   status: "ℹ️",
@@ -62,7 +71,7 @@ const UI_BUTTON = {
 export interface RouterDeps {
   config: AppConfig;
   store: Store;
-  adapter: Pick<IMAdapter, "sendMessage" | "editMessageText" | "answerCallbackQuery" | "sendChatAction" | "setMessageReaction">;
+  adapter: Pick<IMAdapter, "sendMessage" | "sendPhoto" | "editMessageText" | "answerCallbackQuery" | "sendChatAction" | "setMessageReaction" | "downloadFile">;
   agent: AgentDriver;
   logger?: Logger;
 }
@@ -82,6 +91,12 @@ interface LiveOutputState {
   finalPageRendered?: boolean;
 }
 
+interface MediaGroupState {
+  chatId: ChatId;
+  messages: MediaInboundMessage[];
+  timer?: Timer;
+}
+
 export class MessageRouter {
   private readonly logger: Logger;
 
@@ -92,6 +107,10 @@ export class MessageRouter {
   async handle(message: InboundMessage): Promise<void> {
     if (message.kind === "callback_query") {
       await this.handleCallback(message);
+      return;
+    }
+    if (message.kind === "media") {
+      await this.handleMediaMessage(message);
       return;
     }
 
@@ -153,6 +172,11 @@ export class MessageRouter {
   }
 
   async handleAgentOutput(session: AgentOutputEvent): Promise<void> {
+    if (session.type === "image") {
+      await this.finalizeSessionOutput(session.sessionKey);
+      await this.sendAgentImageOutput(session);
+      return;
+    }
     if (session.type === "turn_completed") {
       await this.finalizeSessionOutput(session.sessionKey);
       await this.sendPlanReadyPrompt(session.sessionKey);
@@ -242,6 +266,134 @@ export class MessageRouter {
       await this.answerCallback(message.callbackQueryId, detail.slice(0, 180));
       await this.renderCallbackPage(message, formatErrorMessage(detail), consoleKeyboard(this.statusView(message.chatId)));
       this.appendSystem(message.chatId, `Error: ${detail}\n`);
+    }
+  }
+
+  private async handleMediaMessage(message: MediaInboundMessage): Promise<void> {
+    this.logger.info("router.media_received", {
+      chat_id: message.chatId,
+      user_id: message.userId,
+      message_id: message.id,
+      caption_len: message.caption?.length ?? 0,
+      photo_count: message.photos.length,
+      media_group_id: message.mediaGroupId,
+    });
+
+    if (!isAuthorized(this.deps.config, message.userId, message.chatId)) {
+      this.logger.warn("router.unauthorized_media", {
+        chat_id: message.chatId,
+        user_id: message.userId,
+        message_id: message.id,
+      });
+      await this.sendRendered(message.chatId, textMessage("Unauthorized."));
+      return;
+    }
+
+    if (message.mediaGroupId) {
+      this.bufferMediaGroup(message);
+      return;
+    }
+
+    try {
+      await this.submitMediaMessages(message.chatId, [message]);
+    } catch (error) {
+      await this.handleMediaError(message.chatId, message.id, error);
+    }
+  }
+
+  private bufferMediaGroup(message: MediaInboundMessage): void {
+    const key = `${message.chatId}:${message.mediaGroupId}`;
+    const existing = this.mediaGroups.get(key);
+    if (existing?.timer) clearTimeout(existing.timer);
+    const state = existing ?? { chatId: message.chatId, messages: [] };
+    state.messages.push(message);
+    state.timer = setTimeout(() => {
+      this.mediaGroups.delete(key);
+      void this.submitMediaMessages(state.chatId, state.messages)
+        .catch((error) => this.handleMediaError(state.chatId, message.id, error));
+    }, MEDIA_GROUP_QUIET_MS);
+    this.mediaGroups.set(key, state);
+  }
+
+  private async submitMediaMessages(chatId: ChatId, messages: MediaInboundMessage[]): Promise<void> {
+    const workspace = this.currentWorkspace(chatId);
+    if (!workspace) {
+      await this.renderConsole(chatId);
+      return;
+    }
+    if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
+    const status = await this.ensureAgentStarted(chatId, workspace);
+    if (await this.sendWaitingPromptNotice(chatId, status)) return;
+
+    const sorted = [...messages].sort((a, b) => a.messageId - b.messageId);
+    const prompt = sorted.map((item) => item.caption?.trim()).find(Boolean) ?? DEFAULT_IMAGE_PROMPT;
+    const images: AgentImageInput[] = [];
+    for (const media of sorted) {
+      images.push(await this.downloadAndSavePhoto(workspace, media));
+    }
+    await this.submitTask(chatId, prompt, sorted[0]?.messageId, "auto", { text: prompt, images });
+  }
+
+  private async downloadAndSavePhoto(workspace: WorkspaceRecord, message: MediaInboundMessage): Promise<AgentImageInput> {
+    const photo = bestPhoto(message.photos);
+    if (!photo) throw new Error("Telegram photo is missing.");
+    if (photo.fileSize && photo.fileSize > this.deps.config.telegramImageMaxBytes) {
+      throw new Error(`Image is too large (${formatBytes(photo.fileSize)}). Limit: ${formatBytes(this.deps.config.telegramImageMaxBytes)}.`);
+    }
+    const downloaded = await this.deps.adapter.downloadFile(photo.fileId);
+    const size = downloaded.fileSize ?? downloaded.bytes.byteLength;
+    if (size > this.deps.config.telegramImageMaxBytes || downloaded.bytes.byteLength > this.deps.config.telegramImageMaxBytes) {
+      throw new Error(`Image is too large (${formatBytes(Math.max(size, downloaded.bytes.byteLength))}). Limit: ${formatBytes(this.deps.config.telegramImageMaxBytes)}.`);
+    }
+    const path = await saveRelayMedia(workspace.path, "incoming", downloaded.bytes, {
+      extension: extensionFromTelegramPath(downloaded.filePath),
+      messageId: message.messageId,
+    });
+    return { path, ...(message.caption ? { caption: message.caption } : {}) };
+  }
+
+  private async handleMediaError(chatId: ChatId, messageId: string, error: unknown): Promise<void> {
+    const detail = error instanceof Error ? error.message : String(error);
+    this.logger.error("router.media_failed", {
+      chat_id: chatId,
+      message_id: messageId,
+      error: error instanceof Error ? error : new Error(detail),
+    });
+    await this.sendRendered(chatId, formatErrorMessage(detail));
+    this.appendSystem(chatId, `Error: ${detail}\n`);
+  }
+
+  private async sendAgentImageOutput(event: AgentImageOutputEvent): Promise<void> {
+    const parsed = parseSessionKey(event.sessionKey);
+    if (!parsed) return;
+    const workspace = this.currentWorkspace(parsed.chatId);
+    if (!workspace || workspace.name !== parsed.workspaceName) return;
+    try {
+      const path = event.path
+        ? await saveRelayMedia(workspace.path, "outgoing", await readFile(event.path), { extension: extensionFromTelegramPath(event.path) })
+        : event.data ? await saveGeneratedImage(workspace.path, event.data) : undefined;
+      if (!path) throw new Error("Codex image output did not include image data.");
+      const blob = await imageBlobFromPath(path);
+      await this.deps.adapter.sendPhoto(parsed.chatId, blob, {
+        ...(event.caption ? { caption: truncateTelegramCaption(event.caption) } : {}),
+        ...(this.lastUserMessageIds.get(event.sessionKey) ? { replyToMessageId: this.lastUserMessageIds.get(event.sessionKey) } : {}),
+      });
+      this.deps.store.appendTranscript({
+        chatId: parsed.chatId,
+        workspaceName: parsed.workspaceName,
+        role: "agent",
+        text: `[image: ${path}]\n`,
+        createdAt: Date.now(),
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger.error("router.agent_image_send_failed", {
+        chat_id: parsed.chatId,
+        session_key: event.sessionKey,
+        error: error instanceof Error ? error : new Error(detail),
+      });
+      await this.sendRendered(parsed.chatId, formatErrorMessage(`Could not send image: ${detail}`));
+      this.appendSystem(parsed.chatId, `Error: Could not send image: ${detail}\n`);
     }
   }
 
@@ -755,8 +907,9 @@ export class MessageRouter {
     });
   }
 
-  private async submitTask(chatId: ChatId, text: string, userMessageId?: number, preference: "auto" | "immediate" | "queue" = "auto"): Promise<void> {
+  private async submitTask(chatId: ChatId, text: string, userMessageId?: number, preference: "auto" | "immediate" | "queue" = "auto", input?: AgentTaskInput): Promise<void> {
     if (!text) return;
+    const taskInput = input ?? { text };
     const workspace = this.currentWorkspace(chatId);
     if (!workspace) {
       await this.renderConsole(chatId);
@@ -767,7 +920,7 @@ export class MessageRouter {
     if (await this.sendWaitingPromptNotice(chatId, status)) return;
     const busy = Boolean(status.activeTurnId);
     if (preference === "auto" && busy) {
-      await this.sendToAgent(chatId, workspace, text, userMessageId, this.deps.store.activeTask(chatId, workspace.name));
+      await this.sendToAgent(chatId, workspace, taskInput, userMessageId, this.deps.store.activeTask(chatId, workspace.name));
       return;
     }
     const shouldQueue = preference === "queue";
@@ -775,6 +928,7 @@ export class MessageRouter {
       chatId,
       workspaceName: workspace.name,
       text,
+      input: input && input.images?.length ? input : undefined,
       status: shouldQueue ? "queued" : "running",
       userMessageId,
     });
@@ -788,10 +942,10 @@ export class MessageRouter {
   private async runTask(workspace: WorkspaceRecord, task: RelayTask): Promise<void> {
     this.deps.store.updateTask(task.id, { status: "running" });
     await this.syncTaskReaction(task.id);
-    await this.sendToAgent(task.chatId, workspace, task.text, task.userMessageId, task);
+    await this.sendToAgent(task.chatId, workspace, taskInputFromTask(task), task.userMessageId, task);
   }
 
-  private async sendToAgent(chatId: ChatId, workspace: WorkspaceRecord, text: string, userMessageId?: number, task?: RelayTask): Promise<void> {
+  private async sendToAgent(chatId: ChatId, workspace: WorkspaceRecord, input: AgentTaskInput, userMessageId?: number, task?: RelayTask): Promise<void> {
     const key = sessionKey(chatId, workspace.name);
     await this.finalizeSessionOutput(key);
     if (userMessageId) this.lastUserMessageIds.set(key, userMessageId);
@@ -805,25 +959,30 @@ export class MessageRouter {
       chat_id: chatId,
       workspace: workspace.name,
       session_key: key,
-      text_len: text.length,
+      text_len: input.text.length,
+      image_count: input.images?.length ?? 0,
     });
     this.logger.debug("router.user_input_text", {
       chat_id: chatId,
       workspace: workspace.name,
       session_key: key,
-      message_text: text,
+      message_text: input.text,
     });
     this.deps.store.appendTranscript({
       chatId,
       workspaceName: workspace.name,
       role: "user",
-      text: `${text}\n`,
+      text: transcriptTextForInput(input),
       createdAt: Date.now(),
     });
     let result: Awaited<ReturnType<AgentDriver["send"]>>;
     try {
       const mode = this.deps.store.getCollaborationMode(key);
-      result = await this.deps.agent.send(key, text, mode === "plan" ? { collaborationMode: "plan" } : undefined);
+      const sendOptions: AgentSendOptions = {
+        ...(mode === "plan" ? { collaborationMode: "plan" as const } : {}),
+        ...(input.images?.length ? { images: input.images } : {}),
+      };
+      result = await this.deps.agent.send(key, input.text, Object.keys(sendOptions).length > 0 ? sendOptions : undefined);
     } catch (error) {
       if (task) {
         this.deps.store.updateTask(task.id, { status: "failed" });
@@ -997,6 +1156,8 @@ export class MessageRouter {
   }
 
   private readonly liveOutput = new Map<string, LiveOutputState>();
+
+  private readonly mediaGroups = new Map<string, MediaGroupState>();
 
   private readonly lastUserMessageIds = new Map<string, number>();
   private nextOutputSegmentId = 1;
@@ -1458,6 +1619,50 @@ function shortToken(): string {
 
 function codexRequestKey(sessionKeyValue: string, requestId: string | number): string {
   return `${sessionKeyValue}:${String(requestId)}`;
+}
+
+function bestPhoto(photos: TelegramInboundPhoto[]): TelegramInboundPhoto | undefined {
+  return [...photos].sort((a, b) => {
+    const aSize = a.fileSize ?? a.width * a.height;
+    const bSize = b.fileSize ?? b.width * b.height;
+    return bSize - aSize;
+  })[0];
+}
+
+function taskInputFromTask(task: RelayTask): AgentTaskInput {
+  if (task.inputJson) {
+    try {
+      const parsed = JSON.parse(task.inputJson) as Partial<AgentTaskInput>;
+      if (typeof parsed.text === "string") {
+        return {
+          text: parsed.text,
+          images: Array.isArray(parsed.images)
+            ? parsed.images
+              .filter((image): image is AgentImageInput => Boolean(image) && typeof image === "object" && typeof (image as AgentImageInput).path === "string")
+              .map((image) => ({ path: image.path, ...(image.caption ? { caption: image.caption } : {}) }))
+            : undefined,
+        };
+      }
+    } catch {
+      return { text: task.text };
+    }
+  }
+  return { text: task.text };
+}
+
+function transcriptTextForInput(input: AgentTaskInput): string {
+  const imageText = input.images?.length ? `\n[${input.images.length} image${input.images.length === 1 ? "" : "s"} attached]\n` : "\n";
+  return `${input.text}${imageText}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function truncateTelegramCaption(text: string): string {
+  return text.length <= 1024 ? text : `${text.slice(0, 1021)}...`;
 }
 
 function bold(text: string): TelegramTextPart {
