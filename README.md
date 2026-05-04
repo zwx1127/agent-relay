@@ -114,7 +114,7 @@ Waiting: no
 
 Inline action buttons:
 
-- `📂` opens workspace management. You can select an existing cwd, create one with ForceReply, or delete one after confirmation. Workspace selection buttons keep cwd names visible for clarity; action buttons are emoji-only. Deleting physically removes the directory under `WORKSPACE_ROOT`.
+- `📂` opens workspace management. You can select an existing cwd, create one with `➕` and ForceReply, or delete one with `➖` after confirmation. Workspace selection buttons keep cwd names visible for clarity and pad short names so list labels visually align in Telegram; action buttons are emoji-only. Deleting physically removes the directory under `WORKSPACE_ROOT`.
 - `ℹ️` toggles the current chat between compact and detailed Relay Home modes.
 - `🔄` redraws Relay Home.
 - `🛑` stops the current cwd's Codex session and clears the cwd selection.

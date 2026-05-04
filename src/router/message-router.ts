@@ -35,13 +35,14 @@ const CODEX_PROMPT_TTL_MS = 30 * 60 * 1000;
 const PAGE_MAX_CHARS = 3200;
 const PAGED_OUTPUT_TTL_MS = 24 * 60 * 60 * 1000;
 const LIST_PAGE_SIZE = 8;
+const WORKSPACE_BUTTON_LABEL_WIDTH = 40;
 const UI_BUTTON = {
   workspace: "📂",
   status: "ℹ️",
   refresh: "🔄",
   stop: "🛑",
   create: "➕",
-  delete: "🗑️",
+  delete: "➖",
   approve: "✅",
   deny: "❌",
   firstPage: "⏮️",
@@ -1435,7 +1436,7 @@ function consoleKeyboard(status: { workspaceName?: string; running?: boolean }):
 function workspacesKeyboard(workspaces: WorkspaceRecord[], selected: string | undefined, pageIndex: number, totalPages: number): InlineKeyboardMarkup {
   const rows = workspaces.map((workspace) => [
     {
-      text: `${workspace.name === selected ? `${UI_BUTTON.selected} ` : `${UI_BUTTON.unselected} `}${buttonLabel(workspace.name)}`,
+      text: workspaceButtonText(workspace.name, workspace.name === selected),
       callback_data: workspaceCallbackData(workspace.name),
     },
     { text: UI_BUTTON.delete, callback_data: deleteWorkspaceCallbackData(workspace.name, false) },
@@ -1480,6 +1481,11 @@ function clampPage(value: number, totalPages: number): number {
 
 function buttonLabel(value: string): string {
   return value.length > 40 ? `${value.slice(0, 37)}...` : value;
+}
+
+function workspaceButtonText(name: string, selected: boolean): string {
+  const prefix = selected ? `${UI_BUTTON.selected} ` : `${UI_BUTTON.unselected} `;
+  return `${prefix}${buttonLabel(name).padEnd(WORKSPACE_BUTTON_LABEL_WIDTH, "\u00A0")}`;
 }
 
 function workspaceCallbackData(name: string): string {
