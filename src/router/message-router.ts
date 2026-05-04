@@ -150,13 +150,13 @@ export class MessageRouter {
     }
     if (session.type === "user_input_request") {
       await this.finalizeSessionOutput(session.sessionKey);
-      this.markActiveTask(session.sessionKey, "blocked");
+      await this.markActiveTask(session.sessionKey, "blocked", "Waiting for user input");
       await this.handleCodexUserInputRequest(session);
       return;
     }
     if (session.type === "approval_request") {
       await this.finalizeSessionOutput(session.sessionKey);
-      this.markActiveTask(session.sessionKey, "blocked");
+      await this.markActiveTask(session.sessionKey, "blocked", "Waiting for approval");
       await this.handleCodexApprovalRequest(session);
       return;
     }
@@ -520,7 +520,7 @@ export class MessageRouter {
       userMessageId,
     });
     if (shouldQueue) {
-      await this.sendRendered(chatId, queuedTaskMessage(task));
+      await this.renderTaskStatusCard(task.id, "Queued");
       return;
     }
     await this.runTask(workspace, task);
@@ -528,6 +528,7 @@ export class MessageRouter {
 
   private async runTask(workspace: WorkspaceRecord, task: RelayTask): Promise<void> {
     this.deps.store.updateTask(task.id, { status: "running" });
+    await this.renderTaskStatusCard(task.id, "Processing");
     await this.sendToAgent(task.chatId, workspace, task.text, task.userMessageId, task);
   }
 
@@ -560,7 +561,17 @@ export class MessageRouter {
       text: `${text}\n`,
       createdAt: Date.now(),
     });
-    const result = await this.deps.agent.send(key, text);
+    let result: Awaited<ReturnType<AgentDriver["send"]>>;
+    try {
+      result = await this.deps.agent.send(key, text);
+    } catch (error) {
+      if (task) {
+        this.deps.store.updateTask(task.id, { status: "failed" });
+        const detail = error instanceof Error ? error.message : String(error);
+        await this.renderTaskStatusCard(task.id, `Failed: ${detail}`);
+      }
+      throw error;
+    }
     if (task && result.turnId) this.deps.store.updateTask(task.id, { turnId: result.turnId, status: "running" });
   }
 
@@ -595,11 +606,13 @@ export class MessageRouter {
     return status;
   }
 
-  private markActiveTask(sessionKeyValue: string, status: "blocked" | "running"): void {
+  private async markActiveTask(sessionKeyValue: string, status: "blocked" | "running", detail?: string): Promise<void> {
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) return;
     const task = this.deps.store.activeTask(parsed.chatId, parsed.workspaceName);
-    if (task) this.deps.store.updateTask(task.id, { status });
+    if (!task) return;
+    this.deps.store.updateTask(task.id, { status });
+    await this.renderTaskStatusCard(task.id, detail);
   }
 
   private async completeTaskAndDispatchNext(sessionKeyValue: string, turnId: string | undefined): Promise<void> {
@@ -608,7 +621,7 @@ export class MessageRouter {
     const active = this.deps.store.activeTask(parsed.chatId, parsed.workspaceName);
     if (active && (!turnId || !active.turnId || active.turnId === turnId)) {
       this.deps.store.updateTask(active.id, { status: "done" });
-      await this.sendRendered(parsed.chatId, messageWithTitle(`Prompt #${active.id} completed.`));
+      await this.renderTaskStatusCard(active.id, "Completed");
     }
     const workspace = this.currentWorkspace(parsed.chatId);
     if (!workspace || workspace.name !== parsed.workspaceName) return;
@@ -616,9 +629,35 @@ export class MessageRouter {
     if (status?.waitingForApproval || status?.waitingForUserInput || status?.activeTurnId) return;
     const next = this.deps.store.nextQueuedTask(parsed.chatId, parsed.workspaceName);
     if (next) {
-      await this.sendRendered(parsed.chatId, messageWithTitle(`Running queued prompt #${next.id}.`));
       await this.runTask(workspace, next);
     }
+  }
+
+  private async renderTaskStatusCard(taskId: number, detail?: string): Promise<void> {
+    const task = this.deps.store.getTask(taskId);
+    if (!task) return;
+    const rendered = taskStatusMessage(task, detail);
+    if (task.statusMessageId) {
+      try {
+        await this.editRendered(task.chatId, rendered, {
+          messageId: task.statusMessageId,
+          disableWebPagePreview: true,
+        });
+        return;
+      } catch (error) {
+        this.logger.warn("router.task_status_edit_fallback", {
+          chat_id: task.chatId,
+          task_id: task.id,
+          message_id: task.statusMessageId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
+    const result = await this.sendRendered(task.chatId, rendered, {
+      replyToMessageId: task.userMessageId,
+      disableWebPagePreview: true,
+    });
+    if (result.messageId) this.deps.store.updateTask(task.id, { statusMessageId: result.messageId });
   }
 
   private isStaleConsoleCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): boolean {
@@ -735,6 +774,8 @@ export class MessageRouter {
         requestId: event.requestId,
         method: event.method,
         approvalKind: event.approvalKind,
+        title: event.title,
+        body: event.body,
         params: event.params,
       }),
       expiresAt,
@@ -852,7 +893,15 @@ export class MessageRouter {
     if (!pending.sessionKey || !this.deps.agent.respond) throw new Error("Approval session is missing.");
     const approved = decision === "y";
     this.deps.store.deletePendingPrompt(message.chatId, pending.promptMessageId);
-    await this.renderCallbackPage(message, messageWithTitle(approved ? "Approved." : "Denied."), { inline_keyboard: [] });
+    await this.renderCallbackPage(
+      message,
+      formatApprovalDecisionMessage(
+        approved ? "Approved." : "Denied.",
+        typeof data.title === "string" ? data.title : "Approval request",
+        typeof data.body === "string" ? data.body : "",
+      ),
+      { inline_keyboard: [] },
+    );
     await this.deps.agent.respond(pending.sessionKey, data.requestId as string | number, approvalResponse(data.approvalKind as AgentApprovalKind, approved, data.params));
   }
 
@@ -1144,12 +1193,33 @@ function answeredMessage(answer: string, hasNext: boolean): RenderedTelegramText
   ]);
 }
 
-function queuedTaskMessage(task: RelayTask): RenderedTelegramText {
+function taskStatusMessage(task: RelayTask, detail?: string): RenderedTelegramText {
   return renderTelegramText([
-    bold(`Queued prompt #${task.id}`),
+    bold(`Prompt #${task.id}`),
+    "\n\nStatus: ",
+    detail ?? taskStatusLabel(task.status),
+    "\ncwd: ",
+    code(task.workspaceName),
     "\n\n",
     truncateForTelegramLabel(task.text, 220),
   ]);
+}
+
+function taskStatusLabel(status: RelayTask["status"]): string {
+  switch (status) {
+    case "queued":
+      return "Queued";
+    case "running":
+      return "Processing";
+    case "blocked":
+      return "Waiting";
+    case "done":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled";
+  }
 }
 
 function formatErrorMessage(detail: string): RenderedTelegramText {
@@ -1183,6 +1253,18 @@ function renderCodexQuestionBody(parts: TelegramTextPart[], question: AgentUserI
 }
 
 function formatApprovalMessage(title: string, body: string): RenderedTelegramText {
+  return renderTelegramText(approvalMessageParts(title, body));
+}
+
+function formatApprovalDecisionMessage(decision: string, title: string, body: string): RenderedTelegramText {
+  return renderTelegramText([
+    bold(decision),
+    "\n\n",
+    ...approvalMessageParts(title, body),
+  ]);
+}
+
+function approvalMessageParts(title: string, body: string): TelegramTextPart[] {
   const parts: TelegramTextPart[] = [bold(title)];
   const lines = body.split("\n").filter((line) => line.length > 0);
   if (lines.length > 0) {
@@ -1198,7 +1280,7 @@ function formatApprovalMessage(title: string, body: string): RenderedTelegramTex
       }
     }
   }
-  return renderTelegramText(parts);
+  return parts;
 }
 
 function approvalKeyboard(token: string): InlineKeyboardMarkup {

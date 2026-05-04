@@ -123,8 +123,9 @@ describe("store", () => {
 
     expect(store.nextQueuedTask(1, "demo")?.id).toBe(first.id);
     expect(store.countTasks(1, "demo", ["queued"])).toBe(2);
-    store.updateTask(first.id, { status: "running", turnId: "turn-1" });
+    store.updateTask(first.id, { status: "running", turnId: "turn-1", statusMessageId: 501 });
     expect(store.activeTask(1, "demo")?.turnId).toBe("turn-1");
+    expect(store.activeTask(1, "demo")?.statusMessageId).toBe(501);
     expect(store.nextQueuedTask(1, "demo")?.id).toBe(second.id);
     store.close();
   });

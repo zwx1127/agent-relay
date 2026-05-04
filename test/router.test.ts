@@ -46,6 +46,7 @@ class FakeAgent implements AgentDriver {
   threadLists: AgentThreadListOptions[] = [];
   threads: AgentThreadSummary[] = [];
   models: AgentModelSummary[] = [];
+  failSend?: Error;
 
   async start(options: { chatId: ChatId; workspaceName: string; workspacePath: string; threadId?: string }): Promise<AgentSessionStatus> {
     const key = sessionKey(options.chatId, options.workspaceName);
@@ -63,6 +64,7 @@ class FakeAgent implements AgentDriver {
   }
 
   async send(key: string, text: string): Promise<{ turnId?: string }> {
+    if (this.failSend) throw this.failSend;
     this.sent.push({ key, text });
     const status = this.statuses.get(key);
     if (status?.activeTurnId) return { turnId: status.activeTurnId };
@@ -197,7 +199,8 @@ describe("router", () => {
     await router.handle(textMessage("/unknown"));
 
     expect(agent.sent).toEqual([{ key: "1:demo", text: "/unknown" }]);
-    expect(adapter.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Status: Processing");
+    expect(adapter.sent.at(-1)?.text).toContain("/unknown");
   });
 
   test("console no longer exposes raw tail action", async () => {
@@ -267,7 +270,11 @@ describe("router", () => {
     await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "after", turnId: "turn-1" });
     await sleep(850);
 
-    expect(adapter.sent.map((message) => message.text)).toEqual(["before", "after"]);
+    expect(adapter.sent.map((message) => message.text)).toEqual([
+      "before",
+      "Prompt #1\n\nStatus: Processing\ncwd: demo\n\nfollow up",
+      "after",
+    ]);
     expect(adapter.edited).toEqual([]);
     expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "follow up" });
   });
@@ -417,7 +424,9 @@ describe("router", () => {
       "/model",
     ]);
     expect(agent.builtins).toEqual([]);
-    expect(adapter.sent).toEqual([]);
+    expect(adapter.sent).toHaveLength(1);
+    expect(adapter.sent.at(-1)?.text).toContain("Status: Processing");
+    expect(adapter.sent.at(-1)?.text).toContain("/help");
   });
 
   test("/init is forwarded literally for Codex to interpret", async () => {
@@ -446,7 +455,8 @@ describe("router", () => {
     expect(agent.stopped).toEqual([]);
     expect(store.getSession("1:demo")?.thread_id).toBe("old-thread");
     expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "/clear" });
-    expect(adapter.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Status: Processing");
+    expect(adapter.sent.at(-1)?.text).toContain("/clear");
   });
 
   test("clear callback is no longer supported", async () => {
@@ -618,8 +628,27 @@ describe("router", () => {
     await router.handle(textMessage("run task"));
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-1" });
 
-    expect(adapter.sent.at(-1)?.text).toContain("Prompt #1 completed.");
-    expect(adapter.sent.at(-1)?.options?.replyMarkup).toBeUndefined();
+    expect(adapter.sent).toHaveLength(1);
+    expect(adapter.sent.at(-1)?.text).toContain("Status: Processing");
+    expect(adapter.edited.at(-1)?.text).toContain("Status: Completed");
+    expect(adapter.edited.at(-1)?.options.messageId).toBe(adapter.sent.at(-1)?.messageId);
+    expect(adapter.edited.at(-1)?.options.replyMarkup).toBeUndefined();
+  });
+
+  test("failed prompt edits the task status card", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    agent.failSend = new Error("send exploded");
+
+    await router.handle(textMessage("run task"));
+
+    expect(store.getTask(1)?.status).toBe("failed");
+    expect(adapter.sent.at(0)?.text).toContain("Status: Processing");
+    expect(adapter.edited.at(-1)?.text).toContain("Status: Failed: send exploded");
+    expect(adapter.sent.at(-1)?.text).toContain("Error:");
   });
 
   test("backlog callback is no longer supported", async () => {
@@ -936,7 +965,7 @@ describe("router", () => {
       method: "item/commandExecution/requestApproval",
       approvalKind: "command",
       title: "Approve command?",
-      body: "bun test",
+      body: "Run tests\ncwd: /tmp/demo\nbun test",
       params: { command: "bun test" },
     });
     const prompt = adapter.sent.at(-1)!;
@@ -946,6 +975,10 @@ describe("router", () => {
 
     expect(agent.responses).toEqual([{ key: "1:demo", requestId: 91, result: { decision: "accept" } }]);
     expect(adapter.edited.at(-1)?.text).toContain("Approved");
+    expect(adapter.edited.at(-1)?.text).toContain("Approve command?");
+    expect(adapter.edited.at(-1)?.text).toContain("Run tests");
+    expect(adapter.edited.at(-1)?.text).toContain("/tmp/demo");
+    expect(adapter.edited.at(-1)?.text).toContain("bun test");
   });
 });
 

@@ -291,4 +291,5 @@ export interface RelayTask {
   updatedAt: number;
   turnId?: string;
   userMessageId?: number;
+  statusMessageId?: number;
 }
