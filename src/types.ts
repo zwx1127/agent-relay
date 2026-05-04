@@ -75,6 +75,7 @@ export interface IMAdapter {
   editMessageText(chatId: ChatId, text: string, options: EditMessageTextOptions): Promise<void>;
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void>;
   sendChatAction(chatId: ChatId, action?: "typing"): Promise<void>;
+  setMessageReaction(chatId: ChatId, messageId: number, emoji?: string): Promise<void>;
 }
 
 export type AgentOutputHandler = (event: AgentOutputEvent) => void | Promise<void>;

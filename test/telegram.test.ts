@@ -354,6 +354,45 @@ describe("telegram adapter", () => {
     ]);
   });
 
+  test("sets and clears message reactions", async () => {
+    const requests: Array<{ method: string; body: unknown }> = [];
+    const adapter = new TelegramAdapter("token", async (url, init) => {
+      requests.push({ method: String(url).split("/").at(-1) || "", body: JSON.parse(String(init?.body)) });
+      return Response.json({ ok: true, result: true });
+    });
+
+    await adapter.setMessageReaction(1, 2, "😎");
+    await adapter.setMessageReaction(1, 2);
+
+    expect(requests).toEqual([
+      {
+        method: "setMessageReaction",
+        body: {
+          chat_id: 1,
+          message_id: 2,
+          reaction: [{ type: "emoji", emoji: "😎" }],
+        },
+      },
+      {
+        method: "setMessageReaction",
+        body: {
+          chat_id: 1,
+          message_id: 2,
+          reaction: [],
+        },
+      },
+    ]);
+  });
+
+  test("surfaces message reaction errors", async () => {
+    const adapter = new TelegramAdapter("token", async () => Response.json({
+      ok: false,
+      description: "Bad Request: reaction is not allowed",
+    }, { status: 400 }));
+
+    await expect(adapter.setMessageReaction(1, 2, "😎")).rejects.toThrow("reaction is not allowed");
+  });
+
   test("ignores message is not modified edit errors", async () => {
     const adapter = new TelegramAdapter("token", async () => Response.json({
       ok: false,

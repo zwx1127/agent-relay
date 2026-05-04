@@ -56,7 +56,7 @@ const UI_BUTTON = {
 export interface RouterDeps {
   config: AppConfig;
   store: Store;
-  adapter: Pick<IMAdapter, "sendMessage" | "editMessageText" | "answerCallbackQuery" | "sendChatAction">;
+  adapter: Pick<IMAdapter, "sendMessage" | "editMessageText" | "answerCallbackQuery" | "sendChatAction" | "setMessageReaction">;
   agent: AgentDriver;
   logger?: Logger;
 }
@@ -150,13 +150,13 @@ export class MessageRouter {
     }
     if (session.type === "user_input_request") {
       await this.finalizeSessionOutput(session.sessionKey);
-      await this.markActiveTask(session.sessionKey, "blocked", "Waiting for user input");
+      await this.markActiveTask(session.sessionKey, "blocked");
       await this.handleCodexUserInputRequest(session);
       return;
     }
     if (session.type === "approval_request") {
       await this.finalizeSessionOutput(session.sessionKey);
-      await this.markActiveTask(session.sessionKey, "blocked", "Waiting for approval");
+      await this.markActiveTask(session.sessionKey, "blocked");
       await this.handleCodexApprovalRequest(session);
       return;
     }
@@ -520,7 +520,7 @@ export class MessageRouter {
       userMessageId,
     });
     if (shouldQueue) {
-      await this.renderTaskStatusCard(task.id, "Queued");
+      await this.syncTaskReaction(task.id);
       return;
     }
     await this.runTask(workspace, task);
@@ -528,7 +528,7 @@ export class MessageRouter {
 
   private async runTask(workspace: WorkspaceRecord, task: RelayTask): Promise<void> {
     this.deps.store.updateTask(task.id, { status: "running" });
-    await this.renderTaskStatusCard(task.id, "Processing");
+    await this.syncTaskReaction(task.id);
     await this.sendToAgent(task.chatId, workspace, task.text, task.userMessageId, task);
   }
 
@@ -567,8 +567,7 @@ export class MessageRouter {
     } catch (error) {
       if (task) {
         this.deps.store.updateTask(task.id, { status: "failed" });
-        const detail = error instanceof Error ? error.message : String(error);
-        await this.renderTaskStatusCard(task.id, `Failed: ${detail}`);
+        await this.syncTaskReaction(task.id);
       }
       throw error;
     }
@@ -606,13 +605,13 @@ export class MessageRouter {
     return status;
   }
 
-  private async markActiveTask(sessionKeyValue: string, status: "blocked" | "running", detail?: string): Promise<void> {
+  private async markActiveTask(sessionKeyValue: string, status: "blocked" | "running"): Promise<void> {
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) return;
     const task = this.deps.store.activeTask(parsed.chatId, parsed.workspaceName);
     if (!task) return;
     this.deps.store.updateTask(task.id, { status });
-    await this.renderTaskStatusCard(task.id, detail);
+    await this.syncTaskReaction(task.id);
   }
 
   private async completeTaskAndDispatchNext(sessionKeyValue: string, turnId: string | undefined): Promise<void> {
@@ -621,7 +620,7 @@ export class MessageRouter {
     const active = this.deps.store.activeTask(parsed.chatId, parsed.workspaceName);
     if (active && (!turnId || !active.turnId || active.turnId === turnId)) {
       this.deps.store.updateTask(active.id, { status: "done" });
-      await this.renderTaskStatusCard(active.id, "Completed");
+      await this.syncTaskReaction(active.id);
     }
     const workspace = this.currentWorkspace(parsed.chatId);
     if (!workspace || workspace.name !== parsed.workspaceName) return;
@@ -633,31 +632,20 @@ export class MessageRouter {
     }
   }
 
-  private async renderTaskStatusCard(taskId: number, detail?: string): Promise<void> {
+  private async syncTaskReaction(taskId: number): Promise<void> {
     const task = this.deps.store.getTask(taskId);
-    if (!task) return;
-    const rendered = taskStatusMessage(task, detail);
-    if (task.statusMessageId) {
-      try {
-        await this.editRendered(task.chatId, rendered, {
-          messageId: task.statusMessageId,
-          disableWebPagePreview: true,
-        });
-        return;
-      } catch (error) {
-        this.logger.warn("router.task_status_edit_fallback", {
-          chat_id: task.chatId,
-          task_id: task.id,
-          message_id: task.statusMessageId,
-          error: error instanceof Error ? error : new Error(String(error)),
-        });
-      }
+    if (!task?.userMessageId) return;
+    try {
+      await this.deps.adapter.setMessageReaction(task.chatId, task.userMessageId, reactionForTaskStatus(task.status));
+    } catch (error) {
+      this.logger.warn("router.task_reaction_failed", {
+        chat_id: task.chatId,
+        task_id: task.id,
+        message_id: task.userMessageId,
+        status: task.status,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
     }
-    const result = await this.sendRendered(task.chatId, rendered, {
-      replyToMessageId: task.userMessageId,
-      disableWebPagePreview: true,
-    });
-    if (result.messageId) this.deps.store.updateTask(task.id, { statusMessageId: result.messageId });
   }
 
   private isStaleConsoleCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): boolean {
@@ -879,6 +867,7 @@ export class MessageRouter {
   private async respondToCodexPrompt(response: { sessionKey: string; requestId: string | number; result: unknown }): Promise<void> {
     if (!this.deps.agent.respond) throw new Error("Agent driver cannot answer Codex prompts.");
     await this.deps.agent.respond(response.sessionKey, response.requestId, response.result);
+    await this.markActiveTask(response.sessionKey, "running");
   }
 
   private async answerCodexApproval(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
@@ -903,6 +892,7 @@ export class MessageRouter {
       { inline_keyboard: [] },
     );
     await this.deps.agent.respond(pending.sessionKey, data.requestId as string | number, approvalResponse(data.approvalKind as AgentApprovalKind, approved, data.params));
+    await this.markActiveTask(pending.sessionKey, "running");
   }
 
   private async expireCallbackPrompt(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
@@ -1193,32 +1183,19 @@ function answeredMessage(answer: string, hasNext: boolean): RenderedTelegramText
   ]);
 }
 
-function taskStatusMessage(task: RelayTask, detail?: string): RenderedTelegramText {
-  return renderTelegramText([
-    bold(`Prompt #${task.id}`),
-    "\n\nStatus: ",
-    detail ?? taskStatusLabel(task.status),
-    "\ncwd: ",
-    code(task.workspaceName),
-    "\n\n",
-    truncateForTelegramLabel(task.text, 220),
-  ]);
-}
-
-function taskStatusLabel(status: RelayTask["status"]): string {
+function reactionForTaskStatus(status: RelayTask["status"]): string {
   switch (status) {
     case "queued":
-      return "Queued";
+      return "🫡";
     case "running":
-      return "Processing";
+      return "✍";
     case "blocked":
-      return "Waiting";
+      return "🤔";
     case "done":
-      return "Completed";
+      return "😎";
     case "failed":
-      return "Failed";
     case "cancelled":
-      return "Cancelled";
+      return "😱";
   }
 }
 

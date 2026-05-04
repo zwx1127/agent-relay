@@ -225,6 +225,14 @@ export class TelegramAdapter implements IMAdapter {
     });
   }
 
+  async setMessageReaction(chatId: ChatId, messageId: number, emoji?: string): Promise<void> {
+    await this.request("setMessageReaction", {
+      chat_id: chatId,
+      message_id: messageId,
+      reaction: emoji ? [{ type: "emoji", emoji }] : [],
+    });
+  }
+
   private toInboundMessage(update: TelegramUpdate): InboundMessage | undefined {
     const message = update.message;
     if (message?.text && message.from) {

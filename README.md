@@ -122,7 +122,7 @@ Inline action buttons:
 - `⏮️`, `◀️`, `▶️`, and `⏭️` navigate long assistant output pages.
 
 Codex user-input questions are sent as ForceReply prompts. Codex approval requests keep inline `✅` and `❌` buttons.
-Each prompt gets a lightweight status card that is edited from Processing to Waiting, Completed, or Failed instead of sending a separate completion notice.
+Prompt state is shown with a bot reaction on the triggering user message: `🫡` queued, `✍` processing, `🤔` waiting for input or approval, `😎` completed, and `😱` failed or cancelled.
 
 System, home, approval, question, and assistant responses are sent as Telegram text plus message entities instead of HTML parse mode. Dynamic values such as cwd names, paths, and errors are rendered as plain text or code entities, avoiding HTML parse failures while preserving readable formatting.
 
@@ -161,7 +161,7 @@ codex app-server --listen stdio://
 
 - Each `chat + cwd` starts or resumes a Codex thread with that directory as `cwd`, plus `CODEX_SANDBOX` and `CODEX_APPROVAL`.
 - User messages are serialized per `chat + cwd`. When Codex is idle, ordinary text starts a Codex turn with `turn/start`. When a turn is active, ordinary text is sent as `turn/steer`, matching the interactive Codex habit of adding context to the current session. If Codex reports that the locally cached active turn is no longer steerable, relay clears that stale turn id and retries the same input once with `turn/start`.
-- Prompt task state and the latest prompt status card message are stored in SQLite so active, blocked, completed, and failed turns can be tracked. No Telegram controls are exposed for task queues.
+- Prompt task state is stored in SQLite so active, blocked, completed, and failed turns can be tracked. Prompt status is reflected with Telegram reactions when the original user message id is available. No Telegram controls are exposed for task queues.
 - While Codex is waiting for a user-input answer or approval decision, ordinary chat text is not forwarded as a new instruction. The relay prompts the user to reply to the question message or use the approval buttons.
 - Assistant output is visually linked back to the triggering Telegram message via reply metadata.
 - Assistant message deltas from `item/agentMessage/delta` are stored in SQLite, debounced, and rendered into Telegram-sized output pages.

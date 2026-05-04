@@ -14,8 +14,10 @@ class FakeAdapter {
   edited: Array<{ chatId: ChatId; text: string; options: EditMessageTextOptions }> = [];
   answered: Array<{ callbackQueryId: string; text?: string }> = [];
   chatActions: Array<{ chatId: ChatId; action?: "typing" }> = [];
+  reactions: Array<{ chatId: ChatId; messageId: number; emoji?: string }> = [];
   nextMessageId = 100;
   sendMessageDelayMs = 0;
+  failReaction?: Error;
 
   async sendMessage(chatId: ChatId, text: string, options?: SendMessageOptions): Promise<{ messageId?: number }> {
     if (this.sendMessageDelayMs > 0) await sleep(this.sendMessageDelayMs);
@@ -34,6 +36,11 @@ class FakeAdapter {
 
   async sendChatAction(chatId: ChatId, action?: "typing"): Promise<void> {
     this.chatActions.push({ chatId, action });
+  }
+
+  async setMessageReaction(chatId: ChatId, messageId: number, emoji?: string): Promise<void> {
+    if (this.failReaction) throw this.failReaction;
+    this.reactions.push({ chatId, messageId, emoji });
   }
 }
 
@@ -199,8 +206,8 @@ describe("router", () => {
     await router.handle(textMessage("/unknown"));
 
     expect(agent.sent).toEqual([{ key: "1:demo", text: "/unknown" }]);
-    expect(adapter.sent.at(-1)?.text).toContain("Status: Processing");
-    expect(adapter.sent.at(-1)?.text).toContain("/unknown");
+    expect(adapter.sent).toEqual([]);
+    expect(adapter.reactions).toEqual([{ chatId: 1, messageId: 1, emoji: "✍" }]);
   });
 
   test("console no longer exposes raw tail action", async () => {
@@ -270,12 +277,9 @@ describe("router", () => {
     await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "after", turnId: "turn-1" });
     await sleep(850);
 
-    expect(adapter.sent.map((message) => message.text)).toEqual([
-      "before",
-      "Prompt #1\n\nStatus: Processing\ncwd: demo\n\nfollow up",
-      "after",
-    ]);
+    expect(adapter.sent.map((message) => message.text)).toEqual(["before", "after"]);
     expect(adapter.edited).toEqual([]);
+    expect(adapter.reactions).toEqual([{ chatId: 1, messageId: 1, emoji: "✍" }]);
     expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "follow up" });
   });
 
@@ -424,9 +428,8 @@ describe("router", () => {
       "/model",
     ]);
     expect(agent.builtins).toEqual([]);
-    expect(adapter.sent).toHaveLength(1);
-    expect(adapter.sent.at(-1)?.text).toContain("Status: Processing");
-    expect(adapter.sent.at(-1)?.text).toContain("/help");
+    expect(adapter.sent).toEqual([]);
+    expect(adapter.reactions).toEqual([{ chatId: 1, messageId: 1, emoji: "✍" }]);
   });
 
   test("/init is forwarded literally for Codex to interpret", async () => {
@@ -455,8 +458,8 @@ describe("router", () => {
     expect(agent.stopped).toEqual([]);
     expect(store.getSession("1:demo")?.thread_id).toBe("old-thread");
     expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "/clear" });
-    expect(adapter.sent.at(-1)?.text).toContain("Status: Processing");
-    expect(adapter.sent.at(-1)?.text).toContain("/clear");
+    expect(adapter.sent).toEqual([]);
+    expect(adapter.reactions).toEqual([{ chatId: 1, messageId: 1, emoji: "✍" }]);
   });
 
   test("clear callback is no longer supported", async () => {
@@ -618,7 +621,51 @@ describe("router", () => {
     expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(0);
   });
 
-  test("completed prompt card has no relay action buttons", async () => {
+  test("queued prompt updates the user message reaction", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await (router as any).submitTask(1, "queued work", 88, "queue");
+
+    expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(1);
+    expect(adapter.sent).toEqual([]);
+    expect(adapter.reactions).toEqual([{ chatId: 1, messageId: 88, emoji: "🫡" }]);
+  });
+
+  test("prompt without a user message id does not send a status card or reaction", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await (router as any).submitTask(1, "run without id", undefined, "immediate");
+
+    expect(agent.sent).toEqual([{ key: "1:demo", text: "run without id" }]);
+    expect(adapter.sent).toEqual([]);
+    expect(adapter.reactions).toEqual([]);
+  });
+
+  test("reaction failures do not fall back to a status card", async () => {
+    const { router, store, adapter, agent, root, logLines } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    adapter.failReaction = new Error("reaction unavailable");
+
+    await router.handle(textMessage("run task"));
+
+    expect(agent.sent).toEqual([{ key: "1:demo", text: "run task" }]);
+    expect(adapter.sent).toEqual([]);
+    expect(adapter.reactions).toEqual([]);
+    expect(logLines.join("\n")).toContain("router.task_reaction_failed");
+  });
+
+  test("completed prompt updates the user message reaction", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -628,14 +675,15 @@ describe("router", () => {
     await router.handle(textMessage("run task"));
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-1" });
 
-    expect(adapter.sent).toHaveLength(1);
-    expect(adapter.sent.at(-1)?.text).toContain("Status: Processing");
-    expect(adapter.edited.at(-1)?.text).toContain("Status: Completed");
-    expect(adapter.edited.at(-1)?.options.messageId).toBe(adapter.sent.at(-1)?.messageId);
-    expect(adapter.edited.at(-1)?.options.replyMarkup).toBeUndefined();
+    expect(adapter.sent).toEqual([]);
+    expect(adapter.edited).toEqual([]);
+    expect(adapter.reactions).toEqual([
+      { chatId: 1, messageId: 1, emoji: "✍" },
+      { chatId: 1, messageId: 1, emoji: "😎" },
+    ]);
   });
 
-  test("failed prompt edits the task status card", async () => {
+  test("failed prompt updates the user message reaction", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -646,9 +694,12 @@ describe("router", () => {
     await router.handle(textMessage("run task"));
 
     expect(store.getTask(1)?.status).toBe("failed");
-    expect(adapter.sent.at(0)?.text).toContain("Status: Processing");
-    expect(adapter.edited.at(-1)?.text).toContain("Status: Failed: send exploded");
     expect(adapter.sent.at(-1)?.text).toContain("Error:");
+    expect(adapter.edited).toEqual([]);
+    expect(adapter.reactions).toEqual([
+      { chatId: 1, messageId: 1, emoji: "✍" },
+      { chatId: 1, messageId: 1, emoji: "😱" },
+    ]);
   });
 
   test("backlog callback is no longer supported", async () => {
@@ -803,6 +854,7 @@ describe("router", () => {
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
     store.bindChat(1, "demo");
+    await router.handle(textMessage("ask mode"));
 
     await router.handleAgentOutput({
       type: "user_input_request",
@@ -830,6 +882,11 @@ describe("router", () => {
       result: { answers: { choice: { answers: ["Fast"] } } },
     }]);
     expect(adapter.sent.at(-1)?.text).toContain("Answered");
+    expect(adapter.reactions).toEqual([
+      { chatId: 1, messageId: 1, emoji: "✍" },
+      { chatId: 1, messageId: 1, emoji: "🤔" },
+      { chatId: 1, messageId: 1, emoji: "✍" },
+    ]);
   });
 
   test("codex user input callback buttons are no longer supported", async () => {
@@ -957,6 +1014,7 @@ describe("router", () => {
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
     store.bindChat(1, "demo");
+    await router.handle(textMessage("run tests"));
 
     await router.handleAgentOutput({
       type: "approval_request",
@@ -979,6 +1037,11 @@ describe("router", () => {
     expect(adapter.edited.at(-1)?.text).toContain("Run tests");
     expect(adapter.edited.at(-1)?.text).toContain("/tmp/demo");
     expect(adapter.edited.at(-1)?.text).toContain("bun test");
+    expect(adapter.reactions).toEqual([
+      { chatId: 1, messageId: 1, emoji: "✍" },
+      { chatId: 1, messageId: 1, emoji: "🤔" },
+      { chatId: 1, messageId: 1, emoji: "✍" },
+    ]);
   });
 });
 
