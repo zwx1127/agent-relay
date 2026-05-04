@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import type { AppConfig } from "../config.ts";
 import { isAuthorized } from "../config.ts";
 import { sessionKey } from "../agent.ts";
@@ -7,9 +9,13 @@ import { parseSessionKey } from "./session.ts";
 import type {
   AgentApprovalKind,
   AgentApprovalRequestEvent,
+  AgentBuiltinCommand,
+  AgentCollaborationMode,
   AgentDriver,
   AgentOutputEvent,
+  AgentReviewTarget,
   AgentSessionStatus,
+  AgentThreadSummary,
   AgentUserInputQuestion,
   AgentUserInputRequestEvent,
   ChatId,
@@ -123,8 +129,12 @@ export class MessageRouter {
         await this.createWorkspaceFromPrompt(message.chatId, message.replyToMessageId!, text);
       } else if (pending?.kind === "codex_user_input") {
         await this.answerCodexFreeText(message.chatId, message.replyToMessageId!, text);
+      } else if (pending?.kind === "relay_command") {
+        await this.answerRelayCommandPrompt(message.chatId, message.replyToMessageId!, text);
       } else if (command === "/relay") {
         await this.renderConsole(message.chatId);
+      } else if (command && await this.handleSlashCommand(message, command, text)) {
+        return;
       } else {
         await this.submitTask(message.chatId, text, message.messageId);
       }
@@ -145,6 +155,7 @@ export class MessageRouter {
   async handleAgentOutput(session: AgentOutputEvent): Promise<void> {
     if (session.type === "turn_completed") {
       await this.finalizeSessionOutput(session.sessionKey);
+      await this.sendPlanReadyPrompt(session.sessionKey);
       await this.completeTaskAndDispatchNext(session.sessionKey, session.turnId);
       return;
     }
@@ -270,6 +281,10 @@ export class MessageRouter {
       await this.renderPagedOutputCallback(message, payload);
       return;
     }
+    if (payload.startsWith("cmd:")) {
+      await this.handleCommandCallback(message, payload);
+      return;
+    }
     if (payload.startsWith("wl:")) {
       await this.renderWorkspacesCallback(message, Number(payload.slice("wl:".length)));
       return;
@@ -293,6 +308,250 @@ export class MessageRouter {
     }
 
     throw new Error("Unknown callback.");
+  }
+
+  private async handleSlashCommand(message: Extract<InboundMessage, { kind: "message" }>, command: string, text: string): Promise<boolean> {
+    switch (command) {
+      case "/review":
+        await this.runReviewCommand(message.chatId, text);
+        return true;
+      case "/compact":
+        await this.runBuiltinCommand(message.chatId, { type: "compact" });
+        return true;
+      case "/init":
+        await this.runInitCommand(message.chatId, message.messageId);
+        return true;
+      case "/new":
+      case "/clear":
+        await this.startFreshThread(message.chatId);
+        return true;
+      case "/resume":
+        await this.renderResumePicker(message.chatId, commandArgs(text));
+        return true;
+      case "/fork":
+        await this.forkCurrentThread(message.chatId);
+        return true;
+      case "/rename":
+        await this.renameCommand(message.chatId, commandArgs(text));
+        return true;
+      case "/plan":
+        await this.planCommand(message.chatId, commandArgs(text), message.messageId);
+        return true;
+      case "/stop":
+        await this.cleanBackgroundTerminals(message.chatId);
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  private async runReviewCommand(chatId: ChatId, text: string): Promise<void> {
+    const target = parseReviewTarget(commandArgs(text));
+    await this.runBuiltinCommand(chatId, { type: "review", target });
+  }
+
+  private async runBuiltinCommand(chatId: ChatId, command: AgentBuiltinCommand): Promise<void> {
+    const { workspace, status, key } = await this.commandSession(chatId);
+    if (this.sessionBusy(status)) {
+      await this.sendBusyCommandNotice(chatId);
+      return;
+    }
+    if (!this.deps.agent.runBuiltinCommand) throw new Error("Agent driver does not support this command.");
+    const result = await this.deps.agent.runBuiltinCommand(key, command);
+    if (result.threadId && result.threadId !== status.threadId) this.deps.store.setSessionThreadId(key, result.threadId);
+    this.logger.info("router.builtin_command_started", { chat_id: chatId, workspace: workspace.name, command: command.type });
+    await this.sendRendered(chatId, messageWithTitle(result.message));
+  }
+
+  private async runInitCommand(chatId: ChatId, userMessageId?: number): Promise<void> {
+    const workspace = this.requireCurrentWorkspace(chatId);
+    if (existsSync(join(workspace.path, "AGENTS.md"))) {
+      await this.sendRendered(chatId, messageWithTitle("AGENTS.md already exists.", "Skipping /init to avoid overwriting it."));
+      return;
+    }
+    await this.submitTask(chatId, "Generate a file named AGENTS.md that serves as a contributor guide for this repository.", userMessageId, "immediate");
+  }
+
+  private async startFreshThread(chatId: ChatId): Promise<void> {
+    const workspace = this.requireCurrentWorkspace(chatId);
+    const key = sessionKey(chatId, workspace.name);
+    await this.finalizeSessionOutput(key);
+    await this.deps.agent.stop(key);
+    this.deps.store.markSessionStopped(key);
+    this.deps.store.clearSessionThreadId(key);
+    const status = await this.ensureAgentStarted(chatId, workspace);
+    this.deps.store.setCollaborationMode(key, "default");
+    await this.sendRendered(chatId, messageWithTitle("Started a new chat.", `Thread: ${status.threadName ?? status.threadId ?? "new"}`));
+  }
+
+  private async renderResumePicker(chatId: ChatId, searchTerm: string): Promise<void> {
+    const workspace = this.requireCurrentWorkspace(chatId);
+    if (!this.deps.agent.listThreads) throw new Error("Agent driver cannot list threads.");
+    const threads = await this.deps.agent.listThreads({
+      workspacePath: workspace.path,
+      limit: LIST_PAGE_SIZE,
+      ...(searchTerm ? { searchTerm } : {}),
+    });
+    if (threads.length === 0) {
+      await this.sendRendered(chatId, messageWithTitle("No saved chats found."));
+      return;
+    }
+    const token = shortToken();
+    const result = await this.sendRendered(chatId, formatResumeMessage(threads), {
+      replyMarkup: resumeKeyboard(token, threads),
+      disableWebPagePreview: true,
+    });
+    if (!result.messageId) throw new Error("Telegram did not return a resume picker message id.");
+    this.deps.store.setPendingPrompt({
+      chatId,
+      promptMessageId: result.messageId,
+      kind: "relay_command",
+      createdAt: Date.now(),
+      payloadJson: JSON.stringify({ command: "resume", token, threads: threads.map((thread) => ({ id: thread.id, name: thread.name })) }),
+      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
+    });
+  }
+
+  private async forkCurrentThread(chatId: ChatId): Promise<void> {
+    const { workspace, status, key } = await this.commandSession(chatId);
+    if (this.sessionBusy(status)) {
+      await this.sendBusyCommandNotice(chatId);
+      return;
+    }
+    if (!this.deps.agent.forkThread) throw new Error("Agent driver cannot fork threads.");
+    const result = await this.deps.agent.forkThread(key);
+    this.deps.store.setSessionThreadId(key, result.threadId);
+    await this.sendRendered(chatId, messageWithTitle("Forked chat.", `Thread: ${result.threadName ?? result.threadId}`));
+    this.logger.info("router.thread_forked", { chat_id: chatId, workspace: workspace.name, thread_id: result.threadId });
+  }
+
+  private async renameCommand(chatId: ChatId, name: string): Promise<void> {
+    if (name.trim()) {
+      await this.renameCurrentThread(chatId, name.trim());
+      return;
+    }
+    const result = await this.sendRendered(chatId, textMessage("Reply with the new chat name."), {
+      forceReply: true,
+      disableWebPagePreview: true,
+    });
+    if (!result.messageId) throw new Error("Telegram did not return a rename prompt message id.");
+    this.deps.store.setPendingPrompt({
+      chatId,
+      promptMessageId: result.messageId,
+      kind: "relay_command",
+      createdAt: Date.now(),
+      payloadJson: JSON.stringify({ command: "rename" }),
+      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
+    });
+  }
+
+  private async renameCurrentThread(chatId: ChatId, name: string): Promise<void> {
+    const { key } = await this.commandSession(chatId);
+    if (!this.deps.agent.renameThread) throw new Error("Agent driver cannot rename threads.");
+    await this.deps.agent.renameThread(key, name);
+    await this.sendRendered(chatId, messageWithTitle("Renamed chat.", name));
+  }
+
+  private async planCommand(chatId: ChatId, prompt: string, userMessageId?: number): Promise<void> {
+    const workspace = this.requireCurrentWorkspace(chatId);
+    const status = await this.ensureAgentStarted(chatId, workspace);
+    if (this.sessionBusy(status)) {
+      await this.sendBusyCommandNotice(chatId);
+      return;
+    }
+    const key = sessionKey(chatId, workspace.name);
+    const current = this.deps.store.getCollaborationMode(key);
+    if (!prompt.trim()) {
+      const next: AgentCollaborationMode = current === "plan" ? "default" : "plan";
+      this.deps.store.setCollaborationMode(key, next);
+      await this.sendRendered(chatId, messageWithTitle(next === "plan" ? "Plan mode enabled." : "Plan mode disabled."));
+      return;
+    }
+    this.deps.store.setCollaborationMode(key, "plan");
+    await this.submitTask(chatId, prompt.trim(), userMessageId, "immediate");
+  }
+
+  private async cleanBackgroundTerminals(chatId: ChatId): Promise<void> {
+    const { key } = await this.commandSession(chatId);
+    if (!this.deps.agent.cleanBackgroundTerminals) throw new Error("Agent driver cannot clean background terminals.");
+    await this.deps.agent.cleanBackgroundTerminals(key);
+    await this.sendRendered(chatId, messageWithTitle("Background terminals stopped."));
+  }
+
+  private async commandSession(chatId: ChatId): Promise<{ workspace: WorkspaceRecord; status: AgentSessionStatus; key: string }> {
+    const workspace = this.requireCurrentWorkspace(chatId);
+    const status = await this.ensureAgentStarted(chatId, workspace);
+    return { workspace, status, key: sessionKey(chatId, workspace.name) };
+  }
+
+  private sessionBusy(status: AgentSessionStatus): boolean {
+    return Boolean(status.activeTurnId || status.waitingForApproval || status.waitingForUserInput);
+  }
+
+  private async sendBusyCommandNotice(chatId: ChatId): Promise<void> {
+    await this.sendRendered(chatId, messageWithTitle("Codex is busy.", "Wait for the current turn, answer the pending question, or handle the approval request before running this command."));
+  }
+
+  private async handleCommandCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
+    const parts = payload.split(":");
+    const [, command, token, action] = parts;
+    const pending = message.messageId ? this.deps.store.getPendingPrompt(message.chatId, message.messageId) : undefined;
+    const data = parsePromptPayload(pending?.payloadJson);
+    if (!pending || pending.kind !== "relay_command" || !data || data.token !== token || isExpired(pending)) {
+      await this.expireCallbackPrompt(message);
+      return;
+    }
+
+    if (command === "resume") {
+      await this.resumeFromCallback(message, pending, data, action);
+      return;
+    }
+    if (command === "plan") {
+      await this.planFromCallback(message, pending, data, action);
+      return;
+    }
+    throw new Error("Unknown command callback.");
+  }
+
+  private async resumeFromCallback(
+    message: Extract<InboundMessage, { kind: "callback_query" }>,
+    pending: NonNullable<ReturnType<Store["getPendingPrompt"]>>,
+    data: Record<string, unknown>,
+    rawIndex: string | undefined,
+  ): Promise<void> {
+    const index = Number(rawIndex);
+    if (!Number.isInteger(index) || index < 0) throw new Error("Resume thread is missing.");
+    const threads = Array.isArray(data.threads) ? data.threads : [];
+    const selected = asPromptRecord(threads[index]);
+    const threadId = typeof selected?.id === "string" ? selected.id : undefined;
+    if (!threadId) throw new Error("Resume selection expired.");
+    const workspace = this.requireCurrentWorkspace(message.chatId);
+    const key = sessionKey(message.chatId, workspace.name);
+    await this.finalizeSessionOutput(key);
+    await this.deps.agent.stop(key);
+    this.deps.store.markSessionStopped(key);
+    const status = await this.ensureAgentStarted(message.chatId, workspace, threadId);
+    this.deps.store.setSessionThreadId(key, status.threadId ?? threadId);
+    this.deps.store.deletePendingPrompt(pending.chatId, pending.promptMessageId);
+    await this.renderCallbackPage(message, messageWithTitle("Resumed chat.", status.threadName ?? status.threadId ?? threadId), { inline_keyboard: [] });
+  }
+
+  private async planFromCallback(
+    message: Extract<InboundMessage, { kind: "callback_query" }>,
+    pending: NonNullable<ReturnType<Store["getPendingPrompt"]>>,
+    _data: Record<string, unknown>,
+    action: string | undefined,
+  ): Promise<void> {
+    const workspace = this.requireCurrentWorkspace(message.chatId);
+    const key = sessionKey(message.chatId, workspace.name);
+    this.deps.store.deletePendingPrompt(pending.chatId, pending.promptMessageId);
+    if (action === "implement") {
+      this.deps.store.setCollaborationMode(key, "default");
+      await this.renderCallbackPage(message, messageWithTitle("Implementing plan."), { inline_keyboard: [] });
+      await this.submitTask(message.chatId, "Implement the approved plan.", undefined, "immediate");
+      return;
+    }
+    await this.renderCallbackPage(message, messageWithTitle("Continuing in Plan mode."), { inline_keyboard: [] });
   }
 
   private async renderHomeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
@@ -563,7 +822,8 @@ export class MessageRouter {
     });
     let result: Awaited<ReturnType<AgentDriver["send"]>>;
     try {
-      result = await this.deps.agent.send(key, text);
+      const mode = this.deps.store.getCollaborationMode(key);
+      result = await this.deps.agent.send(key, text, mode === "plan" ? { collaborationMode: "plan" } : undefined);
     } catch (error) {
       if (task) {
         this.deps.store.updateTask(task.id, { status: "failed" });
@@ -630,6 +890,26 @@ export class MessageRouter {
     if (next) {
       await this.runTask(workspace, next);
     }
+  }
+
+  private async sendPlanReadyPrompt(sessionKeyValue: string): Promise<void> {
+    const parsed = parseSessionKey(sessionKeyValue);
+    if (!parsed || this.deps.store.getCollaborationMode(sessionKeyValue) !== "plan") return;
+    const token = shortToken();
+    const result = await this.sendRendered(parsed.chatId, messageWithTitle("Plan ready.", "Choose whether to implement it now or keep refining the plan."), {
+      replyMarkup: planReadyKeyboard(token),
+      disableWebPagePreview: true,
+    });
+    if (!result.messageId) return;
+    this.deps.store.setPendingPrompt({
+      chatId: parsed.chatId,
+      promptMessageId: result.messageId,
+      kind: "relay_command",
+      createdAt: Date.now(),
+      sessionKey: sessionKeyValue,
+      payloadJson: JSON.stringify({ command: "plan", token }),
+      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
+    });
   }
 
   private async syncTaskReaction(taskId: number): Promise<void> {
@@ -838,6 +1118,22 @@ export class MessageRouter {
     const hasNext = !response && await this.sendNextCodexQuestion(chatId, pending, data);
     if (!hasNext) await this.sendRendered(chatId, data.isSecret ? messageWithTitle("Answered.") : answeredMessage(text, false));
     if (response) await this.respondToCodexPrompt(response);
+  }
+
+  private async answerRelayCommandPrompt(chatId: ChatId, promptMessageId: number, text: string): Promise<void> {
+    const pending = this.deps.store.getPendingPrompt(chatId, promptMessageId);
+    const data = parsePromptPayload(pending?.payloadJson);
+    if (!pending || pending.kind !== "relay_command" || !data || isExpired(pending)) {
+      this.deps.store.deletePendingPrompt(chatId, promptMessageId);
+      await this.sendRendered(chatId, textMessage("Command prompt expired."));
+      return;
+    }
+    this.deps.store.deletePendingPrompt(chatId, promptMessageId);
+    if (data.command === "rename") {
+      await this.renameCurrentThread(chatId, text.trim());
+      return;
+    }
+    await this.sendRendered(chatId, textMessage("Command prompt expired."));
   }
 
   private async recordCodexAnswer(
@@ -1124,6 +1420,20 @@ function commandName(text: string): string | undefined {
   return command.split("@")[0] || undefined;
 }
 
+function commandArgs(text: string): string {
+  const trimmed = text.trim();
+  const firstSpace = trimmed.search(/\s/);
+  return firstSpace < 0 ? "" : trimmed.slice(firstSpace + 1).trim();
+}
+
+function parseReviewTarget(args: string): AgentReviewTarget {
+  if (!args) return { type: "uncommittedChanges" };
+  const [kind = "", second = "", ...rest] = args.split(/\s+/);
+  if (kind === "branch" && second) return { type: "baseBranch", branch: second };
+  if (kind === "commit" && second) return { type: "commit", sha: second, title: rest.join(" ") || null };
+  return { type: "custom", instructions: args };
+}
+
 function decoratePagedOutput(page: RenderedTelegramText, pageIndex: number, totalPages: number): RenderedTelegramText {
   return appendRendered(page, renderTelegramText(["\n\n", bold(`Page ${pageIndex + 1}/${totalPages}`)]));
 }
@@ -1168,6 +1478,34 @@ function ensureRendered(body: string | RenderedTelegramText): RenderedTelegramTe
 
 function messageWithTitle(title: string, body?: string): RenderedTelegramText {
   return renderTelegramText(body ? [bold(title), "\n\n", body] : [bold(title)]);
+}
+
+function formatResumeMessage(threads: AgentThreadSummary[]): RenderedTelegramText {
+  const parts: TelegramTextPart[] = [bold("Resume chat"), "\n\n"];
+  for (const [index, thread] of threads.entries()) {
+    if (index > 0) parts.push("\n");
+    parts.push(`${index + 1}. `, code(thread.name ?? thread.id));
+    if (thread.preview) parts.push(` - ${truncateForTelegramLabel(thread.preview, 80)}`);
+  }
+  return renderTelegramText(parts);
+}
+
+function resumeKeyboard(token: string, threads: AgentThreadSummary[]): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: threads.map((thread, index) => [{
+      text: buttonLabel(thread.name ?? thread.id),
+      callback_data: `ar:cmd:resume:${token}:${index}`,
+    }]),
+  };
+}
+
+function planReadyKeyboard(token: string): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [[
+      { text: "Implement", callback_data: `ar:cmd:plan:${token}:implement` },
+      { text: "Continue", callback_data: `ar:cmd:plan:${token}:continue` },
+    ]],
+  };
 }
 
 function confirmMessage(title: string, body: string): RenderedTelegramText {
@@ -1277,6 +1615,10 @@ function parsePromptPayload(payloadJson: string | undefined): Record<string, unk
   } catch {
     return undefined;
   }
+}
+
+function asPromptRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
 }
 
 function isExpired(prompt: { expiresAt?: number }): boolean {

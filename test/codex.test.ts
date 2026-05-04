@@ -146,8 +146,8 @@ describe("CodexDriver app-server protocol", () => {
     );
 
     const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: "/tmp/demo" });
-    await driver.runBuiltinCommand(status.sessionKey, "review");
-    await driver.runBuiltinCommand(status.sessionKey, "compact");
+    await driver.runBuiltinCommand(status.sessionKey, { type: "review" });
+    await driver.runBuiltinCommand(status.sessionKey, { type: "compact" });
     const threads = await driver.listThreads({ workspacePath: "/tmp/demo", limit: 5 });
     const models = await driver.listModels();
 
@@ -162,6 +162,50 @@ describe("CodexDriver app-server protocol", () => {
     expect(messages.find((message) => message.method === "model/list").params.includeHidden).toBe(false);
     expect(threads[0]?.id).toBe("listed-thread");
     expect(models[0]?.id).toBe("gpt-5.2");
+    await driver.stop(status.sessionKey);
+  });
+
+  test("sends thread management command payloads", async () => {
+    const fake = fakeCodexBin();
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: "/tmp/demo" });
+    const forked = await driver.forkThread(status.sessionKey);
+    await driver.renameThread(status.sessionKey, "New name");
+    await driver.cleanBackgroundTerminals(status.sessionKey);
+
+    const messages = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(messages.find((message) => message.method === "thread/fork").params.threadId).toBe("thread-1");
+    expect(messages.find((message) => message.method === "thread/name/set").params).toEqual({ threadId: "fork-thread", name: "New name" });
+    expect(messages.find((message) => message.method === "thread/backgroundTerminals/clean").params).toEqual({ threadId: "fork-thread" });
+    expect(forked.threadId).toBe("fork-thread");
+    expect(driver.getStatus(status.sessionKey)?.threadName).toBe("New name");
+    await driver.stop(status.sessionKey);
+  });
+
+  test("emits plan deltas and completed review items as visible output", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => {
+        events.push(event);
+      },
+      () => undefined,
+    );
+
+    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "plan please", { collaborationMode: "plan" });
+    await sleep(100);
+
+    expect(events).toContainEqual({ type: "message", sessionKey: "1:demo", chunk: "Plan item", turnId: "turn-1", itemId: "p1" });
+    expect(events).toContainEqual({ type: "message", sessionKey: "1:demo", chunk: "Review summary", turnId: "turn-1", itemId: "r1" });
+    const turnStart = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((message) => message.method === "turn/start" && message.params.input[0].text === "plan please");
+    expect(turnStart.params.collaborationMode.mode).toBe("plan");
     await driver.stop(status.sessionKey);
   });
 
@@ -223,6 +267,10 @@ rl.on("line", (line) => {
       send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-1", turnId, tokenUsage: { last: { totalTokens: 7 }, total: { totalTokens: 42 }, modelContextWindow: 100 } } });
     } else if (inputText === "ask") {
       send({ id: 900, method: "item/tool/requestUserInput", params: { threadId: "thread-1", turnId, itemId: "item-1", questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [{ label: "Fast", description: "Quick" }] }] } });
+    } else if (inputText === "plan please") {
+      send({ method: "item/plan/delta", params: { threadId: "thread-1", turnId, itemId: "p1", delta: "Plan item" } });
+      send({ method: "item/completed", params: { threadId: "thread-1", turnId, item: { type: "exitedReviewMode", id: "r1", review: "Review summary" } } });
+      send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: turnId, status: "completed", items: [] } } });
     } else if (inputText !== "slow active") {
       send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId, itemId: "m1", delta: "hello " } });
       send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", turnId, itemId: "c1", delta: "raw stdout" } });
@@ -240,6 +288,12 @@ rl.on("line", (line) => {
   } else if (msg.method === "review/start") {
     send({ id: msg.id, result: { reviewThreadId: "thread-1", turn: { id: "review-turn", status: "inProgress", items: [] } } });
   } else if (msg.method === "thread/compact/start") {
+    send({ id: msg.id, result: {} });
+  } else if (msg.method === "thread/fork") {
+    send({ id: msg.id, result: { thread: { id: "fork-thread", name: "Forked thread", status: { type: "idle" } }, model: "gpt-5.2", modelProvider: "openai", reasoningEffort: "medium", approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: { type: "workspaceWrite" } } });
+  } else if (msg.method === "thread/name/set") {
+    send({ id: msg.id, result: {} });
+  } else if (msg.method === "thread/backgroundTerminals/clean") {
     send({ id: msg.id, result: {} });
   } else if (msg.method === "thread/list") {
     send({ id: msg.id, result: { data: [{ id: "listed-thread", name: "Listed", cwd: msg.params.cwd, status: { type: "idle" }, updatedAt: 10, createdAt: 5, preview: "Preview" }] } });

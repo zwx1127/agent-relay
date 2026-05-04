@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import { noopLogger, type Logger } from "../logger.ts";
-import type { ChatBinding, ChatId, HomeStatusMode, PendingPrompt, PendingPromptKind, RelayTask, TaskStatus, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "../types.ts";
+import type { AgentCollaborationMode, ChatBinding, ChatId, HomeStatusMode, PendingPrompt, PendingPromptKind, RelayTask, TaskStatus, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "../types.ts";
 
 interface WorkspaceRow {
   name: string;
@@ -39,6 +39,7 @@ interface AgentSessionRow {
   started_at: number;
   stopped_at?: number | null;
   thread_id?: string | null;
+  collaboration_mode?: string | null;
 }
 
 interface PagedOutputRow {
@@ -170,6 +171,7 @@ export class Store {
       )
     `);
     this.addColumnIfMissing("agent_sessions", "thread_id", "TEXT");
+    this.addColumnIfMissing("agent_sessions", "collaboration_mode", "TEXT NOT NULL DEFAULT 'default'");
     this.addColumnIfMissing("pending_prompts", "session_key", "TEXT");
     this.addColumnIfMissing("pending_prompts", "payload_json", "TEXT");
     this.addColumnIfMissing("pending_prompts", "expires_at", "INTEGER");
@@ -248,13 +250,28 @@ export class Store {
   }
 
   clearSessionThreadId(sessionKey: string): void {
-    this.db.query("UPDATE agent_sessions SET thread_id = NULL WHERE session_key = ?").run(sessionKey);
+    this.db.query("UPDATE agent_sessions SET thread_id = NULL, collaboration_mode = 'default' WHERE session_key = ?").run(sessionKey);
     this.logger.info("store.session_thread_cleared", { session_key: sessionKey });
+  }
+
+  setSessionThreadId(sessionKey: string, threadId: string): void {
+    this.db.query("UPDATE agent_sessions SET thread_id = ? WHERE session_key = ?").run(threadId, sessionKey);
+    this.logger.info("store.session_thread_set", { session_key: sessionKey, thread_id: threadId });
+  }
+
+  getCollaborationMode(sessionKey: string): AgentCollaborationMode {
+    const row = this.db.query<{ collaboration_mode?: string | null }, [string]>("SELECT collaboration_mode FROM agent_sessions WHERE session_key = ?").get(sessionKey);
+    return row?.collaboration_mode === "plan" ? "plan" : "default";
+  }
+
+  setCollaborationMode(sessionKey: string, mode: AgentCollaborationMode): void {
+    this.db.query("UPDATE agent_sessions SET collaboration_mode = ? WHERE session_key = ?").run(mode, sessionKey);
+    this.logger.info("store.session_collaboration_mode_set", { session_key: sessionKey, collaboration_mode: mode });
   }
 
   getSession(sessionKey: string): AgentSessionRow | undefined {
     const row = this.db.query<AgentSessionRow, [string]>(`
-      SELECT session_key, chat_id, workspace_name, status, started_at, stopped_at, thread_id
+      SELECT session_key, chat_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode
       FROM agent_sessions
       WHERE session_key = ?
     `).get(sessionKey);

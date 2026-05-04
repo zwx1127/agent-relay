@@ -5,12 +5,15 @@ import { noopLogger, type Logger } from "../logger.ts";
 import type {
   AgentBuiltinCommand,
   AgentBuiltinResult,
+  AgentSendOptions,
   AgentApprovalKind,
   AgentDriver,
   AgentExitHandler,
   AgentModelSummary,
   AgentOutputHandler,
+  AgentReviewTarget,
   AgentSessionStatus,
+  AgentThreadSwitchResult,
   AgentThreadListOptions,
   AgentThreadSummary,
   AgentTokenBreakdown,
@@ -132,9 +135,9 @@ export class CodexDriver implements AgentDriver {
     return status;
   }
 
-  async send(key: string, text: string): Promise<{ turnId?: string }> {
+  async send(key: string, text: string, options?: AgentSendOptions): Promise<{ turnId?: string }> {
     const previous = this.inputQueues.get(key) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(() => this.sendNow(key, text));
+    const current = previous.catch(() => undefined).then(() => this.sendNow(key, text, options));
     this.inputQueues.set(key, current);
     try {
       return await current;
@@ -143,7 +146,7 @@ export class CodexDriver implements AgentDriver {
     }
   }
 
-  private async sendNow(key: string, text: string): Promise<{ turnId?: string }> {
+  private async sendNow(key: string, text: string, options?: AgentSendOptions): Promise<{ turnId?: string }> {
     const running = this.sessions.get(key);
     if (!running?.status.threadId) {
       this.logger.warn("codex.send_without_session", { session_key: key, text_len: text.length });
@@ -152,9 +155,10 @@ export class CodexDriver implements AgentDriver {
 
     const input = [{ type: "text", text }];
     const method = running.status.activeTurnId ? "turn/steer" : "turn/start";
+    const collaborationMode = options?.collaborationMode === "plan" ? planCollaborationMode(running.status) : undefined;
     const params = running.status.activeTurnId
       ? { threadId: running.status.threadId, expectedTurnId: running.status.activeTurnId, input }
-      : { threadId: running.status.threadId, input };
+      : { threadId: running.status.threadId, input, ...(collaborationMode ? { collaborationMode } : {}) };
 
     this.logger.info("codex.input_sent", {
       session_key: key,
@@ -179,7 +183,7 @@ export class CodexDriver implements AgentDriver {
         stale_turn_id: running.status.activeTurnId,
       });
       running.status.activeTurnId = undefined;
-      result = await this.request("turn/start", { threadId: running.status.threadId, input });
+      result = await this.request("turn/start", { threadId: running.status.threadId, input, ...(collaborationMode ? { collaborationMode } : {}) });
     }
     updateActiveTurnFromResult(running, result);
     return { turnId: getTurnId(result) };
@@ -228,10 +232,10 @@ export class CodexDriver implements AgentDriver {
 
   async runBuiltinCommand(key: string, command: AgentBuiltinCommand): Promise<AgentBuiltinResult> {
     const running = this.requireRunningSession(key);
-    if (command === "review") {
+    if (command.type === "review") {
       const result = await this.request("review/start", {
         threadId: running.status.threadId,
-        target: { type: "uncommittedChanges" },
+        target: reviewTargetPayload(command.target ?? { type: "uncommittedChanges" }),
         delivery: "inline",
       });
       updateActiveTurnFromResult(running, result);
@@ -247,6 +251,38 @@ export class CodexDriver implements AgentDriver {
     return { message: "Compaction started.", threadId: running.status.threadId, turnId: getTurnId(result) };
   }
 
+  async forkThread(key: string): Promise<AgentThreadSwitchResult> {
+    const running = this.requireRunningSession(key);
+    const result = await this.request("thread/fork", {
+      threadId: running.status.threadId,
+      cwd: running.status.workspacePath,
+      approvalPolicy: this.options.approval,
+      approvalsReviewer: "user",
+      sandbox: this.options.sandbox,
+      ...(this.options.developerInstructions ? { developerInstructions: this.options.developerInstructions } : {}),
+      ...(this.options.baseInstructions ? { baseInstructions: this.options.baseInstructions } : {}),
+      excludeTurns: true,
+    });
+    const threadId = getThreadId(result);
+    if (!threadId) throw new Error("Codex app-server did not return a forked thread id.");
+    if (running.status.threadId) this.threadToSession.delete(running.status.threadId);
+    running.status.threadId = threadId;
+    applySessionMetadata(running.status, result);
+    this.threadToSession.set(threadId, key);
+    return { threadId, threadName: running.status.threadName };
+  }
+
+  async renameThread(key: string, name: string): Promise<void> {
+    const running = this.requireRunningSession(key);
+    await this.request("thread/name/set", { threadId: running.status.threadId, name });
+    running.status.threadName = name;
+  }
+
+  async cleanBackgroundTerminals(key: string): Promise<void> {
+    const running = this.requireRunningSession(key);
+    await this.request("thread/backgroundTerminals/clean", { threadId: running.status.threadId });
+  }
+
   async listThreads(options: AgentThreadListOptions): Promise<AgentThreadSummary[]> {
     await this.ensureServer();
     const result = await this.request("thread/list", {
@@ -254,6 +290,7 @@ export class CodexDriver implements AgentDriver {
       limit: options.limit ?? 10,
       sortKey: "updated_at",
       sortDirection: "desc",
+      ...(options.searchTerm ? { searchTerm: options.searchTerm } : {}),
     });
     const data = Array.isArray(asRecord(result)?.data) ? asRecord(result)!.data as unknown[] : [];
     return data.map(toThreadSummary).filter((thread): thread is AgentThreadSummary => Boolean(thread));
@@ -363,6 +400,22 @@ export class CodexDriver implements AgentDriver {
       const turnId = getTurnId(params);
       const itemId = typeof params?.itemId === "string" ? params.itemId : undefined;
       if (delta) await this.onOutput({ type: "message", sessionKey: key, chunk: delta, turnId, itemId });
+      return;
+    }
+
+    if (message.method === "item/plan/delta") {
+      const delta = typeof params?.delta === "string" ? params.delta : "";
+      const turnId = getTurnId(params);
+      const itemId = typeof params?.itemId === "string" ? params.itemId : undefined;
+      if (delta) await this.onOutput({ type: "message", sessionKey: key, chunk: delta, turnId, itemId });
+      return;
+    }
+
+    if (message.method === "item/completed") {
+      const item = asRecord(params?.item);
+      if (item?.type === "exitedReviewMode" && typeof item.review === "string" && item.review) {
+        await this.onOutput({ type: "message", sessionKey: key, chunk: item.review, turnId: getTurnId(params), itemId: getString(item, "id") });
+      }
       return;
     }
 
@@ -616,6 +669,30 @@ function toModelSummary(value: unknown): AgentModelSummary | undefined {
     supportedReasoningEfforts: Array.isArray(record?.supportedReasoningEfforts)
       ? record.supportedReasoningEfforts.filter((effort): effort is string => typeof effort === "string")
       : undefined,
+  };
+}
+
+function reviewTargetPayload(target: AgentReviewTarget): unknown {
+  switch (target.type) {
+    case "baseBranch":
+      return { type: "baseBranch", branch: target.branch };
+    case "commit":
+      return { type: "commit", sha: target.sha, title: target.title ?? null };
+    case "custom":
+      return { type: "custom", instructions: target.instructions };
+    case "uncommittedChanges":
+      return { type: "uncommittedChanges" };
+  }
+}
+
+function planCollaborationMode(status: AgentSessionStatus): unknown {
+  return {
+    mode: "plan",
+    settings: {
+      model: status.model ?? "gpt-5.2",
+      reasoning_effort: status.reasoningEffort ?? null,
+      developer_instructions: null,
+    },
   };
 }
 

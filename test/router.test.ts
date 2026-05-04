@@ -7,7 +7,7 @@ import type { AppConfig } from "../src/config.ts";
 import { MessageRouter } from "../src/router/message-router.ts";
 import { Store } from "../src/storage/store.ts";
 import { TextLogger, type LogLevel } from "../src/logger.ts";
-import type { AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSummary, AgentSessionStatus, AgentThreadListOptions, AgentThreadSummary, ChatId, EditMessageTextOptions, SendMessageOptions } from "../src/types.ts";
+import type { AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentThreadListOptions, AgentThreadSummary, ChatId, EditMessageTextOptions, SendMessageOptions } from "../src/types.ts";
 
 class FakeAdapter {
   sent: Array<{ chatId: ChatId; text: string; options?: SendMessageOptions; messageId?: number }> = [];
@@ -46,10 +46,13 @@ class FakeAdapter {
 
 class FakeAgent implements AgentDriver {
   statuses = new Map<string, AgentSessionStatus>();
-  sent: Array<{ key: string; text: string }> = [];
+  sent: Array<{ key: string; text: string; options?: AgentSendOptions }> = [];
   stopped: string[] = [];
   responses: Array<{ key: string; requestId: string | number; result: unknown }> = [];
   builtins: Array<{ key: string; command: AgentBuiltinCommand }> = [];
+  forks: string[] = [];
+  renames: Array<{ key: string; name: string }> = [];
+  cleaned: string[] = [];
   threadLists: AgentThreadListOptions[] = [];
   threads: AgentThreadSummary[] = [];
   models: AgentModelSummary[] = [];
@@ -70,9 +73,9 @@ class FakeAgent implements AgentDriver {
     return status;
   }
 
-  async send(key: string, text: string): Promise<{ turnId?: string }> {
+  async send(key: string, text: string, options?: AgentSendOptions): Promise<{ turnId?: string }> {
     if (this.failSend) throw this.failSend;
-    this.sent.push({ key, text });
+    this.sent.push({ key, text, ...(options ? { options } : {}) });
     const status = this.statuses.get(key);
     if (status?.activeTurnId) return { turnId: status.activeTurnId };
     const turnId = `turn-${this.sent.length}`;
@@ -95,7 +98,27 @@ class FakeAgent implements AgentDriver {
 
   async runBuiltinCommand(key: string, command: AgentBuiltinCommand): Promise<AgentBuiltinResult> {
     this.builtins.push({ key, command });
-    return { message: command === "review" ? "Review started." : "Compaction started." };
+    return { message: command.type === "review" ? "Review started." : "Compaction started." };
+  }
+
+  async forkThread(key: string): Promise<{ threadId: string; threadName?: string }> {
+    this.forks.push(key);
+    const status = this.statuses.get(key);
+    if (status) {
+      status.threadId = "fork-thread";
+      status.threadName = "Forked";
+    }
+    return { threadId: "fork-thread", threadName: "Forked" };
+  }
+
+  async renameThread(key: string, name: string): Promise<void> {
+    this.renames.push({ key, name });
+    const status = this.statuses.get(key);
+    if (status) status.threadName = name;
+  }
+
+  async cleanBackgroundTerminals(key: string): Promise<void> {
+    this.cleaned.push(key);
   }
 
   async listThreads(options: AgentThreadListOptions): Promise<AgentThreadSummary[]> {
@@ -403,7 +426,7 @@ describe("router", () => {
     expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toEqual(["ar:w", "ar:status", "ar:s"]);
   });
 
-  test("slash commands are forwarded as Codex prompts when a workspace is selected", async () => {
+  test("unsupported slash commands are forwarded as Codex prompts when a workspace is selected", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -414,8 +437,6 @@ describe("router", () => {
     await router.handle(textMessage("/codex"));
     await router.handle(textMessage("/status"));
     await router.handle(textMessage("/start"));
-    await router.handle(textMessage("/review"));
-    await router.handle(textMessage("/compact"));
     await router.handle(textMessage("/model"));
 
     expect(agent.sent.map((message) => message.text)).toEqual([
@@ -423,8 +444,6 @@ describe("router", () => {
       "/codex",
       "/status",
       "/start",
-      "/review",
-      "/compact",
       "/model",
     ]);
     expect(agent.builtins).toEqual([]);
@@ -432,7 +451,25 @@ describe("router", () => {
     expect(adapter.reactions).toEqual([{ chatId: 1, messageId: 1, emoji: "✍" }]);
   });
 
-  test("/init is forwarded literally for Codex to interpret", async () => {
+  test("/review and /compact run Codex built-ins", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await router.handle(textMessage("/review branch main"));
+    await router.handle(textMessage("/compact"));
+
+    expect(agent.sent).toEqual([]);
+    expect(agent.builtins).toEqual([
+      { key: "1:demo", command: { type: "review", target: { type: "baseBranch", branch: "main" } } },
+      { key: "1:demo", command: { type: "compact" } },
+    ]);
+    expect(adapter.sent.map((message) => message.text)).toEqual(["Review started.", "Compaction started."]);
+  });
+
+  test("/init starts the AGENTS.md generation prompt", async () => {
     const { router, store, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -441,10 +478,10 @@ describe("router", () => {
 
     await router.handle(textMessage("/init"));
 
-    expect(agent.sent).toEqual([{ key: "1:demo", text: "/init" }]);
+    expect(agent.sent).toEqual([{ key: "1:demo", text: "Generate a file named AGENTS.md that serves as a contributor guide for this repository." }]);
   });
 
-  test("/clear is forwarded literally instead of replacing the thread", async () => {
+  test("/clear starts a fresh thread while keeping the workspace selected", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -455,11 +492,11 @@ describe("router", () => {
 
     await router.handle(textMessage("/clear"));
 
-    expect(agent.stopped).toEqual([]);
-    expect(store.getSession("1:demo")?.thread_id).toBe("old-thread");
-    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "/clear" });
-    expect(adapter.sent).toEqual([]);
-    expect(adapter.reactions).toEqual([{ chatId: 1, messageId: 1, emoji: "✍" }]);
+    expect(agent.stopped).toEqual(["1:demo"]);
+    expect(store.getBinding(1)?.workspaceName).toBe("demo");
+    expect(store.getSession("1:demo")?.thread_id).toBe("thread-1");
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Started a new chat.");
   });
 
   test("clear callback is no longer supported", async () => {
@@ -476,6 +513,67 @@ describe("router", () => {
     expect(agent.stopped).toEqual([]);
     expect(store.getSession("1:demo")?.thread_id).toBe("old-thread");
     expect(adapter.edited.at(-1)?.text).toContain("Error: Unknown callback.");
+  });
+
+  test("/resume renders a picker and switches to the selected thread", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path, threadId: "current-thread" });
+    agent.threads = [{ id: "saved-thread", name: "Saved work", cwd: path, updatedAt: 1 }];
+
+    await router.handle(textMessage("/resume saved"));
+    const resumeButton = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat()[0];
+
+    expect(agent.threadLists).toEqual([{ workspacePath: path, limit: 8, searchTerm: "saved" }]);
+    expect(resumeButton?.callback_data).toMatch(/^ar:cmd:resume:/);
+
+    await router.handle(callbackMessage(resumeButton!.callback_data, 7, "cb-resume", adapter.sent.at(-1)?.messageId));
+
+    expect(agent.stopped).toEqual(["1:demo"]);
+    expect(agent.getStatus("1:demo")?.threadId).toBe("saved-thread");
+    expect(store.getSession("1:demo")?.thread_id).toBe("saved-thread");
+    expect(adapter.edited.at(-1)?.text).toContain("Resumed chat.");
+  });
+
+  test("/fork, /rename, and /stop call functional driver APIs", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await router.handle(textMessage("/fork"));
+    await router.handle(textMessage("/rename Ship it"));
+    await router.handle(textMessage("/stop"));
+
+    expect(agent.forks).toEqual(["1:demo"]);
+    expect(agent.renames).toEqual([{ key: "1:demo", name: "Ship it" }]);
+    expect(agent.cleaned).toEqual(["1:demo"]);
+    expect(store.getBinding(1)?.workspaceName).toBe("demo");
+    expect(adapter.sent.map((message) => message.text)).toEqual(["Forked chat.\n\nThread: Forked", "Renamed chat.\n\nShip it", "Background terminals stopped."]);
+  });
+
+  test("/plan toggles plan mode and implementing a plan returns to default mode", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindChat(1, "demo");
+
+    await router.handle(textMessage("/plan design this"));
+
+    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "design this", options: { collaborationMode: "plan" } });
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-1" });
+    const planButton = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Implement");
+    expect(planButton?.callback_data).toMatch(/^ar:cmd:plan:/);
+
+    await router.handle(callbackMessage(planButton!.callback_data, 7, "cb-plan", adapter.sent.at(-1)?.messageId));
+
+    expect(store.getCollaborationMode("1:demo")).toBe("default");
+    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "Implement the approved plan." });
   });
 
   test("resume callback is no longer supported", async () => {

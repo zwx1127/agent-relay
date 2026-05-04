@@ -91,12 +91,15 @@ The Telegram interaction is workspace-first. Relay supports these Telegram-side 
 | Instruction | When | Behavior |
 | --- | --- | --- |
 | `/relay` | Always | Opens Relay Home. This is the only slash command reserved by relay. |
+| Supported Codex-style slash command | cwd selected | Runs the matching app-server operation or Relay-side workflow. |
 | Any ordinary message | No cwd selected | Opens Relay Home so you can choose or create a cwd. |
 | Any ordinary message | cwd selected and Codex is idle | Sends the text to Codex as a new `turn/start` input. |
 | Any ordinary message | cwd selected and Codex is active | Sends the text to Codex as `turn/steer` input for the active turn. |
 | Reply to a Relay form | While a form is pending | Answers the pending workspace or Codex question instead of forwarding the text to Codex. |
 
-Slash-style text other than `/relay` is not handled by relay after a cwd is selected. It is forwarded to Codex exactly like any other prompt.
+Relay supports these Codex CLI-style functional commands after a cwd is selected: `/review`, `/compact`, `/init`, `/new`, `/clear`, `/resume`, `/fork`, `/rename`, `/plan`, and `/stop`.
+
+Information and configuration commands such as `/help`, `/status`, `/mcp`, `/model`, `/permissions`, `/approvals`, `/quit`, and `/exit` are not handled by relay's slash layer. Slash-style text that relay does not support is forwarded to Codex exactly like any other prompt.
 
 Telegram inline controls are limited to Relay Home workspace/status/refresh/stop, workspace management, Codex approval decisions, and long-output paging.
 
@@ -124,6 +127,18 @@ Inline action buttons:
 - `🛑` stops the current cwd's Codex session and clears the cwd selection.
 - `✅` and `❎` answer approval prompts.
 - `⏮️`, `◀️`, `▶️`, and `⏭️` navigate long assistant output pages.
+
+Codex-style functional slash commands:
+
+- `/review` starts an inline review of uncommitted changes. `/review branch <name>`, `/review commit <sha> [title]`, and `/review <instructions>` map to the matching app-server review targets.
+- `/compact` starts context compaction for the current thread.
+- `/init` asks Codex to create `AGENTS.md` unless one already exists in the cwd.
+- `/new` and `/clear` start a fresh Codex thread for the selected cwd without clearing the cwd binding.
+- `/resume [search]` lists recent threads for the selected cwd and resumes the chosen thread through inline buttons.
+- `/fork` forks the current thread and switches the chat to the fork.
+- `/rename <name>` renames the current thread; without a name, relay asks through ForceReply.
+- `/plan` toggles Plan mode for the current `chat + cwd`; `/plan <prompt>` runs that prompt in Plan mode. After a plan turn completes, relay offers inline buttons to implement the plan or continue planning.
+- `/stop` asks Codex app-server to clean background terminals. It does not stop the Relay session or clear the selected cwd; use Relay Home's `🛑` for that.
 
 Codex user-input questions are sent as ForceReply prompts. Codex approval requests keep inline `✅` and `❎` buttons.
 Prompt state is shown with a bot reaction on the triggering user message: `🫡` queued, `✍` processing, `🤔` waiting for input or approval, `😎` completed, and `😱` failed or cancelled.

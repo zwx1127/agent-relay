@@ -184,20 +184,37 @@ export interface StartAgentOptions {
 
 export interface AgentDriver {
   start(options: StartAgentOptions): Promise<AgentSessionStatus>;
-  send(sessionKey: string, text: string): Promise<AgentSendResult>;
+  send(sessionKey: string, text: string, options?: AgentSendOptions): Promise<AgentSendResult>;
   stop(sessionKey: string): Promise<void>;
   getStatus(sessionKey: string): AgentSessionStatus | undefined;
   respond?(sessionKey: string, requestId: string | number, result: unknown): Promise<void>;
   runBuiltinCommand?(sessionKey: string, command: AgentBuiltinCommand): Promise<AgentBuiltinResult>;
+  forkThread?(sessionKey: string): Promise<AgentThreadSwitchResult>;
+  renameThread?(sessionKey: string, name: string): Promise<void>;
+  cleanBackgroundTerminals?(sessionKey: string): Promise<void>;
   listThreads?(options: AgentThreadListOptions): Promise<AgentThreadSummary[]>;
   listModels?(): Promise<AgentModelSummary[]>;
 }
+
+export interface AgentSendOptions {
+  collaborationMode?: AgentCollaborationMode;
+}
+
+export type AgentCollaborationMode = "default" | "plan";
 
 export interface AgentSendResult {
   turnId?: string;
 }
 
-export type AgentBuiltinCommand = "review" | "compact";
+export type AgentReviewTarget =
+  | { type: "uncommittedChanges" }
+  | { type: "baseBranch"; branch: string }
+  | { type: "commit"; sha: string; title?: string | null }
+  | { type: "custom"; instructions: string };
+
+export type AgentBuiltinCommand =
+  | { type: "review"; target?: AgentReviewTarget }
+  | { type: "compact" };
 
 export interface AgentBuiltinResult {
   message: string;
@@ -205,9 +222,15 @@ export interface AgentBuiltinResult {
   threadId?: string;
 }
 
+export interface AgentThreadSwitchResult {
+  threadId: string;
+  threadName?: string;
+}
+
 export interface AgentThreadListOptions {
   workspacePath: string;
   limit?: number;
+  searchTerm?: string;
 }
 
 export interface AgentThreadSummary {
@@ -266,7 +289,7 @@ export interface TranscriptEvent {
   createdAt: number;
 }
 
-export type PendingPromptKind = "workspace_name" | "codex_user_input" | "codex_approval";
+export type PendingPromptKind = "workspace_name" | "codex_user_input" | "codex_approval" | "relay_command";
 
 export interface PendingPrompt {
   chatId: ChatId;
