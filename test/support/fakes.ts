@@ -23,10 +23,13 @@ export class FakeImAdapter {
   downloads = new Map<string, ArrayBuffer>();
   nextMessageId = 100;
   sendMessageDelayMs = 0;
+  failSendMessage?: Error;
+  failEditMessage?: Error;
   failReaction?: Error;
 
   async sendMessage(conversationId: ConversationId, text: string, options?: SendMessageOptions): Promise<{ messageId?: number }> {
     if (this.sendMessageDelayMs > 0) await sleep(this.sendMessageDelayMs);
+    if (this.failSendMessage) throw this.failSendMessage;
     const messageId = this.nextMessageId++;
     this.sent.push({ conversationId, text, options, messageId });
     return { messageId };
@@ -46,6 +49,7 @@ export class FakeImAdapter {
   }
 
   async editMessageText(conversationId: ConversationId, text: string, options: EditMessageTextOptions): Promise<void> {
+    if (this.failEditMessage) throw this.failEditMessage;
     this.edited.push({ conversationId, text, options });
   }
 

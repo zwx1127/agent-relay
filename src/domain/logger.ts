@@ -18,6 +18,25 @@ const LEVEL_PRIORITY: Record<LogLevel, number> = {
   error: 40,
 };
 
+const TELEGRAM_BOT_URL_RE = /(https:\/\/api\.telegram\.org\/(?:file\/)?bot)[^/\s"']+/g;
+
+export function redactSensitiveText(value: string): string {
+  return value.replace(TELEGRAM_BOT_URL_RE, "$1<redacted>");
+}
+
+export function formatUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    const parts = [`${error.name}: ${error.message}`];
+    const fields = error as Error & { code?: unknown; errno?: unknown; path?: unknown };
+    if (fields.code !== undefined) parts.push(`code=${String(fields.code)}`);
+    if (fields.errno !== undefined) parts.push(`errno=${String(fields.errno)}`);
+    if (fields.path !== undefined) parts.push(`path=${String(fields.path)}`);
+    if (error.stack) parts.push(`stack=${error.stack}`);
+    return redactSensitiveText(parts.join(" "));
+  }
+  return redactSensitiveText(String(error));
+}
+
 export function parseLogLevel(value: string | undefined, name = "LOG_LEVEL"): LogLevel {
   const normalized = (value?.trim().toLowerCase() || "info") as LogLevel;
   if (normalized === "debug" || normalized === "info" || normalized === "warn" || normalized === "error") {
@@ -89,6 +108,6 @@ export const noopLogger: Logger = {
 };
 
 function formatValue(value: string | number | boolean | null): string {
-  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "string") return JSON.stringify(redactSensitiveText(value));
   return String(value);
 }

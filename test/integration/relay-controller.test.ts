@@ -970,6 +970,18 @@ describe("relay controller", () => {
     expect(adapter.edited.at(-1)?.options.entities?.[0]?.type).toBe("bold");
   });
 
+  test("callback error notices are best effort when Telegram send fails", async () => {
+    const { router, adapter, logLines } = fixture();
+    adapter.failEditMessage = new Error("edit failed");
+    adapter.failSendMessage = new Error("unknown certificate verification error");
+
+    await expect(router.handle(callbackMessage("ar:nope"))).resolves.toBeUndefined();
+
+    expect(adapter.answered).toEqual([{ callbackQueryId: "cb1", text: "Unknown callback." }]);
+    expect(logLines.join("\n")).toContain("router.callback_failed");
+    expect(logLines.join("\n")).toContain("router.callback_error_notice_failed");
+  });
+
   test("codex option question uses inline buttons and responds with selected answer", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");

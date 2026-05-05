@@ -173,6 +173,39 @@ describe("telegram adapter", () => {
     expect(received).toEqual([{ kind: "message", id: "10", messageId: "10", conversationId: "2", userId: "3", text: "new", date: 2 }]);
   });
 
+  test("keeps polling after inbound handler failures", async () => {
+    const lines: string[] = [];
+    const requestBodies: unknown[] = [];
+    let calls = 0;
+    const adapter = new TelegramAdapter("token", async (_url, init) => {
+      calls += 1;
+      requestBodies.push(JSON.parse(String(init?.body)));
+      return Response.json({
+        ok: true,
+        result: calls === 2
+          ? [{ update_id: 5, message: { message_id: 9, date: 1, text: "bad", chat: { id: 2 }, from: { id: 3 } } }]
+          : calls === 3
+            ? [{ update_id: 6, message: { message_id: 10, date: 2, text: "new", chat: { id: 2 }, from: { id: 3 } } }]
+            : [],
+      });
+    }, new TextLogger("error", (line) => lines.push(line), () => new Date("2026-05-02T08:00:00.000Z")));
+
+    const received: unknown[] = [];
+    await adapter.start(async (message) => {
+      if (message.messageId === "9") throw new Error("handler failed");
+      received.push(message);
+      adapter.stop();
+    });
+
+    expect(requestBodies).toEqual([
+      { offset: -1, timeout: 0, allowed_updates: ["message", "callback_query"] },
+      { offset: 0, timeout: 30, allowed_updates: ["message", "callback_query"] },
+      { offset: 6, timeout: 30, allowed_updates: ["message", "callback_query"] },
+    ]);
+    expect(received).toEqual([{ kind: "message", id: "10", messageId: "10", conversationId: "2", userId: "3", text: "new", date: 2 }]);
+    expect(lines.join("\n")).toContain('telegram.update_handler_failed update_id=5 message_id="9"');
+  });
+
   test("routes long polling callback queries", async () => {
     let calls = 0;
     const adapter = new TelegramAdapter("token", async () => {

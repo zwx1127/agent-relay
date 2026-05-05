@@ -157,7 +157,18 @@ export class TelegramAdapter implements ImAdapter {
           text_len: inbound.kind === "message" ? inbound.text.length : inbound.kind === "media" ? inbound.caption?.length ?? 0 : inbound.data.length,
           message_text: inbound.kind === "message" ? inbound.text : inbound.kind === "media" ? inbound.caption ?? "" : inbound.data,
         });
-        await onMessage(inbound);
+        try {
+          await onMessage(inbound);
+        } catch (error) {
+          this.logger.error("telegram.update_handler_failed", {
+            update_id: update.update_id,
+            message_id: inbound.kind === "message" ? inbound.id : inbound.messageId,
+            conversation_id: inbound.conversationId,
+            user_id: inbound.userId,
+            kind: inbound.kind,
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+        }
       }
     }
     this.logger.info("telegram.polling_stopped");

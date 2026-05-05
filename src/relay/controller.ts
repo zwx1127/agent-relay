@@ -34,7 +34,7 @@ import type {
 } from "./types.ts";
 import { createWorkspace, discoverWorkspaceDirectories, isRealDirectory, resolveWorkspacePath, validateWorkspaceName, workspaceDirectoryExists } from "../domain/workspace.ts";
 import { renderTelegramText, type RenderedTelegramText } from "../presentation/telegram/text.ts";
-import { noopLogger, type Logger } from "../domain/logger.ts";
+import { noopLogger, type Logger, type LogFields } from "../domain/logger.ts";
 import { CODEX_PROMPT_TTL_MS, DEFAULT_IMAGE_PROMPT, LIST_PAGE_SIZE, MEDIA_GROUP_QUIET_MS, UI_BUTTON } from "./ui/constants.ts";
 import { codexRequestKey, shortToken, workspaceCallbackToken } from "./ui/callback-data.ts";
 import { commandArgs, parseReviewTarget } from "./ui/commands.ts";
@@ -173,7 +173,12 @@ export class RelayController {
         command,
         error: error instanceof Error ? error : new Error(detail),
       });
-      await this.sendRendered(message.conversationId, formatErrorMessage(detail));
+      await this.trySendRendered(
+        message.conversationId,
+        formatErrorMessage(detail),
+        "router.message_error_notice_failed",
+        { message_id: message.id },
+      );
       this.appendSystem(message.conversationId, `Error: ${detail}\n`);
     }
   }
@@ -271,7 +276,12 @@ export class RelayController {
         error: error instanceof Error ? error : new Error(detail),
       });
       await this.answerCallback(message.callbackQueryId, detail.slice(0, 180));
-      await this.renderCallbackPage(message, formatErrorMessage(detail), this.consoleKeyboard(message.conversationId));
+      await this.tryRenderCallbackPage(
+        message,
+        formatErrorMessage(detail),
+        this.consoleKeyboard(message.conversationId),
+        "router.callback_error_notice_failed",
+      );
       this.appendSystem(message.conversationId, `Error: ${detail}\n`);
     }
   }
@@ -367,7 +377,12 @@ export class RelayController {
       message_id: messageId,
       error: error instanceof Error ? error : new Error(detail),
     });
-    await this.sendRendered(conversationId, formatErrorMessage(detail));
+    await this.trySendRendered(
+      conversationId,
+      formatErrorMessage(detail),
+      "router.media_error_notice_failed",
+      { message_id: messageId },
+    );
     this.appendSystem(conversationId, `Error: ${detail}\n`);
   }
 
@@ -387,7 +402,12 @@ export class RelayController {
         session_key: event.sessionKey,
         error: error instanceof Error ? error : new Error(detail),
       });
-      await this.sendRendered(parsed.conversationId, formatErrorMessage(`Could not send image: ${detail}`));
+      await this.trySendRendered(
+        parsed.conversationId,
+        formatErrorMessage(`Could not send image: ${detail}`),
+        "router.agent_image_error_notice_failed",
+        { session_key: event.sessionKey },
+      );
       this.appendSystem(parsed.conversationId, `Error: Could not send image: ${detail}\n`);
     }
   }
@@ -787,6 +807,23 @@ export class RelayController {
     }
   }
 
+  private async tryRenderCallbackPage(
+    message: Extract<InboundMessage, { kind: "callback_query" }>,
+    body: string | RenderedTelegramText,
+    replyMarkup: InlineKeyboardMarkup,
+    failureEvent: string,
+  ): Promise<void> {
+    try {
+      await this.renderCallbackPage(message, body, replyMarkup);
+    } catch (error) {
+      this.logger.warn(failureEvent, {
+        conversation_id: message.conversationId,
+        callback_query_id: message.callbackQueryId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
+  }
+
   private async answerCallback(callbackQueryId: string, text?: string): Promise<void> {
     if (!this.deps.adapter.answerCallbackQuery) return;
     try {
@@ -805,6 +842,24 @@ export class RelayController {
       entities: rendered.entities,
       disableWebPagePreview: options.disableWebPagePreview ?? true,
     });
+  }
+
+  private async trySendRendered(
+    conversationId: ConversationId,
+    rendered: RenderedTelegramText,
+    failureEvent: string,
+    fields: LogFields = {},
+    options: Omit<SendMessageOptions, "entities" | "parseMode"> = {},
+  ): Promise<void> {
+    try {
+      await this.sendRendered(conversationId, rendered, options);
+    } catch (error) {
+      this.logger.warn(failureEvent, {
+        conversation_id: conversationId,
+        ...fields,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
   }
 
   private async editRendered(
