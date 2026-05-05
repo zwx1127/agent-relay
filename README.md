@@ -1,8 +1,17 @@
 # agent-relay
 
-`agent-relay` connects an IM provider to a local CLI agent provider. The current providers are Telegram for IM and Codex app-server for the agent. It lets approved users select a workspace under `WORKSPACE_ROOT`, send prompts, answer agent questions, approve requested actions, and manage agent threads remotely.
+`agent-relay` connects an IM provider to a local CLI agent provider. The current implementations are Telegram for IM and Codex app-server for the agent. It lets approved users select a workspace under `WORKSPACE_ROOT`, send prompts, answer agent questions, approve requested actions, and manage agent threads remotely.
 
 The project is built with Bun, TypeScript, SQLite, a provider-neutral router, and the `codex app-server --listen stdio://` protocol for the default agent provider.
+
+## Features
+
+- Remote Telegram control for local Codex app-server sessions.
+- Per-conversation workspace selection under a configured `WORKSPACE_ROOT`.
+- Inline handling for Codex questions, approvals, Plan mode flows, thread resume, fork, rename, and compaction.
+- Telegram photo input and Codex-generated image output support with workspace-local media storage.
+- Provider-oriented architecture for adding more IM, agent, and persistence backends.
+- Optional localhost relay capability API for agent-triggered image sending.
 
 ## Requirements
 
@@ -33,6 +42,8 @@ TELEGRAM_BOT_TOKEN=123:abc
 ALLOWED_USER_IDS=123456
 WORKSPACE_ROOT=/absolute/path/to/workspaces
 ```
+
+`ALLOWED_USER_IDS` is required. `ALLOWED_CONVERSATION_IDS` is optional and should be set when the relay must be restricted to specific chats or groups. Provider IDs are stored as strings. Keep `.env` local and never commit real bot tokens or allowlist IDs.
 
 Start the relay:
 
@@ -76,37 +87,6 @@ The relay loads `.env` first, then overlays shell environment variables, so expo
 
 When both `CODEX_DEVELOPER_INSTRUCTIONS_FILE` and `CODEX_DEVELOPER_INSTRUCTIONS` are set, file contents are sent first, then a blank line, then the inline text. `CODEX_MODEL_INSTRUCTIONS_FILE` is sent as Codex base instructions. The relay does not inject `AGENTS.md`; Codex discovers it normally from the selected cwd.
 
-## Provider Architecture
-
-The relay is organized by domain. The relay controller depends on `ImAdapter`, `AgentDriver`, and `RelayStore` ports rather than concrete Telegram, Codex, or SQLite classes. `src/providers/im/factory.ts` and `src/providers/agents/factory.ts` are the runtime provider factories. Adding Feishu/Lark or Claude Code should be done by implementing those ports, registering the provider in the factory, and adding provider-specific config validation.
-
-The relay controller keeps the user-facing workflow together, while dedicated collaborators handle high-churn routing and streaming behavior:
-
-- `SlashCommandRouter` dispatches relay-owned slash commands and leaves unsupported commands available for the agent.
-- `CallbackRouter` dispatches inline keyboard callback payloads.
-- `TaskCoordinator` owns prompt queue state, task reactions, and sending work to the agent.
-- `OutputStreamer` owns live assistant output buffering, Telegram message edits, and paged output callbacks.
-
-Conversation, user, and message IDs are treated as provider IDs and persisted as strings. This is a breaking schema change from older SQLite databases that used Telegram numeric `chat_id`; delete or recreate `.data/agent-relay.sqlite` when upgrading from the pre-provider schema.
-
-Extension points:
-
-- IM providers implement `ImAdapter` under `src/providers/im/<provider>/` and are selected from `src/providers/im/factory.ts`.
-- Agent providers implement `AgentDriver` under `src/providers/agents/<provider>/` and are selected from `src/providers/agents/factory.ts`.
-- Persistence implementations implement `RelayStore`; SQLite is the default implementation.
-- Agent-visible relay features live under `src/relay/capabilities/`, register `CapabilityDefinition` entries through `CapabilityRegistry`, and expose helper subcommands from `bin/agent-relay-helper`.
-
-## Breaking Changes
-
-This provider refactor intentionally changes runtime configuration and the SQLite schema:
-
-- Rename `TELEGRAM_ALLOWED_USER_IDS` to `ALLOWED_USER_IDS`.
-- Rename `TELEGRAM_ALLOWED_CHAT_IDS` to `ALLOWED_CONVERSATION_IDS`.
-- Rename `TELEGRAM_IMAGE_MAX_BYTES` to `MEDIA_MAX_BYTES`.
-- Rename `MESSAGING_PROVIDER` to `IM_PROVIDER`.
-- Session keys now include the agent provider, for example `codex:<conversation-id>:<workspace>`.
-- Existing SQLite databases using the old numeric `chat_id` schema are not migrated automatically. Stop the relay and remove or recreate `.data/agent-relay.sqlite` before starting the new version.
-
 ## Telegram Usage
 
 Send `/relay` to open Relay Home. Relay Home shows the selected cwd, Codex status, waiting state, and recent errors. The detail toggle shows waiting state, prompt counts, thread, model, combined numeric token/context usage, approval/sandbox policy, and recent output timing. Relay Home uses emoji-only inline buttons; successful actions update the message in place without extra Telegram callback notices, while errors and expired actions still show explicit feedback.
@@ -114,13 +94,13 @@ Send `/relay` to open Relay Home. Relay Home shows the selected cwd, Codex statu
 Relay Home actions:
 
 - `📂`: select an existing first-level directory under `WORKSPACE_ROOT`, create a new cwd through ForceReply, or delete a cwd after confirmation. The create prompt includes an input placeholder for the cwd name.
-- `ℹ️` / `🔙`: toggle compact and detailed status views for the chat.
+- `ℹ️` / `🔙`: toggle compact and detailed status views for the conversation.
 - `🔄`: redraw the current Relay Home message.
-- `🛑`: interrupt the current cwd session and clear the chat's cwd selection.
+- `🛑`: interrupt the current workspace session and clear the conversation's workspace selection.
 
-After a cwd is selected, ordinary Telegram messages are sent to Codex. Telegram photo messages are downloaded into the selected cwd and sent to Codex as image inputs; photo captions become the prompt, and photos without captions use a default inspection prompt. Telegram file/document attachments are not supported. If Codex is idle, the message starts a new turn. If a Codex turn is active, the message is sent as steering input for that turn. If no cwd is selected, ordinary text or photos open Relay Home instead.
+After a workspace is selected, ordinary Telegram messages are sent to Codex. Telegram photo messages are downloaded into the selected workspace and sent to Codex as image inputs; photo captions become the prompt, and photos without captions use a default inspection prompt. Telegram file/document attachments are not supported. If Codex is idle, the message starts a new turn. If a Codex turn is active, the message is sent as steering input for that turn. If no workspace is selected, ordinary text or photos open Relay Home instead.
 
-Relay-handled slash commands after a cwd is selected:
+Relay-handled slash commands after a workspace is selected:
 
 | Command | Behavior |
 | --- | --- |
@@ -130,15 +110,15 @@ Relay-handled slash commands after a cwd is selected:
 | `/review <instructions>` | Starts a custom review. |
 | `/compact` | Starts Codex thread compaction. |
 | `/init` | Asks Codex to create `AGENTS.md` if it does not already exist. |
-| `/new`, `/clear` | Starts a fresh Codex thread while keeping the cwd selected. |
-| `/resume [search]` | Lists recent Codex threads for the cwd and resumes the selected one. |
-| `/fork` | Forks the current thread and switches the chat to the fork. |
+| `/new`, `/clear` | Starts a fresh Codex thread while keeping the workspace selected. |
+| `/resume [search]` | Lists recent Codex threads for the workspace and resumes the selected one. |
+| `/fork` | Forks the current thread and switches the conversation to the fork. |
 | `/rename <name>` | Renames the current thread. Without a name, the relay asks via ForceReply. |
-| `/plan` | Toggles Plan mode for the current `chat + cwd`. |
+| `/plan` | Toggles Plan mode for the current `conversation + workspace`. |
 | `/plan <prompt>` | Runs the prompt in Plan mode and then offers Implement or Continue buttons. Implement exits Plan mode and starts normal coding. |
 | `/stop` | Asks Codex to clean background terminals for the current thread. |
 
-`/relay` is the only Relay command that works without a cwd. Unsupported slash text, including `/help`, `/status`, `/model`, and `/start`, is forwarded to Codex when a cwd is selected.
+`/relay` is the only Relay command that works without a selected workspace. Unsupported slash text, including `/help`, `/status`, `/model`, and `/start`, is forwarded to Codex when a workspace is selected.
 
 Codex questions with predefined options are shown with inline buttons. In Plan mode, selecting an option opens a confirmation step where you can submit, add a note, or change the selection; questions that support Other provide a free-text ForceReply answer. Free-text and secret questions are shown as ForceReply prompts. Multi-question requests are sent one question at a time, and answered option cards only show the selected answer. Approval requests are shown with approve/deny inline buttons. New prompts are paused while Codex is waiting for an answer or approval.
 
@@ -146,7 +126,7 @@ Assistant output is rendered as Telegram text entities rather than HTML parse mo
 
 ## Image Support
 
-Telegram photo messages are supported after a cwd is selected. The relay downloads the largest Telegram photo variant, stores it in the selected workspace, and sends the local image path to Codex as a `localImage` input. Photo captions are used as the Codex prompt; photos without captions use `Please inspect the attached image(s).`
+Telegram photo messages are supported after a workspace is selected. The relay downloads the largest Telegram photo variant, stores it in the selected workspace, and sends the local image path to Codex as a `localImage` input. Photo captions are used as the Codex prompt; photos without captions use `Please inspect the attached image(s).`
 
 Telegram file/document attachments are intentionally not supported, even when the document MIME type is an image. Codex image outputs are sent back with Telegram `sendPhoto`; the relay does not use `sendDocument` as a fallback.
 
@@ -174,11 +154,58 @@ The helper calls `POST /v1/capabilities/send_image` with `{ path, cwd, sessionKe
 - Workspaces are resolved under `WORKSPACE_ROOT`; path traversal and absolute workspace names are rejected.
 - Workspace discovery uses real first-level directories and ignores symlinked directories.
 - Creating a missing workspace makes the directory and runs `git init`.
-- Deleting a workspace physically removes that directory under `WORKSPACE_ROOT` and clears chat bindings that pointed at it.
+- Deleting a workspace physically removes that directory under `WORKSPACE_ROOT` and clears conversation bindings that pointed at it.
 - Telegram photos and Codex-generated images are stored under `.agent-relay/media` inside the selected workspace. The relay writes `.agent-relay/.gitignore` with `*` so media does not appear in the workspace's Git status.
-- The relay starts one agent provider process and creates or resumes one agent thread per `conversation + cwd`.
-- SQLite stores workspaces, chat bindings, Codex thread IDs, Plan mode state, Relay Home UI state, prompt/task state, transcript events, approval metadata, paged assistant output, and schema migration metadata.
+- The relay starts one agent provider process and creates or resumes one agent thread per `conversation + workspace`.
+- SQLite stores workspaces, conversation bindings, Codex thread IDs, Plan mode state, Relay Home UI state, prompt/task state, transcript events, approval metadata, paged assistant output, and schema migration metadata.
 - Runtime logs go to stdout. `debug` logs include raw Telegram messages, Codex input text, and Codex output chunks.
+
+## Provider Architecture
+
+The relay is organized by domain. The relay controller depends on `ImAdapter`, `AgentDriver`, and `RelayStore` ports rather than concrete Telegram, Codex, or SQLite classes. `src/providers/im/factory.ts` and `src/providers/agents/factory.ts` are the runtime provider factories.
+
+The relay controller keeps the user-facing workflow together, while dedicated collaborators handle high-churn routing and streaming behavior:
+
+- `SlashCommandRouter` dispatches relay-owned slash commands and leaves unsupported commands available for the agent.
+- `CallbackRouter` dispatches inline keyboard callback payloads.
+- `TaskCoordinator` owns prompt queue state, task reactions, and sending work to the agent.
+- `OutputStreamer` owns live assistant output buffering, Telegram message edits, and paged output callbacks.
+
+Extension points:
+
+- IM providers implement `ImAdapter` under `src/providers/im/<provider>/` and are selected from `src/providers/im/factory.ts`.
+- Agent providers implement `AgentDriver` under `src/providers/agents/<provider>/` and are selected from `src/providers/agents/factory.ts`.
+- Persistence implementations implement `RelayStore`; SQLite is the default implementation.
+- Agent-visible relay features live under `src/relay/capabilities/`, register `CapabilityDefinition` entries through `CapabilityRegistry`, and expose helper subcommands from `bin/agent-relay-helper`.
+
+## Upgrade Notes
+
+The provider refactor changed runtime configuration and the SQLite schema:
+
+- Rename `TELEGRAM_ALLOWED_USER_IDS` to `ALLOWED_USER_IDS`.
+- Rename `TELEGRAM_ALLOWED_CHAT_IDS` to `ALLOWED_CONVERSATION_IDS`.
+- Rename `TELEGRAM_IMAGE_MAX_BYTES` to `MEDIA_MAX_BYTES`.
+- Rename `MESSAGING_PROVIDER` to `IM_PROVIDER`.
+- Session keys now include the agent provider, for example `codex:<conversation-id>:<workspace>`.
+- Conversation, user, and message IDs are treated as provider IDs and persisted as strings.
+- Existing SQLite databases using the old numeric `chat_id` schema are not migrated automatically. Stop the relay and remove or recreate `.data/agent-relay.sqlite` before starting the new version.
+
+## Known Limitations
+
+- Only the Telegram IM provider and Codex agent provider are implemented today.
+- Telegram file/document attachments are not supported, including document uploads whose MIME type is an image.
+- Existing pre-provider SQLite databases are not automatically migrated.
+- The repository is intended for GitHub source use. npm publication is not configured, and `package.json` remains marked as private.
+
+## Security and Privacy
+
+- Keep `.env` private. It contains the Telegram bot token, allowlisted user IDs, workspace root, and other local runtime settings.
+- Treat `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS`, and `ALLOWED_CONVERSATION_IDS` as sensitive operational data. Rotate the bot token if it is ever committed, pasted into an issue, or exposed in logs.
+- Use `ALLOWED_USER_IDS` in every deployment. Add `ALLOWED_CONVERSATION_IDS` when the relay should only operate in specific chats or groups.
+- Keep `LOG_LEVEL=info` for normal use. `debug` logs can include raw Telegram messages, Codex input text, and Codex output chunks.
+- Do not publish `.data/agent-relay.sqlite`; SQLite runtime data can contain workspace names, conversation bindings, thread IDs, transcript events, prompt state, approvals, and paged assistant output.
+- Review workspace files before publishing a workspace repository. Relay media is stored inside selected workspaces under `.agent-relay/media`, and the relay writes `.agent-relay/.gitignore` with `*`.
+- The optional relay capability API binds to `127.0.0.1` and uses a startup-scoped bearer token passed to the child agent process. Do not expose it through a public network proxy.
 
 ## Project Structure
 
@@ -217,3 +244,22 @@ Run the full local check:
 ```bash
 bun run check
 ```
+
+## Contributing
+
+Contributions are welcome. Before opening a pull request, run the local check:
+
+```bash
+bun install
+bun run check
+```
+
+Keep changes focused, include tests for behavior changes, and avoid committing local runtime files such as `.env`, `.data/`, logs, generated media, or workspace-specific artifacts. When filing issues or sharing logs, redact bot tokens, user IDs, conversation IDs, private workspace paths, and prompt/output content that should not be public.
+
+## Support
+
+When opening an issue, include the Bun version, operating system, whether `codex` is available on `PATH`, the Codex CLI version if available, the relevant configuration variable names, and redacted logs. Do not paste Telegram bot tokens, allowlisted IDs, private workspace paths, prompt text, or assistant output that should not be public.
+
+## License
+
+`agent-relay` is licensed under the [MIT License](LICENSE).
