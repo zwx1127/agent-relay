@@ -2,13 +2,13 @@ import type { AppConfig } from "../runtime/config.ts";
 import type { AgentDriver } from "../ports/agent.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
 import type { Logger } from "../domain/logger.ts";
-import type { MediaInboundMessage, MessagingAdapter } from "../ports/messaging.ts";
+import type { MediaInboundMessage, ImAdapter } from "../ports/im.ts";
 import type { RelayStore } from "../storage/store.ts";
 
 export interface RelayControllerDeps {
   config: AppConfig;
   store: RelayStore;
-  adapter: Pick<MessagingAdapter, "sendMessage" | "sendPhoto" | "editMessageText" | "answerCallbackQuery" | "sendChatAction" | "setMessageReaction" | "downloadFile" | "capabilities">;
+  adapter: Pick<ImAdapter, "sendMessage" | "sendPhoto" | "editMessageText" | "answerCallbackQuery" | "sendChatAction" | "setMessageReaction" | "downloadFile" | "capabilities">;
   agent: AgentDriver;
   logger?: Logger;
 }

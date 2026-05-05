@@ -1,9 +1,9 @@
 import { sessionKey } from "../../src/domain/session.ts";
 import type { ConversationId, MessageId } from "../../src/domain/ids.ts";
 import type { AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentThreadListOptions, AgentThreadSummary } from "../../src/ports/agent.ts";
-import type { EditMessageTextOptions, SendMessageOptions } from "../../src/ports/messaging.ts";
+import type { EditMessageTextOptions, SendMessageOptions } from "../../src/ports/im.ts";
 
-export class FakeAdapter {
+export class FakeImAdapter {
   readonly providerId = "fake";
   readonly capabilities = {
     editMessage: true,

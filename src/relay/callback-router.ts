@@ -1,4 +1,4 @@
-import type { InboundMessage } from "../ports/messaging.ts";
+import type { InboundMessage } from "../ports/im.ts";
 import { CALLBACK_PREFIX } from "./ui/constants.ts";
 import { isConsolePayload } from "./ui/callback-data.ts";
 

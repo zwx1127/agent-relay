@@ -1,6 +1,6 @@
 import type { ConversationId, MessageId } from "../domain/ids.ts";
 import type { Logger } from "../domain/logger.ts";
-import type { InlineKeyboardMarkup, InboundMessage, SendMessageOptions, EditMessageTextOptions } from "../ports/messaging.ts";
+import type { InlineKeyboardMarkup, InboundMessage, SendMessageOptions, EditMessageTextOptions } from "../ports/im.ts";
 import type { RelayStore } from "../storage/store.ts";
 import { renderCodexMarkdownForTelegram, splitRenderedForTelegram, type RenderedTelegramText } from "../presentation/telegram/text.ts";
 import { PAGE_MAX_CHARS, PAGED_OUTPUT_TTL_MS, STREAM_FLUSH_CHARS, STREAM_MAX_MS, STREAM_QUIET_MS } from "./ui/constants.ts";

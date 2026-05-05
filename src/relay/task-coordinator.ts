@@ -3,7 +3,7 @@ import { parseSessionKey, sessionKey } from "../domain/session.ts";
 import type { Logger } from "../domain/logger.ts";
 import { isRealDirectory } from "../domain/workspace.ts";
 import type { AgentDriver, AgentSendOptions, AgentSessionStatus, AgentTaskInput } from "../ports/agent.ts";
-import type { MessagingAdapter, SendMessageOptions } from "../ports/messaging.ts";
+import type { ImAdapter, SendMessageOptions } from "../ports/im.ts";
 import type { RelayStore } from "../storage/store.ts";
 import type { RelayTask, WorkspaceRecord } from "./types.ts";
 import { reactionForTaskStatus, taskInputFromTask, transcriptTextForInput } from "./tasks/input.ts";
@@ -15,7 +15,7 @@ export type TaskSubmitPreference = "auto" | "immediate" | "queue";
 export interface TaskCoordinatorDeps {
   store: RelayStore;
   agent: AgentDriver;
-  adapter: Pick<MessagingAdapter, "sendChatAction" | "setMessageReaction">;
+  adapter: Pick<ImAdapter, "sendChatAction" | "setMessageReaction">;
   logger: Logger;
   currentWorkspace(conversationId: ConversationId): WorkspaceRecord | undefined;
   renderConsole(conversationId: ConversationId): Promise<void>;

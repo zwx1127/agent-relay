@@ -8,22 +8,22 @@ import { RelayController } from "../../src/relay/controller.ts";
 import { SQLiteStore } from "../../src/storage/sqlite-store.ts";
 import { TextLogger, type LogLevel } from "../../src/domain/logger.ts";
 import type { MessageId } from "../../src/domain/ids.ts";
-import { FakeAdapter, FakeAgent, sleep } from "../support/fakes.ts";
+import { FakeAgent, FakeImAdapter, sleep } from "../support/fakes.ts";
 
 
 let dirs: string[] = [];
 
-function fixture(logLevel: LogLevel = "info"): { router: RelayController; store: SQLiteStore; adapter: FakeAdapter; agent: FakeAgent; root: string; logLines: string[] } {
+function fixture(logLevel: LogLevel = "info"): { router: RelayController; store: SQLiteStore; adapter: FakeImAdapter; agent: FakeAgent; root: string; logLines: string[] } {
   const root = mkdtempSync(join(tmpdir(), "agent-relay-controller-root-"));
   const data = mkdtempSync(join(tmpdir(), "agent-relay-controller-data-"));
   dirs.push(root, data);
   const store = new SQLiteStore(join(data, "db.sqlite"));
-  const adapter = new FakeAdapter();
+  const adapter = new FakeImAdapter();
   const agent = new FakeAgent();
   const logLines: string[] = [];
   const logger = new TextLogger(logLevel, (line) => logLines.push(line), () => new Date("2026-05-02T08:00:00.000Z"));
   const config: AppConfig = {
-    messagingProvider: "telegram",
+    imProvider: "telegram",
     agentProvider: "codex",
     telegramBotToken: "token",
     allowedUserIds: new Set(["7"]),

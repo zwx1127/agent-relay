@@ -1,5 +1,5 @@
 import type { ConversationId, MessageId } from "../domain/ids.ts";
-import type { InboundMessage } from "../ports/messaging.ts";
+import type { InboundMessage } from "../ports/im.ts";
 import { commandArgs, commandName } from "./ui/commands.ts";
 
 type TextMessage = Extract<InboundMessage, { kind: "message" }>;

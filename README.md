@@ -1,6 +1,6 @@
 # agent-relay
 
-`agent-relay` connects a messaging provider to a local CLI agent provider. The current providers are Telegram for messaging and Codex app-server for the agent. It lets approved users select a workspace under `WORKSPACE_ROOT`, send prompts, answer agent questions, approve requested actions, and manage agent threads remotely.
+`agent-relay` connects an IM provider to a local CLI agent provider. The current providers are Telegram for IM and Codex app-server for the agent. It lets approved users select a workspace under `WORKSPACE_ROOT`, send prompts, answer agent questions, approve requested actions, and manage agent threads remotely.
 
 The project is built with Bun, TypeScript, SQLite, a provider-neutral router, and the `codex app-server --listen stdio://` protocol for the default agent provider.
 
@@ -52,7 +52,7 @@ The relay loads `.env` first, then overlays shell environment variables, so expo
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `MESSAGING_PROVIDER` | no | `telegram` | Messaging provider. Only `telegram` is implemented today. |
+| `IM_PROVIDER` | no | `telegram` | IM provider. Only `telegram` is implemented today. |
 | `AGENT_PROVIDER` | no | `codex` | Agent provider. Only `codex` is implemented today. |
 | `ALLOWED_USER_IDS` | yes | | Comma-separated provider user IDs allowed to use the relay. Stored as strings. |
 | `ALLOWED_CONVERSATION_IDS` | no | any conversation | Optional comma-separated provider conversation IDs. When set, both user and conversation must be allowed. |
@@ -78,7 +78,7 @@ When both `CODEX_DEVELOPER_INSTRUCTIONS_FILE` and `CODEX_DEVELOPER_INSTRUCTIONS`
 
 ## Provider Architecture
 
-The relay is organized by domain. The relay controller depends on `MessagingAdapter`, `AgentDriver`, and `RelayStore` ports rather than concrete Telegram, Codex, or SQLite classes. `src/providers/messaging/factory.ts` and `src/providers/agents/factory.ts` are the runtime provider factories. Adding Feishu/Lark or Claude Code should be done by implementing those ports, registering the provider in the factory, and adding provider-specific config validation.
+The relay is organized by domain. The relay controller depends on `ImAdapter`, `AgentDriver`, and `RelayStore` ports rather than concrete Telegram, Codex, or SQLite classes. `src/providers/im/factory.ts` and `src/providers/agents/factory.ts` are the runtime provider factories. Adding Feishu/Lark or Claude Code should be done by implementing those ports, registering the provider in the factory, and adding provider-specific config validation.
 
 The relay controller keeps the user-facing workflow together, while dedicated collaborators handle high-churn routing and streaming behavior:
 
@@ -91,7 +91,7 @@ Conversation, user, and message IDs are treated as provider IDs and persisted as
 
 Extension points:
 
-- Messaging providers implement `MessagingAdapter` under `src/providers/messaging/<provider>/` and are selected from `src/providers/messaging/factory.ts`.
+- IM providers implement `ImAdapter` under `src/providers/im/<provider>/` and are selected from `src/providers/im/factory.ts`.
 - Agent providers implement `AgentDriver` under `src/providers/agents/<provider>/` and are selected from `src/providers/agents/factory.ts`.
 - Persistence implementations implement `RelayStore`; SQLite is the default implementation.
 - Agent-visible relay features live under `src/relay/capabilities/`, register `CapabilityDefinition` entries through `CapabilityRegistry`, and expose helper subcommands from `bin/agent-relay-helper`.
@@ -103,6 +103,7 @@ This provider refactor intentionally changes runtime configuration and the SQLit
 - Rename `TELEGRAM_ALLOWED_USER_IDS` to `ALLOWED_USER_IDS`.
 - Rename `TELEGRAM_ALLOWED_CHAT_IDS` to `ALLOWED_CONVERSATION_IDS`.
 - Rename `TELEGRAM_IMAGE_MAX_BYTES` to `MEDIA_MAX_BYTES`.
+- Rename `MESSAGING_PROVIDER` to `IM_PROVIDER`.
 - Session keys now include the agent provider, for example `codex:<conversation-id>:<workspace>`.
 - Existing SQLite databases using the old numeric `chat_id` schema are not migrated automatically. Stop the relay and remove or recreate `.data/agent-relay.sqlite` before starting the new version.
 
@@ -161,7 +162,7 @@ The first capability is `send_image`, intended for remote H5/web UI debugging. C
 "$AGENT_RELAY_HELPER" send-image /absolute/path/to/screen.png --cwd "$PWD" --caption "current home screen"
 ```
 
-The helper calls `POST /v1/capabilities/send_image` with `{ path, cwd, sessionKey, caption }`. The relay validates that the image is a regular PNG/JPG/WEBP/GIF inside the selected workspace, enforces `MEDIA_MAX_BYTES`, copies it to `.agent-relay/media/outgoing`, and sends it through the messaging adapter.
+The helper calls `POST /v1/capabilities/send_image` with `{ path, cwd, sessionKey, caption }`. The relay validates that the image is a regular PNG/JPG/WEBP/GIF inside the selected workspace, enforces `MEDIA_MAX_BYTES`, copies it to `.agent-relay/media/outgoing`, and sends it through the IM adapter.
 
 ## Runtime Notes
 
@@ -186,8 +187,8 @@ src/
   main.ts        Bun entrypoint that delegates to runtime/bootstrap
   runtime/       Runtime bootstrap plus .env loading, validation, and allowlist checks
   domain/        Provider-neutral IDs, session keys, logger, and workspace safety
-  ports/         Provider-neutral AgentDriver and MessagingAdapter contracts
-  providers/     Codex agent provider, Telegram messaging provider, and provider factories
+  ports/         Provider-neutral AgentDriver and ImAdapter contracts
+  providers/     Codex agent provider, Telegram IM provider, and provider factories
   relay/         Controller, command/callback routers, task coordination, output streaming, capabilities, media, and relay UI state
   storage/       RelayStore port, SQLite implementation, row types, schema migrations, and persistence mappers
   presentation/  Telegram text entities, Markdown rendering, UI text, and splitting

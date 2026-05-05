@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { parseLogLevel, type LogLevel } from "../domain/logger.ts";
 
 export interface AppConfig {
-  messagingProvider: "telegram";
+  imProvider: "telegram";
   agentProvider: "codex";
   allowedUserIds: Set<string>;
   allowedConversationIds?: Set<string>;
@@ -130,7 +130,8 @@ function parseBooleanEnv(env: Env, name: string, defaultValue: boolean): boolean
 
 export function loadConfig(env?: Env): AppConfig {
   const effectiveEnv = env ?? { ...loadDotEnvFile(), ...process.env };
-  const messagingProvider = parseMessagingProvider(effectiveEnv.MESSAGING_PROVIDER?.trim() || "telegram");
+  rejectDeprecatedEnv(effectiveEnv, "MESSAGING_PROVIDER", "IM_PROVIDER");
+  const imProvider = parseImProvider(effectiveEnv.IM_PROVIDER?.trim() || "telegram");
   const agentProvider = parseAgentProvider(effectiveEnv.AGENT_PROVIDER?.trim() || "codex");
   const allowedConversations = effectiveEnv.ALLOWED_CONVERSATION_IDS?.trim();
   const developerInstructions = combineInstructionSources(
@@ -143,7 +144,7 @@ export function loadConfig(env?: Env): AppConfig {
     "CODEX_MODEL_INSTRUCTIONS_FILE",
   );
   return {
-    messagingProvider,
+    imProvider,
     agentProvider,
     allowedUserIds: parseStringSet(requireEnv(effectiveEnv, "ALLOWED_USER_IDS"), "ALLOWED_USER_IDS"),
     allowedConversationIds: allowedConversations ? parseStringSet(allowedConversations, "ALLOWED_CONVERSATION_IDS") : undefined,
@@ -166,9 +167,15 @@ export function loadConfig(env?: Env): AppConfig {
   };
 }
 
-function parseMessagingProvider(value: string): AppConfig["messagingProvider"] {
+function rejectDeprecatedEnv(env: Env, deprecatedName: string, replacementName: string): void {
+  if (env[deprecatedName] !== undefined) {
+    throw new Error(`${deprecatedName} has been renamed to ${replacementName}`);
+  }
+}
+
+function parseImProvider(value: string): AppConfig["imProvider"] {
   if (value === "telegram") return value;
-  throw new Error(`MESSAGING_PROVIDER is not supported: ${value}`);
+  throw new Error(`IM_PROVIDER is not supported: ${value}`);
 }
 
 function parseAgentProvider(value: string): AppConfig["agentProvider"] {

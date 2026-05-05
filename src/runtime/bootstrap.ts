@@ -9,14 +9,14 @@ import { CapabilityRegistry } from "../relay/capabilities/registry.ts";
 import { parseSendImageRequest, RELAY_CAPABILITY_SEND_IMAGE } from "../relay/capabilities/send-image.ts";
 import { relayCapabilityInstructions, sendImageCapabilityInstructions } from "../relay/control/skills.ts";
 import { startControlServer, type RunningControlServer } from "../relay/control/server.ts";
-import { createMessagingAdapter } from "../providers/messaging/factory.ts";
+import { createImAdapter } from "../providers/im/factory.ts";
 import { createAgentDriver } from "../providers/agents/factory.ts";
 
 export async function main(): Promise<void> {
   const config = loadConfig();
   const logger = new TextLogger(config.logLevel);
   const store = new SQLiteStore(config.sqlitePath, logger);
-  const messaging = createMessagingAdapter(config, logger);
+  const imAdapter = createImAdapter(config, logger);
   let router: RelayController;
   let control: RunningControlServer | undefined;
   const helperPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin", "agent-relay-helper");
@@ -43,7 +43,7 @@ export async function main(): Promise<void> {
     onExit: (event) => router.handleAgentExit(event.sessionKey, `Agent exited with code ${event.exitCode ?? "unknown"}${event.signalCode ? ` (${event.signalCode})` : ""}.`),
     logger,
   });
-  router = new RelayController({ config, store, adapter: messaging, agent, logger });
+  router = new RelayController({ config, store, adapter: imAdapter, agent, logger });
   if (config.relayControlEnabled) {
     control = startControlServer({
       port: config.relayControlPort,
@@ -59,7 +59,7 @@ export async function main(): Promise<void> {
   const shutdown = (signal: string): void => {
     logger.info("app.shutdown_requested", { signal });
     control?.stop();
-    messaging.stop?.();
+    imAdapter.stop?.();
     store.close();
     process.exit(0);
   };
@@ -68,7 +68,7 @@ export async function main(): Promise<void> {
 
   logger.info("app.started", {
     log_level: config.logLevel,
-    messaging_provider: config.messagingProvider,
+    im_provider: config.imProvider,
     agent_provider: config.agentProvider,
     workspace_root: config.workspaceRoot,
     sqlite_path: config.sqlitePath,
@@ -85,5 +85,5 @@ export async function main(): Promise<void> {
     allowed_user_count: config.allowedUserIds.size,
     allowed_conversation_count: config.allowedConversationIds?.size ?? 0,
   });
-  await messaging.start((message) => router.handle(message));
+  await imAdapter.start((message) => router.handle(message));
 }

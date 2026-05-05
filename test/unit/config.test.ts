@@ -28,9 +28,29 @@ describe("config", () => {
     expect(config.telegramRetryMaxDelayMs).toBe(10000);
     expect(config.relayControlEnabled).toBe(false);
     expect(config.relayControlPort).toBe(0);
-    expect(config.messagingProvider).toBe("telegram");
+    expect(config.imProvider).toBe("telegram");
     expect(config.agentProvider).toBe("codex");
     expect(config.allowedUserIds.has("10")).toBe(true);
+  });
+
+  test("loads explicit IM provider", () => {
+    const config = loadConfig({
+      IM_PROVIDER: "telegram",
+      TELEGRAM_BOT_TOKEN: "token",
+      ALLOWED_USER_IDS: "10",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+    });
+    expect(config.imProvider).toBe("telegram");
+  });
+
+  test("rejects invalid and deprecated IM provider settings", () => {
+    const baseEnv = {
+      TELEGRAM_BOT_TOKEN: "token",
+      ALLOWED_USER_IDS: "10",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+    };
+    expect(() => loadConfig({ ...baseEnv, IM_PROVIDER: "slack" })).toThrow("IM_PROVIDER");
+    expect(() => loadConfig({ ...baseEnv, MESSAGING_PROVIDER: "telegram" })).toThrow("MESSAGING_PROVIDER has been renamed to IM_PROVIDER");
   });
 
   test("loads telegram polling and retry settings", () => {

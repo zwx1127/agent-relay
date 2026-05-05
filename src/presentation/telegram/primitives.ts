@@ -1,4 +1,4 @@
-import type { TextEntity } from "../../ports/messaging.ts";
+import type { TextEntity } from "../../ports/im.ts";
 
 export type TelegramMessageEntity = TextEntity;
 

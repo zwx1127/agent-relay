@@ -100,7 +100,7 @@ export interface CallbackInboundMessage {
 
 export type InboundMessage = TextInboundMessage | MediaInboundMessage | CallbackInboundMessage;
 
-export interface MessagingAdapterCapabilities {
+export interface ImAdapterCapabilities {
   editMessage: boolean;
   forceReply: boolean;
   inlineActions: boolean;
@@ -110,9 +110,9 @@ export interface MessagingAdapterCapabilities {
   imageUpload: boolean;
 }
 
-export interface MessagingAdapter {
+export interface ImAdapter {
   readonly providerId: ProviderId;
-  readonly capabilities: MessagingAdapterCapabilities;
+  readonly capabilities: ImAdapterCapabilities;
   start(onMessage: (message: InboundMessage) => Promise<void>): Promise<void>;
   stop?(): void;
   sendMessage(conversationId: ConversationId, text: string, options?: SendMessageOptions): Promise<SendMessageResult>;

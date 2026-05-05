@@ -1,5 +1,5 @@
 import type { AgentThreadSummary } from "../../ports/agent.ts";
-import type { InlineKeyboardMarkup } from "../../ports/messaging.ts";
+import type { InlineKeyboardMarkup } from "../../ports/im.ts";
 import type { WorkspaceRecord } from "../types.ts";
 import { UI_BUTTON, WORKSPACE_BUTTON_LABEL_WIDTH } from "./constants.ts";
 import { deleteWorkspaceCallbackData, workspaceCallbackData } from "./callback-data.ts";

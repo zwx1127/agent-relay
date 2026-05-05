@@ -1,5 +1,5 @@
 import { isAbsolute, relative, resolve } from "node:path";
-import type { InboundMediaFile } from "../../ports/messaging.ts";
+import type { InboundMediaFile } from "../../ports/im.ts";
 
 export function bestPhoto(photos: InboundMediaFile[]): InboundMediaFile | undefined {
   return [...photos].sort((a, b) => {

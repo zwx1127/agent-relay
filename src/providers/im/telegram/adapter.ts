@@ -1,5 +1,5 @@
 import type { ConversationId, MessageId } from "../../../domain/ids.ts";
-import type { DownloadedFile, EditMessageTextOptions, InboundMessage, MessagingAdapter, SendMessageOptions, SendPhotoOptions } from "../../../ports/messaging.ts";
+import type { DownloadedFile, EditMessageTextOptions, InboundMessage, ImAdapter, SendMessageOptions, SendPhotoOptions } from "../../../ports/im.ts";
 import { splitForTelegram, splitHtmlForTelegram, splitRenderedForTelegram } from "../../../presentation/telegram/text.ts";
 import { noopLogger, type Logger } from "../../../domain/logger.ts";
 
@@ -81,7 +81,7 @@ interface RequestOptions {
   retryForever?: boolean;
 }
 
-export class TelegramAdapter implements MessagingAdapter {
+export class TelegramAdapter implements ImAdapter {
   readonly providerId = "telegram";
   readonly capabilities = {
     editMessage: true,

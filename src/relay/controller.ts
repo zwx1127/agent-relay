@@ -25,7 +25,7 @@ import type {
   InlineKeyboardMarkup,
   MediaInboundMessage,
   SendMessageOptions,
-} from "../ports/messaging.ts";
+} from "../ports/im.ts";
 import type {
   HomeStatusMode,
   PendingPrompt,
@@ -345,7 +345,7 @@ export class RelayController {
     if (photo.fileSize && photo.fileSize > this.deps.config.mediaMaxBytes) {
       throw new Error(`Image is too large (${formatBytes(photo.fileSize)}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
     }
-    if (!this.deps.adapter.downloadFile) throw new Error("Messaging adapter cannot download media.");
+    if (!this.deps.adapter.downloadFile) throw new Error("IM adapter cannot download media.");
     const downloaded = await this.deps.adapter.downloadFile(photo.fileId);
     const size = downloaded.fileSize ?? downloaded.bytes.byteLength;
     if (size > this.deps.config.mediaMaxBytes || downloaded.bytes.byteLength > this.deps.config.mediaMaxBytes) {
@@ -453,7 +453,7 @@ export class RelayController {
   }
 
   private async sendStoredImage(conversationId: ConversationId, workspaceName: string, path: string, caption?: string, replyToMessageId?: MessageId): Promise<void> {
-    if (!this.deps.adapter.sendPhoto) throw new Error("Messaging adapter cannot send images.");
+    if (!this.deps.adapter.sendPhoto) throw new Error("IM adapter cannot send images.");
     const blob = await imageBlobFromPath(path);
     await this.deps.adapter.sendPhoto(conversationId, blob, {
       ...(caption ? { caption: truncateTelegramCaption(caption) } : {}),
@@ -807,7 +807,7 @@ export class RelayController {
     rendered: RenderedTelegramText,
     options: Omit<EditMessageTextOptions, "entities" | "parseMode">,
   ): Promise<void> {
-    if (!this.deps.adapter.editMessageText) throw new Error("Messaging adapter cannot edit messages.");
+    if (!this.deps.adapter.editMessageText) throw new Error("IM adapter cannot edit messages.");
     await this.deps.adapter.editMessageText(conversationId, rendered.text, {
       ...options,
       entities: rendered.entities,
