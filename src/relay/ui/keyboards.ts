@@ -43,12 +43,26 @@ export function approvalKeyboard(token: string): InlineKeyboardMarkup {
   };
 }
 
-export function codexQuestionKeyboard(token: string, options: AgentUserInputOption[]): InlineKeyboardMarkup {
-  return {
-    inline_keyboard: options.map((option, index) => [{
+export function codexQuestionKeyboard(token: string, options: AgentUserInputOption[], includeOther = false): InlineKeyboardMarkup {
+  const rows = options.map((option, index) => [{
       text: buttonLabel(option.label),
       callback_data: `ar:q:${token}:${index}`,
-    }]),
+    }]);
+  if (includeOther) rows.push([{ text: "Other", callback_data: `ar:q:${token}:other` }]);
+  return {
+    inline_keyboard: rows,
+  };
+}
+
+export function codexQuestionConfirmKeyboard(token: string): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [
+      [
+        { text: "Submit", callback_data: `ar:q:${token}:submit` },
+        { text: "Add note", callback_data: `ar:q:${token}:note` },
+      ],
+      [{ text: "Change", callback_data: `ar:q:${token}:change` }],
+    ],
   };
 }
 

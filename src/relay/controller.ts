@@ -16,6 +16,7 @@ import type {
   AgentCollaborationMode,
   AgentOutputEvent,
   AgentSessionStatus,
+  AgentUserInputOption,
   AgentUserInputQuestion,
   AgentUserInputRequestEvent,
 } from "../ports/agent.ts";
@@ -37,9 +38,9 @@ import { noopLogger, type Logger } from "../domain/logger.ts";
 import { CODEX_PROMPT_TTL_MS, DEFAULT_IMAGE_PROMPT, LIST_PAGE_SIZE, MEDIA_GROUP_QUIET_MS, UI_BUTTON } from "./ui/constants.ts";
 import { codexRequestKey, shortToken, workspaceCallbackToken } from "./ui/callback-data.ts";
 import { commandArgs, parseReviewTarget } from "./ui/commands.ts";
-import { approvalKeyboard, codexQuestionKeyboard, consoleKeyboard, deleteWorkspaceConfirmKeyboard, planReadyKeyboard, resumeKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
+import { approvalKeyboard, codexQuestionConfirmKeyboard, codexQuestionKeyboard, consoleKeyboard, deleteWorkspaceConfirmKeyboard, planReadyKeyboard, resumeKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
 import { bestPhoto, formatBytes, pathContains, truncateTelegramCaption } from "./ui/media-format.ts";
-import { answeredMessage, confirmMessage, formatApprovalDecisionMessage, formatApprovalMessage, formatCodexQuestion, formatErrorMessage, formatResumeMessage, formatWorkspacesMessage } from "./ui/messages.ts";
+import { answeredMessage, confirmMessage, formatApprovalDecisionMessage, formatApprovalMessage, formatCodexAnswerNotePrompt, formatCodexQuestion, formatCodexSelectedAnswer, formatErrorMessage, formatResumeMessage, formatWorkspacesMessage } from "./ui/messages.ts";
 import { paginateWorkspaces } from "./ui/pagination.ts";
 import { approvalResponse, asPromptRecord, isExpired, parsePromptPayload } from "./ui/prompt-state.ts";
 import { formatHomeMessage, statusViewFromParts } from "./ui/status-message.ts";
@@ -1080,19 +1081,23 @@ export class RelayController {
     expiresAt: number,
   ): Promise<void> {
     const options = question.options ?? [];
+    const request = this.codexRequests.get(codexRequestKey(sessionKeyValue, requestId));
+    const totalQuestions = request?.questions.length ?? 1;
     const payload = JSON.stringify({
       token,
       requestId,
       questionIndex,
       questionId: question.id,
+      header: question.header,
+      question: question.question,
       isSecret: Boolean(question.isSecret),
+      isOther: Boolean(question.isOther),
       options,
+      totalQuestions,
     });
-    const request = this.codexRequests.get(codexRequestKey(sessionKeyValue, requestId));
-    const totalQuestions = request?.questions.length ?? 1;
     const useInlineOptions = !question.isSecret && options.length > 0 && this.deps.adapter.capabilities.inlineActions;
     const result = await this.sendRendered(conversationId, formatCodexQuestion(question, questionIndex, totalQuestions), {
-      ...(useInlineOptions ? { replyMarkup: codexQuestionKeyboard(token, options) } : { forceReply: true }),
+      ...(useInlineOptions ? { replyMarkup: codexQuestionKeyboard(token, options, Boolean(question.isOther)) } : { forceReply: true }),
       disableWebPagePreview: true,
     });
     if (!result.messageId) throw new Error("Telegram did not return a prompt message id.");
@@ -1109,7 +1114,8 @@ export class RelayController {
 
   private async answerCodexOptionCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
     const parts = payload.split(":");
-    const [, token, rawOptionIndex] = parts;
+    const [, token, rawAction] = parts;
+    if (!token) throw new Error("Question selection is missing.");
     const pending = message.messageId ? this.deps.store.getPendingPrompt(message.conversationId, message.messageId) : undefined;
     const data = parsePromptPayload(pending?.payloadJson);
     if (!pending || pending.kind !== "codex_user_input" || !data || data.token !== token || isExpired(pending)) {
@@ -1117,17 +1123,122 @@ export class RelayController {
       return;
     }
 
-    const optionIndex = Number(rawOptionIndex);
+    if (rawAction === "submit") {
+      const selectedAnswer = typeof data.selectedAnswer === "string" ? data.selectedAnswer : undefined;
+      if (!selectedAnswer) throw new Error("Question selection expired.");
+      const response = await this.recordCodexAnswer(pending, data, [selectedAnswer]);
+      if (response === "expired") return;
+      if (!response) await this.sendNextCodexQuestion(message.conversationId, pending, data);
+      await this.renderCallbackPage(message, answeredMessage(selectedAnswer), { inline_keyboard: [] });
+      if (response) await this.respondToCodexPrompt(response);
+      return;
+    }
+
+    if (rawAction === "note") {
+      const selectedAnswer = typeof data.selectedAnswer === "string" ? data.selectedAnswer : undefined;
+      if (!selectedAnswer) throw new Error("Question selection expired.");
+      await this.promptForCodexAnswerNote(message, pending, data, selectedAnswer);
+      return;
+    }
+
+    if (rawAction === "change") {
+      const options = Array.isArray(data.options)
+        ? data.options.map((option) => {
+          const record = asPromptRecord(option);
+          return record && typeof record.label === "string"
+            ? { label: record.label, description: typeof record.description === "string" ? record.description : "" }
+            : undefined;
+        }).filter(Boolean) as AgentUserInputOption[]
+        : [];
+      const question = {
+        id: typeof data.questionId === "string" ? data.questionId : "question",
+        header: typeof data.header === "string" ? data.header : "Question",
+        question: typeof data.question === "string" ? data.question : "Pick one.",
+        isOther: Boolean(data.isOther),
+        options,
+      };
+      const questionIndex = typeof data.questionIndex === "number" ? data.questionIndex : 0;
+      const totalQuestions = typeof data.totalQuestions === "number" ? data.totalQuestions : 1;
+      this.deps.store.setPendingPrompt({
+        ...pending,
+        payloadJson: JSON.stringify({ ...data, selectedAnswer: undefined, answerMode: undefined }),
+      });
+      await this.renderCallbackPage(message, formatCodexQuestion(question, questionIndex, totalQuestions), codexQuestionKeyboard(token, options, Boolean(data.isOther)));
+      return;
+    }
+
+    if (rawAction === "other") {
+      await this.promptForCodexOtherAnswer(message, pending, data);
+      return;
+    }
+
+    const optionIndex = Number(rawAction);
     if (!Number.isInteger(optionIndex) || optionIndex < 0) throw new Error("Question selection is missing.");
     const option = Array.isArray(data.options) ? asPromptRecord(data.options[optionIndex]) : undefined;
     const answer = typeof option?.label === "string" ? option.label : undefined;
     if (!answer) throw new Error("Question selection expired.");
 
-    const response = await this.recordCodexAnswer(pending, data, answer);
+    if (this.deps.store.getCollaborationMode(pending.sessionKey ?? "") === "plan") {
+      this.deps.store.setPendingPrompt({
+        ...pending,
+        payloadJson: JSON.stringify({ ...data, selectedAnswer: answer }),
+      });
+      await this.renderCallbackPage(message, formatCodexSelectedAnswer(answer), codexQuestionConfirmKeyboard(token));
+      return;
+    }
+
+    const response = await this.recordCodexAnswer(pending, data, [answer]);
     if (response === "expired") return;
     if (!response) await this.sendNextCodexQuestion(message.conversationId, pending, data);
     await this.renderCallbackPage(message, answeredMessage(answer), { inline_keyboard: [] });
     if (response) await this.respondToCodexPrompt(response);
+  }
+
+  private async promptForCodexAnswerNote(
+    message: Extract<InboundMessage, { kind: "callback_query" }>,
+    pending: PendingPrompt,
+    data: Record<string, unknown>,
+    selectedAnswer: string,
+  ): Promise<void> {
+    this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
+    await this.renderCallbackPage(message, formatCodexSelectedAnswer(selectedAnswer), { inline_keyboard: [] });
+    const result = await this.sendRendered(message.conversationId, formatCodexAnswerNotePrompt(selectedAnswer), {
+      forceReply: true,
+      disableWebPagePreview: true,
+    });
+    if (!result.messageId) throw new Error("Telegram did not return a note prompt message id.");
+    this.deps.store.setPendingPrompt({
+      conversationId: message.conversationId,
+      promptMessageId: result.messageId,
+      kind: "codex_user_input",
+      createdAt: Date.now(),
+      sessionKey: pending.sessionKey,
+      payloadJson: JSON.stringify({ ...data, selectedAnswer, answerMode: "note" }),
+      expiresAt: pending.expiresAt,
+    });
+  }
+
+  private async promptForCodexOtherAnswer(
+    message: Extract<InboundMessage, { kind: "callback_query" }>,
+    pending: PendingPrompt,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
+    await this.renderCallbackPage(message, messageWithTitle("Other answer", "Reply with the answer to use."), { inline_keyboard: [] });
+    const result = await this.sendRendered(message.conversationId, messageWithTitle("Other answer", "Reply with the answer to use."), {
+      forceReply: true,
+      disableWebPagePreview: true,
+    });
+    if (!result.messageId) throw new Error("Telegram did not return an other-answer prompt message id.");
+    this.deps.store.setPendingPrompt({
+      conversationId: message.conversationId,
+      promptMessageId: result.messageId,
+      kind: "codex_user_input",
+      createdAt: Date.now(),
+      sessionKey: pending.sessionKey,
+      payloadJson: JSON.stringify({ ...data, answerMode: "other" }),
+      expiresAt: pending.expiresAt,
+    });
   }
 
   private async sendNextCodexQuestion(
@@ -1157,10 +1268,13 @@ export class RelayController {
       await this.sendRendered(conversationId, textMessage("Question expired."));
       return;
     }
-    const response = await this.recordCodexAnswer(pending, data, text);
+    const selectedAnswer = typeof data.selectedAnswer === "string" ? data.selectedAnswer : undefined;
+    const answerMode = typeof data.answerMode === "string" ? data.answerMode : undefined;
+    const answers = answerMode === "note" && selectedAnswer ? [selectedAnswer, text] : [text];
+    const response = await this.recordCodexAnswer(pending, data, answers);
     if (response === "expired") return;
     const hasNext = !response && await this.sendNextCodexQuestion(conversationId, pending, data);
-    if (!hasNext) await this.sendRendered(conversationId, data.isSecret ? messageWithTitle("Answered.") : answeredMessage(text));
+    if (!hasNext) await this.sendRendered(conversationId, data.isSecret ? messageWithTitle("Answered.") : answeredMessage(answers.join("\n")));
     if (response) await this.respondToCodexPrompt(response);
   }
 
@@ -1183,7 +1297,7 @@ export class RelayController {
   private async recordCodexAnswer(
     pending: PendingPrompt,
     data: Record<string, unknown>,
-    answer: string,
+    answers: string[],
   ): Promise<{ sessionKey: string; requestId: string | number; result: unknown } | "expired" | undefined> {
     if (!pending.sessionKey) throw new Error("Question session is missing.");
     const requestId = data.requestId as string | number | undefined;
@@ -1197,7 +1311,7 @@ export class RelayController {
       return "expired";
     }
 
-    request.answers[questionId] = { answers: [answer] };
+    request.answers[questionId] = { answers };
     this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
     if (Object.keys(request.answers).length !== request.questions.length) return undefined;
     this.codexRequests.delete(codexRequestKey(pending.sessionKey, requestId));

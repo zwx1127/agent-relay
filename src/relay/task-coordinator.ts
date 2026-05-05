@@ -127,7 +127,7 @@ export class TaskCoordinator {
     try {
       const mode = this.deps.store.getCollaborationMode(key);
       const sendOptions: AgentSendOptions = {
-        ...(mode === "plan" ? { collaborationMode: "plan" as const } : {}),
+        collaborationMode: mode,
         ...(input.images?.length ? { images: input.images } : {}),
       };
       result = await this.deps.agent.send(key, input.text, Object.keys(sendOptions).length > 0 ? sendOptions : undefined);

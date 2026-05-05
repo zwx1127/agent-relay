@@ -209,6 +209,22 @@ describe("CodexDriver app-server protocol", () => {
     await driver.stop(status.sessionKey);
   });
 
+  test("sends explicit default collaboration mode when requested", async () => {
+    const fake = fakeCodexBin();
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "implement", { collaborationMode: "default" });
+
+    const turnStart = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((message) => message.method === "turn/start" && message.params.input[0].text === "implement");
+    expect(turnStart.params.collaborationMode.mode).toBe("default");
+    await driver.stop(status.sessionKey);
+  });
+
   test("sends local images as Codex turn input", async () => {
     const fake = fakeCodexBin();
     const driver = new CodexDriver(

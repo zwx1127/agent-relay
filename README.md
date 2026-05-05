@@ -135,12 +135,12 @@ Relay-handled slash commands after a cwd is selected:
 | `/fork` | Forks the current thread and switches the chat to the fork. |
 | `/rename <name>` | Renames the current thread. Without a name, the relay asks via ForceReply. |
 | `/plan` | Toggles Plan mode for the current `chat + cwd`. |
-| `/plan <prompt>` | Runs the prompt in Plan mode and then offers Implement or Continue buttons. |
+| `/plan <prompt>` | Runs the prompt in Plan mode and then offers Implement or Continue buttons. Implement exits Plan mode and starts normal coding. |
 | `/stop` | Asks Codex to clean background terminals for the current thread. |
 
 `/relay` is the only Relay command that works without a cwd. Unsupported slash text, including `/help`, `/status`, `/model`, and `/start`, is forwarded to Codex when a cwd is selected.
 
-Codex questions with predefined options are shown with inline buttons. Free-text and secret questions are shown as ForceReply prompts. Multi-question requests are sent one question at a time, and answered option cards only show the selected answer. Approval requests are shown with approve/deny inline buttons. New prompts are paused while Codex is waiting for an answer or approval.
+Codex questions with predefined options are shown with inline buttons. In Plan mode, selecting an option opens a confirmation step where you can submit, add a note, or change the selection; questions that support Other provide a free-text ForceReply answer. Free-text and secret questions are shown as ForceReply prompts. Multi-question requests are sent one question at a time, and answered option cards only show the selected answer. Approval requests are shown with approve/deny inline buttons. New prompts are paused while Codex is waiting for an answer or approval.
 
 Assistant output is rendered as Telegram text entities rather than HTML parse mode. Common Markdown is supported, including headings, lists, task lists, blockquotes, emphasis, inline code, code blocks, and HTTP/HTTPS links. Long output is stored and shown as paged Telegram messages.
 

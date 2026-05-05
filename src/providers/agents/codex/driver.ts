@@ -17,7 +17,7 @@ import type {
   AgentUserInputQuestion,
   StartAgentOptions,
 } from "../../../ports/agent.ts";
-import { applySessionMetadata, applyThreadMetadata, approvalCopy, approvalKindForMethod, asRecord, getString, getThreadId, getTurnId, imageOutputEvent, isNoActiveTurnToSteerError, planCollaborationMode, reviewTargetPayload, summarizeUnknown, toModelSummary, toQuestion, toThreadSummary, toTokenBreakdown, updateActiveTurnFromResult, userInputPayload } from "./protocol.ts";
+import { applySessionMetadata, applyThreadMetadata, approvalCopy, approvalKindForMethod, asRecord, collaborationModePayload, getString, getThreadId, getTurnId, imageOutputEvent, isNoActiveTurnToSteerError, reviewTargetPayload, summarizeUnknown, toModelSummary, toQuestion, toThreadSummary, toTokenBreakdown, updateActiveTurnFromResult, userInputPayload } from "./protocol.ts";
 
 interface RunningSession {
   status: AgentSessionStatus;
@@ -167,7 +167,7 @@ export class CodexDriver implements AgentDriver {
 
     const input = userInputPayload(text, options?.images);
     const method = running.status.activeTurnId ? "turn/steer" : "turn/start";
-    const collaborationMode = options?.collaborationMode === "plan" ? planCollaborationMode(running.status) : undefined;
+    const collaborationMode = options?.collaborationMode ? collaborationModePayload(running.status, options.collaborationMode) : undefined;
     const params = running.status.activeTurnId
       ? { threadId: running.status.threadId, expectedTurnId: running.status.activeTurnId, input }
       : { threadId: running.status.threadId, input, ...(collaborationMode ? { collaborationMode } : {}) };

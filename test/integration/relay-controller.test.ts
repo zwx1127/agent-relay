@@ -44,6 +44,10 @@ function fixture(logLevel: LogLevel = "info"): { router: RelayController; store:
   return { router: new RelayController({ config, store, adapter, agent, logger }), store, adapter, agent, root, logLines };
 }
 
+function sentPrompt(text: string, collaborationMode: "default" | "plan" = "default"): { key: string; text: string; options: { collaborationMode: "default" | "plan" } } {
+  return { key: "codex:1:demo", text, options: { collaborationMode } };
+}
+
 afterEach(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
   dirs = [];
@@ -73,7 +77,7 @@ describe("relay controller", () => {
 
     await router.handle(textMessage("hello codex"));
 
-    expect(agent.sent).toEqual([{ key: "codex:1:demo", text: "hello codex" }]);
+    expect(agent.sent).toEqual([sentPrompt("hello codex")]);
     expect(agent.getStatus("codex:1:demo")?.running).toBe(true);
   });
 
@@ -113,7 +117,7 @@ describe("relay controller", () => {
 
     await router.handle(textMessage("/unknown"));
 
-    expect(agent.sent).toEqual([{ key: "codex:1:demo", text: "/unknown" }]);
+    expect(agent.sent).toEqual([sentPrompt("/unknown")]);
     expect(adapter.sent).toEqual([]);
     expect(adapter.reactions).toEqual([{ conversationId: "1", messageId: "1", emoji: "✍" }]);
   });
@@ -188,7 +192,7 @@ describe("relay controller", () => {
     expect(adapter.sent.map((message) => message.text)).toEqual(["before", "after"]);
     expect(adapter.edited).toEqual([]);
     expect(adapter.reactions).toEqual([{ conversationId: "1", messageId: "1", emoji: "✍" }]);
-    expect(agent.sent.at(-1)).toEqual({ key: "codex:1:demo", text: "follow up" });
+    expect(agent.sent.at(-1)).toEqual(sentPrompt("follow up"));
   });
 
   test("long agent output is paged in one telegram message", async () => {
@@ -364,7 +368,7 @@ describe("relay controller", () => {
 
     await router.handle(textMessage("/init"));
 
-    expect(agent.sent).toEqual([{ key: "codex:1:demo", text: "Generate a file named AGENTS.md that serves as a contributor guide for this repository." }]);
+    expect(agent.sent).toEqual([sentPrompt("Generate a file named AGENTS.md that serves as a contributor guide for this repository.")]);
   });
 
   test("/clear starts a fresh thread while keeping the workspace selected", async () => {
@@ -451,7 +455,7 @@ describe("relay controller", () => {
 
     await router.handle(textMessage("/plan design this"));
 
-    expect(agent.sent.at(-1)).toEqual({ key: "codex:1:demo", text: "design this", options: { collaborationMode: "plan" } });
+    expect(agent.sent.at(-1)).toEqual(sentPrompt("design this", "plan"));
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
     const planButton = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Implement");
     expect(planButton?.callback_data).toMatch(/^ar:cmd:plan:/);
@@ -459,7 +463,7 @@ describe("relay controller", () => {
     await router.handle(callbackMessage(planButton!.callback_data, 7, "cb-plan", adapter.sent.at(-1)?.messageId));
 
     expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
-    expect(agent.sent.at(-1)).toEqual({ key: "codex:1:demo", text: "Implement the approved plan." });
+    expect(agent.sent.at(-1)).toEqual(sentPrompt("Implement the approved plan."));
   });
 
   test("resume callback is no longer supported", async () => {
@@ -588,7 +592,7 @@ describe("relay controller", () => {
 
     await router.handle(textMessage("new task while busy"));
 
-    expect(agent.sent.at(-1)).toEqual({ key: "codex:1:demo", text: "new task while busy" });
+    expect(agent.sent.at(-1)).toEqual(sentPrompt("new task while busy"));
     expect(adapter.sent).toEqual([]);
     expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(0);
   });
@@ -604,7 +608,7 @@ describe("relay controller", () => {
 
     await router.handle(textMessage("/add include tests"));
 
-    expect(agent.sent.at(-1)).toEqual({ key: "codex:1:demo", text: "/add include tests" });
+    expect(agent.sent.at(-1)).toEqual(sentPrompt("/add include tests"));
     expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(0);
   });
 
@@ -631,7 +635,7 @@ describe("relay controller", () => {
 
     await (router as any).submitTask(1, "run without id", undefined, "immediate");
 
-    expect(agent.sent).toEqual([{ key: "codex:1:demo", text: "run without id" }]);
+    expect(agent.sent).toEqual([sentPrompt("run without id")]);
     expect(adapter.sent).toEqual([]);
     expect(adapter.reactions).toEqual([]);
   });
@@ -646,7 +650,7 @@ describe("relay controller", () => {
 
     await router.handle(textMessage("run task"));
 
-    expect(agent.sent).toEqual([{ key: "codex:1:demo", text: "run task" }]);
+    expect(agent.sent).toEqual([sentPrompt("run task")]);
     expect(adapter.sent).toEqual([]);
     expect(adapter.reactions).toEqual([]);
     expect(logLines.join("\n")).toContain("router.task_reaction_failed");
@@ -1007,6 +1011,156 @@ describe("relay controller", () => {
       { conversationId: "1", messageId: "1", emoji: "🤔" },
       { conversationId: "1", messageId: "1", emoji: "✍" },
     ]);
+  });
+
+  test("plan option question confirms selected answer before responding", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("/plan"));
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "codex:1:demo",
+      requestId: 78,
+      questions: [{
+        id: "choice",
+        header: "Mode",
+        question: "Pick one.",
+        options: [{ label: "Fast", description: "Low detail" }, { label: "Deep", description: "More detail" }],
+      }],
+    });
+
+    const prompt = adapter.sent.at(-1)!;
+    const fast = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
+    await router.handle(callbackMessage(fast.callback_data, 7, "cb-fast", prompt.messageId));
+
+    expect(agent.responses).toEqual([]);
+    expect(adapter.edited.at(-1)?.text).toContain("Selected:");
+    const submit = adapter.edited.at(-1)!.options.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Submit")!;
+    await router.handle(callbackMessage(submit.callback_data, 7, "cb-submit", prompt.messageId));
+
+    expect(agent.responses).toEqual([{
+      key: "codex:1:demo",
+      requestId: 78,
+      result: { answers: { choice: { answers: ["Fast"] } } },
+    }]);
+  });
+
+  test("plan option question can add a note to the selected answer", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("/plan"));
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "codex:1:demo",
+      requestId: 79,
+      questions: [{
+        id: "choice",
+        header: "Mode",
+        question: "Pick one.",
+        options: [{ label: "Fast", description: "Low detail" }],
+      }],
+    });
+
+    const prompt = adapter.sent.at(-1)!;
+    const fast = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
+    await router.handle(callbackMessage(fast.callback_data, 7, "cb-fast", prompt.messageId));
+    const note = adapter.edited.at(-1)!.options.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Add note")!;
+    await router.handle(callbackMessage(note.callback_data, 7, "cb-note", prompt.messageId));
+
+    const notePrompt = adapter.sent.at(-1)!;
+    expect(notePrompt.options?.forceReply).toBe(true);
+    await router.handle(textMessage("Prefer minimal changes", 7, notePrompt.messageId));
+
+    expect(agent.responses).toEqual([{
+      key: "codex:1:demo",
+      requestId: 79,
+      result: { answers: { choice: { answers: ["Fast", "Prefer minimal changes"] } } },
+    }]);
+    expect(agent.sent).toEqual([]);
+  });
+
+  test("plan option question can change the selected answer", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("/plan"));
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "codex:1:demo",
+      requestId: 80,
+      questions: [{
+        id: "choice",
+        header: "Mode",
+        question: "Pick one.",
+        options: [{ label: "Fast", description: "Low detail" }, { label: "Deep", description: "More detail" }],
+      }],
+    });
+
+    const prompt = adapter.sent.at(-1)!;
+    await router.handle(callbackMessage(prompt.options!.replyMarkup!.inline_keyboard[0]![0]!.callback_data, 7, "cb-fast", prompt.messageId));
+    const change = adapter.edited.at(-1)!.options.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Change")!;
+    await router.handle(callbackMessage(change.callback_data, 7, "cb-change", prompt.messageId));
+
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.map((row) => row[0]?.text)).toEqual(["Fast", "Deep"]);
+    const deep = adapter.edited.at(-1)!.options.replyMarkup!.inline_keyboard[1]![0]!;
+    await router.handle(callbackMessage(deep.callback_data, 7, "cb-deep", prompt.messageId));
+    const submit = adapter.edited.at(-1)!.options.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Submit")!;
+    await router.handle(callbackMessage(submit.callback_data, 7, "cb-submit", prompt.messageId));
+
+    expect(agent.responses).toEqual([{
+      key: "codex:1:demo",
+      requestId: 80,
+      result: { answers: { choice: { answers: ["Deep"] } } },
+    }]);
+  });
+
+  test("plan option question supports Other as a free text answer", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("/plan"));
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "codex:1:demo",
+      requestId: 81,
+      questions: [{
+        id: "choice",
+        header: "Mode",
+        question: "Pick one.",
+        isOther: true,
+        options: [{ label: "Fast", description: "Low detail" }],
+      }],
+    });
+
+    const prompt = adapter.sent.at(-1)!;
+    expect(prompt.options?.replyMarkup?.inline_keyboard.map((row) => row[0]?.text)).toEqual(["Fast", "Other"]);
+    const other = prompt.options!.replyMarkup!.inline_keyboard[1]![0]!;
+    await router.handle(callbackMessage(other.callback_data, 7, "cb-other", prompt.messageId));
+
+    const otherPrompt = adapter.sent.at(-1)!;
+    expect(otherPrompt.options?.forceReply).toBe(true);
+    await router.handle(textMessage("Use a hybrid approach", 7, otherPrompt.messageId));
+
+    expect(agent.responses).toEqual([{
+      key: "codex:1:demo",
+      requestId: 81,
+      result: { answers: { choice: { answers: ["Use a hybrid approach"] } } },
+    }]);
+    expect(agent.sent).toEqual([]);
   });
 
   test("stale codex user input callback expires without responding", async () => {

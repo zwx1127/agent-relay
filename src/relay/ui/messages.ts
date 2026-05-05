@@ -25,6 +25,27 @@ export function answeredMessage(answer: string): RenderedTelegramText {
   ]);
 }
 
+export function formatCodexSelectedAnswer(answer: string): RenderedTelegramText {
+  return renderTelegramText([
+    bold("Selected:"),
+    " ",
+    answer,
+    "\n\n",
+    "Submit this answer, add a note, or change your selection.",
+  ]);
+}
+
+export function formatCodexAnswerNotePrompt(answer: string): RenderedTelegramText {
+  return renderTelegramText([
+    bold("Add note"),
+    "\n\n",
+    "Selected: ",
+    answer,
+    "\n\n",
+    "Reply with the extra details to include.",
+  ]);
+}
+
 export function formatErrorMessage(detail: string): RenderedTelegramText {
   return renderTelegramText([bold("Error:"), " ", detail]);
 }
@@ -50,6 +71,9 @@ export function renderCodexQuestionBody(parts: TelegramTextPart[], question: Age
       if (index > 0) parts.push("\n");
       parts.push(bold(option.label));
       if (option.description) parts.push(` - ${option.description}`);
+    }
+    if (question.isOther) {
+      parts.push("\n", bold("Other"));
     }
   }
   return renderTelegramText(parts);

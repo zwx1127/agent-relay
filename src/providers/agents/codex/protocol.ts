@@ -1,4 +1,4 @@
-import type { AgentApprovalKind, AgentImageInput, AgentModelSummary, AgentReviewTarget, AgentSessionStatus, AgentThreadSummary, AgentTokenBreakdown, AgentUserInputQuestion } from "../../../ports/agent.ts";
+import type { AgentApprovalKind, AgentCollaborationMode, AgentImageInput, AgentModelSummary, AgentReviewTarget, AgentSessionStatus, AgentThreadSummary, AgentTokenBreakdown, AgentUserInputQuestion } from "../../../ports/agent.ts";
 
 export function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
@@ -97,9 +97,9 @@ export function reviewTargetPayload(target: AgentReviewTarget): unknown {
   }
 }
 
-export function planCollaborationMode(status: AgentSessionStatus): unknown {
+export function collaborationModePayload(status: AgentSessionStatus, mode: AgentCollaborationMode): unknown {
   return {
-    mode: "plan",
+    mode,
     settings: {
       model: status.model ?? "gpt-5.2",
       reasoning_effort: status.reasoningEffort ?? null,
