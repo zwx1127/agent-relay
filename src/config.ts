@@ -3,14 +3,16 @@ import { resolve } from "node:path";
 import { parseLogLevel, type LogLevel } from "./logger.ts";
 
 export interface AppConfig {
+  messagingProvider: "telegram";
+  agentProvider: "codex";
+  allowedUserIds: Set<string>;
+  allowedConversationIds?: Set<string>;
+  mediaMaxBytes: number;
   telegramBotToken: string;
-  telegramAllowedUserIds: Set<number>;
-  telegramAllowedChatIds?: Set<number>;
   telegramPollTimeoutSeconds: number;
   telegramRequestRetryMaxAttempts: number;
   telegramRetryInitialDelayMs: number;
   telegramRetryMaxDelayMs: number;
-  telegramImageMaxBytes: number;
   workspaceRoot: string;
   sqlitePath: string;
   codexBin: string;
@@ -65,15 +67,12 @@ function parseDotEnvValue(value: string): string {
   return (commentIndex >= 0 ? value.slice(0, commentIndex) : value).trim();
 }
 
-export function parseIdSet(value: string, name: string): Set<number> {
-  const ids = new Set<number>();
+export function parseStringSet(value: string, name: string): Set<string> {
+  const ids = new Set<string>();
   for (const rawPart of value.split(",")) {
     const part = rawPart.trim();
     if (part.length === 0) continue;
-    if (!/^-?\d+$/.test(part)) {
-      throw new Error(`${name} contains a non-integer id: ${part}`);
-    }
-    ids.add(Number(part));
+    ids.add(part);
   }
   if (ids.size === 0) {
     throw new Error(`${name} must contain at least one id`);
@@ -131,7 +130,9 @@ function parseBooleanEnv(env: Env, name: string, defaultValue: boolean): boolean
 
 export function loadConfig(env?: Env): AppConfig {
   const effectiveEnv = env ?? { ...loadDotEnvFile(), ...process.env };
-  const allowedChats = effectiveEnv.TELEGRAM_ALLOWED_CHAT_IDS?.trim();
+  const messagingProvider = parseMessagingProvider(effectiveEnv.MESSAGING_PROVIDER?.trim() || "telegram");
+  const agentProvider = parseAgentProvider(effectiveEnv.AGENT_PROVIDER?.trim() || "codex");
+  const allowedConversations = effectiveEnv.ALLOWED_CONVERSATION_IDS?.trim();
   const developerInstructions = combineInstructionSources(
     effectiveEnv.CODEX_DEVELOPER_INSTRUCTIONS_FILE,
     effectiveEnv.CODEX_DEVELOPER_INSTRUCTIONS,
@@ -142,14 +143,16 @@ export function loadConfig(env?: Env): AppConfig {
     "CODEX_MODEL_INSTRUCTIONS_FILE",
   );
   return {
+    messagingProvider,
+    agentProvider,
+    allowedUserIds: parseStringSet(requireEnv(effectiveEnv, "ALLOWED_USER_IDS"), "ALLOWED_USER_IDS"),
+    allowedConversationIds: allowedConversations ? parseStringSet(allowedConversations, "ALLOWED_CONVERSATION_IDS") : undefined,
+    mediaMaxBytes: parsePositiveIntegerEnv(effectiveEnv, "MEDIA_MAX_BYTES", 20 * 1024 * 1024),
     telegramBotToken: requireEnv(effectiveEnv, "TELEGRAM_BOT_TOKEN"),
-    telegramAllowedUserIds: parseIdSet(requireEnv(effectiveEnv, "TELEGRAM_ALLOWED_USER_IDS"), "TELEGRAM_ALLOWED_USER_IDS"),
-    telegramAllowedChatIds: allowedChats ? parseIdSet(allowedChats, "TELEGRAM_ALLOWED_CHAT_IDS") : undefined,
     telegramPollTimeoutSeconds: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_POLL_TIMEOUT_SECONDS", 30),
     telegramRequestRetryMaxAttempts: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS", 3),
     telegramRetryInitialDelayMs: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_RETRY_INITIAL_DELAY_MS", 500),
     telegramRetryMaxDelayMs: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_RETRY_MAX_DELAY_MS", 10000),
-    telegramImageMaxBytes: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_IMAGE_MAX_BYTES", 20 * 1024 * 1024),
     workspaceRoot: requireEnv(effectiveEnv, "WORKSPACE_ROOT"),
     sqlitePath: effectiveEnv.SQLITE_PATH?.trim() || ".data/agent-relay.sqlite",
     codexBin: effectiveEnv.CODEX_BIN?.trim() || "codex",
@@ -161,6 +164,16 @@ export function loadConfig(env?: Env): AppConfig {
     relayControlPort: parseNonNegativeIntegerEnv(effectiveEnv, "RELAY_CONTROL_PORT", 0),
     logLevel: parseLogLevel(effectiveEnv.LOG_LEVEL),
   };
+}
+
+function parseMessagingProvider(value: string): AppConfig["messagingProvider"] {
+  if (value === "telegram") return value;
+  throw new Error(`MESSAGING_PROVIDER is not supported: ${value}`);
+}
+
+function parseAgentProvider(value: string): AppConfig["agentProvider"] {
+  if (value === "codex") return value;
+  throw new Error(`AGENT_PROVIDER is not supported: ${value}`);
 }
 
 function combineInstructionSources(filePath: string | undefined, inline: string | undefined, fileEnvName: string): string | undefined {
@@ -180,8 +193,12 @@ function readInstructionFile(filePath: string | undefined, envName: string): str
   }
 }
 
-export function isAuthorized(config: Pick<AppConfig, "telegramAllowedUserIds" | "telegramAllowedChatIds">, userId: number, chatId: number): boolean {
-  if (!config.telegramAllowedUserIds.has(userId)) return false;
-  if (config.telegramAllowedChatIds && !config.telegramAllowedChatIds.has(chatId)) return false;
+export function isAuthorized(config: Pick<AppConfig, "allowedUserIds" | "allowedConversationIds">, userId: string | number, conversationId: string | number): boolean {
+  const userKey = String(userId);
+  const conversationKey = String(conversationId);
+  if (!config.allowedUserIds.has(userKey)) return false;
+  if (config.allowedConversationIds && !config.allowedConversationIds.has(conversationKey)) return false;
   return true;
 }
+
+export const parseIdSet = parseStringSet;

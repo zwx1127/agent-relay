@@ -2,21 +2,21 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isAuthorized, loadConfig, loadDotEnvFile, parseIdSet } from "../src/config.ts";
+import { isAuthorized, loadConfig, loadDotEnvFile, parseStringSet } from "../src/config.ts";
 
 describe("config", () => {
   test("parses comma separated ids", () => {
-    expect([...parseIdSet("1, 2,3", "IDS")]).toEqual([1, 2, 3]);
+    expect([...parseStringSet("1, 2,3", "IDS")]).toEqual(["1", "2", "3"]);
   });
 
   test("rejects invalid ids", () => {
-    expect(() => parseIdSet("1, nope", "IDS")).toThrow("non-integer");
+    expect(() => parseStringSet("", "IDS")).toThrow("IDS");
   });
 
   test("loads required env and defaults", () => {
     const config = loadConfig({
       TELEGRAM_BOT_TOKEN: "token",
-      TELEGRAM_ALLOWED_USER_IDS: "10",
+      ALLOWED_USER_IDS: "10",
       WORKSPACE_ROOT: "/tmp/workspaces",
     });
     expect(config.sqlitePath).toBe(".data/agent-relay.sqlite");
@@ -28,13 +28,15 @@ describe("config", () => {
     expect(config.telegramRetryMaxDelayMs).toBe(10000);
     expect(config.relayControlEnabled).toBe(false);
     expect(config.relayControlPort).toBe(0);
-    expect(config.telegramAllowedUserIds.has(10)).toBe(true);
+    expect(config.messagingProvider).toBe("telegram");
+    expect(config.agentProvider).toBe("codex");
+    expect(config.allowedUserIds.has("10")).toBe(true);
   });
 
   test("loads telegram polling and retry settings", () => {
     const config = loadConfig({
       TELEGRAM_BOT_TOKEN: "token",
-      TELEGRAM_ALLOWED_USER_IDS: "10",
+      ALLOWED_USER_IDS: "10",
       WORKSPACE_ROOT: "/tmp/workspaces",
       TELEGRAM_POLL_TIMEOUT_SECONDS: "20",
       TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS: "5",
@@ -50,7 +52,7 @@ describe("config", () => {
   test("rejects invalid telegram polling and retry settings", () => {
     const baseEnv = {
       TELEGRAM_BOT_TOKEN: "token",
-      TELEGRAM_ALLOWED_USER_IDS: "10",
+      ALLOWED_USER_IDS: "10",
       WORKSPACE_ROOT: "/tmp/workspaces",
     };
     for (const name of [
@@ -70,7 +72,7 @@ describe("config", () => {
   test("loads log level", () => {
     const config = loadConfig({
       TELEGRAM_BOT_TOKEN: "token",
-      TELEGRAM_ALLOWED_USER_IDS: "10",
+      ALLOWED_USER_IDS: "10",
       WORKSPACE_ROOT: "/tmp/workspaces",
       LOG_LEVEL: "debug",
     });
@@ -80,7 +82,7 @@ describe("config", () => {
   test("loads relay control settings", () => {
     const config = loadConfig({
       TELEGRAM_BOT_TOKEN: "token",
-      TELEGRAM_ALLOWED_USER_IDS: "10",
+      ALLOWED_USER_IDS: "10",
       WORKSPACE_ROOT: "/tmp/workspaces",
       RELAY_CONTROL_ENABLED: "true",
       RELAY_CONTROL_PORT: "37281",
@@ -92,7 +94,7 @@ describe("config", () => {
   test("rejects invalid relay control settings", () => {
     const baseEnv = {
       TELEGRAM_BOT_TOKEN: "token",
-      TELEGRAM_ALLOWED_USER_IDS: "10",
+      ALLOWED_USER_IDS: "10",
       WORKSPACE_ROOT: "/tmp/workspaces",
     };
     expect(() => loadConfig({ ...baseEnv, RELAY_CONTROL_ENABLED: "maybe" })).toThrow("RELAY_CONTROL_ENABLED");
@@ -110,7 +112,7 @@ describe("config", () => {
       writeFileSync(modelFile, "model instructions");
       const config = loadConfig({
         TELEGRAM_BOT_TOKEN: "token",
-        TELEGRAM_ALLOWED_USER_IDS: "10",
+        ALLOWED_USER_IDS: "10",
         WORKSPACE_ROOT: "/tmp/workspaces",
         CODEX_DEVELOPER_INSTRUCTIONS_FILE: devFile,
         CODEX_DEVELOPER_INSTRUCTIONS: "inline developer",
@@ -126,7 +128,7 @@ describe("config", () => {
   test("rejects invalid log level", () => {
     expect(() => loadConfig({
       TELEGRAM_BOT_TOKEN: "token",
-      TELEGRAM_ALLOWED_USER_IDS: "10",
+      ALLOWED_USER_IDS: "10",
       WORKSPACE_ROOT: "/tmp/workspaces",
       LOG_LEVEL: "verbose",
     })).toThrow("LOG_LEVEL");
@@ -138,7 +140,7 @@ describe("config", () => {
     try {
       writeFileSync(path, [
         "TELEGRAM_BOT_TOKEN=token",
-        "TELEGRAM_ALLOWED_USER_IDS=10, 20",
+        "ALLOWED_USER_IDS=10, 20",
         "WORKSPACE_ROOT=/tmp/workspaces # trailing comment",
         'CODEX_BIN="custom codex"',
       ].join("\n"));
@@ -146,7 +148,7 @@ describe("config", () => {
       const env = loadDotEnvFile(path);
       const config = loadConfig(env);
       expect(config.telegramBotToken).toBe("token");
-      expect([...config.telegramAllowedUserIds]).toEqual([10, 20]);
+      expect([...config.allowedUserIds]).toEqual(["10", "20"]);
       expect(config.workspaceRoot).toBe("/tmp/workspaces");
       expect(config.codexBin).toBe("custom codex");
     } finally {
@@ -156,8 +158,8 @@ describe("config", () => {
 
   test("requires user and optional chat allowlist", () => {
     const config = {
-      telegramAllowedUserIds: new Set([1]),
-      telegramAllowedChatIds: new Set([2]),
+      allowedUserIds: new Set(["1"]),
+      allowedConversationIds: new Set(["2"]),
     };
     expect(isAuthorized(config, 1, 2)).toBe(true);
     expect(isAuthorized(config, 1, 3)).toBe(false);

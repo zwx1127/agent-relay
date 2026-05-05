@@ -60,6 +60,19 @@ type PendingRpc = {
 };
 
 export class CodexDriver implements AgentDriver {
+  readonly providerId = "codex";
+  readonly capabilities = {
+    userInputRequests: true,
+    approvals: true,
+    builtinCommands: true,
+    threadFork: true,
+    threadRename: true,
+    threadList: true,
+    modelList: true,
+    localImages: true,
+    imageOutput: true,
+  };
+
   private readonly sessions = new Map<string, RunningSession>();
   private readonly threadToSession = new Map<string, string>();
   private readonly pending = new Map<number | string, PendingRpc>();
@@ -77,12 +90,12 @@ export class CodexDriver implements AgentDriver {
   ) {}
 
   async start(options: StartAgentOptions): Promise<AgentSessionStatus> {
-    const key = sessionKey(options.chatId, options.workspaceName);
+    const key = sessionKey(options.conversationId, options.workspaceName, this.providerId);
     const existing = this.sessions.get(key);
     if (existing) {
       this.logger.info("codex.session_reused", {
         session_key: key,
-        chat_id: options.chatId,
+        conversation_id: options.conversationId,
         workspace: options.workspaceName,
         thread_id: existing.status.threadId,
       });
@@ -93,7 +106,7 @@ export class CodexDriver implements AgentDriver {
 
     const status: AgentSessionStatus = {
       sessionKey: key,
-      chatId: options.chatId,
+      conversationId: options.conversationId,
       workspaceName: options.workspaceName,
       workspacePath: options.workspacePath,
       running: true,
@@ -103,7 +116,7 @@ export class CodexDriver implements AgentDriver {
 
     this.logger.info("codex.session_starting", {
       session_key: key,
-      chat_id: options.chatId,
+      conversation_id: options.conversationId,
       workspace: options.workspaceName,
       workspace_path: options.workspacePath,
       thread_id: options.threadId,
@@ -130,7 +143,7 @@ export class CodexDriver implements AgentDriver {
 
     this.logger.info("codex.session_started", {
       session_key: key,
-      chat_id: options.chatId,
+      conversation_id: options.conversationId,
       workspace: options.workspaceName,
       thread_id: threadId,
     });
@@ -164,7 +177,7 @@ export class CodexDriver implements AgentDriver {
 
     this.logger.info("codex.input_sent", {
       session_key: key,
-      chat_id: running.status.chatId,
+      conversation_id: running.status.conversationId,
       workspace: running.status.workspaceName,
       thread_id: running.status.threadId,
       active_turn_id: running.status.activeTurnId,
@@ -179,7 +192,7 @@ export class CodexDriver implements AgentDriver {
       if (method !== "turn/steer" || !isNoActiveTurnToSteerError(error)) throw error;
       this.logger.warn("codex.stale_active_turn_recovered", {
         session_key: key,
-        chat_id: running.status.chatId,
+        conversation_id: running.status.conversationId,
         workspace: running.status.workspaceName,
         thread_id: running.status.threadId,
         stale_turn_id: running.status.activeTurnId,
@@ -200,7 +213,7 @@ export class CodexDriver implements AgentDriver {
 
     this.logger.info("codex.session_stop_requested", {
       session_key: key,
-      chat_id: running.status.chatId,
+      conversation_id: running.status.conversationId,
       workspace: running.status.workspaceName,
       thread_id: running.status.threadId,
       active_turn_id: running.status.activeTurnId,

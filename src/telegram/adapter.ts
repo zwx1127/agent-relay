@@ -1,4 +1,4 @@
-import type { ChatId, EditMessageTextOptions, IMAdapter, InboundMessage, SendMessageOptions, SendPhotoOptions, TelegramDownloadedFile } from "../types.ts";
+import type { ConversationId, EditMessageTextOptions, MessageId, MessagingAdapter, InboundMessage, SendMessageOptions, SendPhotoOptions, TelegramDownloadedFile } from "../types.ts";
 import { splitForTelegram, splitHtmlForTelegram, splitRenderedForTelegram } from "../rendering/telegram-text.ts";
 import { noopLogger, type Logger } from "../logger.ts";
 
@@ -80,7 +80,18 @@ interface RequestOptions {
   retryForever?: boolean;
 }
 
-export class TelegramAdapter implements IMAdapter {
+export class TelegramAdapter implements MessagingAdapter {
+  readonly providerId = "telegram";
+  readonly capabilities = {
+    editMessage: true,
+    forceReply: true,
+    inlineActions: true,
+    reactions: true,
+    typing: true,
+    mediaDownload: true,
+    imageUpload: true,
+  };
+
   private offset = 0;
   private stopped = false;
   private readonly apiBase: string;
@@ -139,7 +150,7 @@ export class TelegramAdapter implements IMAdapter {
         this.logger.debug(inbound.kind === "message" ? "telegram.message_received" : inbound.kind === "media" ? "telegram.media_received" : "telegram.callback_query_received", {
           update_id: update.update_id,
           message_id: inbound.kind === "message" ? inbound.id : inbound.messageId,
-          chat_id: inbound.chatId,
+          conversation_id: inbound.conversationId,
           user_id: inbound.userId,
           kind: inbound.kind,
           text_len: inbound.kind === "message" ? inbound.text.length : inbound.kind === "media" ? inbound.caption?.length ?? 0 : inbound.data.length,
@@ -164,15 +175,15 @@ export class TelegramAdapter implements IMAdapter {
     this.logger.info("telegram.pending_updates_skipped", { offset: this.offset });
   }
 
-  async sendMessage(chatId: ChatId, text: string, options: SendMessageOptions = {}): Promise<{ messageId?: number }> {
+  async sendMessage(conversationId: ConversationId, text: string, options: SendMessageOptions = {}): Promise<{ messageId?: MessageId }> {
     const messageText = text.length > 0 ? text : "(empty)";
     const chunks = outboundChunks(messageText, options);
-    this.logger.debug("telegram.send_message_started", { chat_id: chatId, text_len: text.length, chunks: chunks.length });
-    let lastMessageId: number | undefined;
+    this.logger.debug("telegram.send_message_started", { conversation_id: conversationId, text_len: text.length, chunks: chunks.length });
+    let lastMessageId: string | undefined;
     for (const [index, chunk] of chunks.entries()) {
       try {
         const result = await this.request<{ message_id?: number }>("sendMessage", {
-          chat_id: chatId,
+          chat_id: conversationId,
           text: chunk.text,
           disable_web_page_preview: options.disableWebPagePreview ?? true,
           ...(options.parseMode ? { parse_mode: options.parseMode } : {}),
@@ -180,10 +191,10 @@ export class TelegramAdapter implements IMAdapter {
           ...(replyParametersForOptions(options, index === 0)),
           ...(replyMarkupForOptions(options, index === chunks.length - 1)),
         });
-        lastMessageId = result?.message_id ?? lastMessageId;
+        lastMessageId = result?.message_id !== undefined ? String(result.message_id) : lastMessageId;
       } catch (error) {
         this.logger.error("telegram.send_message_failed", {
-          chat_id: chatId,
+          conversation_id: conversationId,
           text_len: text.length,
           chunks: chunks.length,
           error: error instanceof Error ? error : new Error(String(error)),
@@ -191,30 +202,30 @@ export class TelegramAdapter implements IMAdapter {
         throw error;
       }
     }
-    this.logger.debug("telegram.send_message_completed", { chat_id: chatId, text_len: text.length, chunks: chunks.length });
+    this.logger.debug("telegram.send_message_completed", { conversation_id: conversationId, text_len: text.length, chunks: chunks.length });
     return { messageId: lastMessageId };
   }
 
-  async sendPhoto(chatId: ChatId, photo: Blob, options: SendPhotoOptions = {}): Promise<{ messageId?: number }> {
+  async sendPhoto(conversationId: ConversationId, photo: Blob, options: SendPhotoOptions = {}): Promise<{ messageId?: MessageId }> {
     const form = new FormData();
-    form.append("chat_id", String(chatId));
+    form.append("chat_id", String(conversationId));
     form.append("photo", photo, "image.jpg");
     if (options.caption) form.append("caption", options.caption);
     if (options.replyToMessageId) {
       form.append("reply_parameters", JSON.stringify({
-        message_id: options.replyToMessageId,
+        message_id: Number(options.replyToMessageId),
         allow_sending_without_reply: true,
       }));
     }
     const result = await this.request<{ message_id?: number }>("sendPhoto", form);
-    return { messageId: result?.message_id };
+    return { messageId: result?.message_id !== undefined ? String(result.message_id) : undefined };
   }
 
-  async editMessageText(chatId: ChatId, text: string, options: EditMessageTextOptions): Promise<void> {
+  async editMessageText(conversationId: ConversationId, text: string, options: EditMessageTextOptions): Promise<void> {
     try {
       await this.request("editMessageText", {
-        chat_id: chatId,
-        message_id: options.messageId,
+        chat_id: conversationId,
+        message_id: Number(options.messageId),
         text: text.length > 0 ? text : "(empty)",
         disable_web_page_preview: options.disableWebPagePreview ?? true,
         ...(options.parseMode ? { parse_mode: options.parseMode } : {}),
@@ -223,11 +234,11 @@ export class TelegramAdapter implements IMAdapter {
       }, { quietMessageNotModified: true });
     } catch (error) {
       if (isMessageNotModifiedError(error)) {
-        this.logger.debug("telegram.edit_message_not_modified", { chat_id: chatId, message_id: options.messageId });
+        this.logger.debug("telegram.edit_message_not_modified", { conversation_id: conversationId, message_id: options.messageId });
         return;
       }
       this.logger.error("telegram.edit_message_failed", {
-        chat_id: chatId,
+        conversation_id: conversationId,
         message_id: options.messageId,
         text_len: text.length,
         error: error instanceof Error ? error : new Error(String(error)),
@@ -243,17 +254,17 @@ export class TelegramAdapter implements IMAdapter {
     });
   }
 
-  async sendChatAction(chatId: ChatId, action: "typing" = "typing"): Promise<void> {
+  async sendChatAction(conversationId: ConversationId, action: "typing" = "typing"): Promise<void> {
     await this.request("sendChatAction", {
-      chat_id: chatId,
+      chat_id: conversationId,
       action,
     });
   }
 
-  async setMessageReaction(chatId: ChatId, messageId: number, emoji?: string): Promise<void> {
+  async setMessageReaction(conversationId: ConversationId, messageId: MessageId, emoji?: string): Promise<void> {
     await this.request("setMessageReaction", {
-      chat_id: chatId,
-      message_id: messageId,
+      chat_id: conversationId,
+      message_id: Number(messageId),
       reaction: emoji ? [{ type: "emoji", emoji }] : [],
     });
   }
@@ -278,11 +289,11 @@ export class TelegramAdapter implements IMAdapter {
       return {
         kind: "message",
         id: String(message.message_id),
-        messageId: message.message_id,
-        chatId: message.chat.id,
-        userId: message.from.id,
+        messageId: String(message.message_id),
+        conversationId: String(message.chat.id),
+        userId: String(message.from.id),
         text: message.text,
-        ...(message.reply_to_message ? { replyToMessageId: message.reply_to_message.message_id } : {}),
+        ...(message.reply_to_message ? { replyToMessageId: String(message.reply_to_message.message_id) } : {}),
         date: message.date,
       };
     }
@@ -291,9 +302,9 @@ export class TelegramAdapter implements IMAdapter {
       return {
         kind: "media",
         id: String(message.message_id),
-        messageId: message.message_id,
-        chatId: message.chat.id,
-        userId: message.from.id,
+        messageId: String(message.message_id),
+        conversationId: String(message.chat.id),
+        userId: String(message.from.id),
         ...(message.caption ? { caption: message.caption } : {}),
         photos: message.photo.map((photo) => ({
           fileId: photo.file_id,
@@ -303,7 +314,7 @@ export class TelegramAdapter implements IMAdapter {
           ...(typeof photo.file_size === "number" ? { fileSize: photo.file_size } : {}),
         })),
         ...(message.media_group_id ? { mediaGroupId: message.media_group_id } : {}),
-        ...(message.reply_to_message ? { replyToMessageId: message.reply_to_message.message_id } : {}),
+        ...(message.reply_to_message ? { replyToMessageId: String(message.reply_to_message.message_id) } : {}),
         date: message.date,
       };
     }
@@ -314,9 +325,9 @@ export class TelegramAdapter implements IMAdapter {
         kind: "callback_query",
         id: callback.id,
         callbackQueryId: callback.id,
-        chatId: callback.message.chat.id,
-        userId: callback.from.id,
-        messageId: callback.message.message_id,
+        conversationId: String(callback.message.chat.id),
+        userId: String(callback.from.id),
+        messageId: String(callback.message.message_id),
         data: callback.data,
         date: callback.message.date,
       };
@@ -469,7 +480,7 @@ function replyParametersForOptions(options: SendMessageOptions, include: boolean
   if (!include || !options.replyToMessageId) return {};
   return {
     reply_parameters: {
-      message_id: options.replyToMessageId,
+      message_id: Number(options.replyToMessageId),
       allow_sending_without_reply: true,
     },
   };

@@ -24,13 +24,13 @@ describe("CodexDriver app-server protocol", () => {
       () => undefined,
     );
 
-    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
     await driver.send(status.sessionKey, "say hello");
     await sleep(100);
 
-    expect(events).toContainEqual({ type: "message", sessionKey: "1:demo", chunk: "hello ", turnId: "turn-1", itemId: "m1" });
-    expect(events).toContainEqual({ type: "message", sessionKey: "1:demo", chunk: "world", turnId: "turn-1", itemId: "m1" });
-    expect(events).toContainEqual({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-1" });
+    expect(events).toContainEqual({ type: "message", sessionKey: "codex:1:demo", chunk: "hello ", turnId: "turn-1", itemId: "m1" });
+    expect(events).toContainEqual({ type: "message", sessionKey: "codex:1:demo", chunk: "world", turnId: "turn-1", itemId: "m1" });
+    expect(events).toContainEqual({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
     expect(JSON.stringify(events)).not.toContain("raw stdout");
     await driver.stop(status.sessionKey);
   });
@@ -46,13 +46,13 @@ describe("CodexDriver app-server protocol", () => {
       () => undefined,
     );
 
-    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
     await driver.send(status.sessionKey, "ask");
     await sleep(100);
 
     expect(events.at(-1)).toEqual({
       type: "user_input_request",
-      sessionKey: "1:demo",
+      sessionKey: "codex:1:demo",
       requestId: 900,
       turnId: "turn-1",
       itemId: "item-1",
@@ -78,7 +78,7 @@ describe("CodexDriver app-server protocol", () => {
       () => undefined,
     );
 
-    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
     await driver.send(status.sessionKey, "ask");
     await driver.send(status.sessionKey, "after stale");
 
@@ -99,7 +99,7 @@ describe("CodexDriver app-server protocol", () => {
       () => undefined,
     );
 
-    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
     await Promise.all([
       driver.send(status.sessionKey, "slow active"),
       driver.send(status.sessionKey, "second while active"),
@@ -128,7 +128,7 @@ describe("CodexDriver app-server protocol", () => {
       () => undefined,
     );
 
-    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: process.cwd(), threadId: "resume-thread" });
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd(), threadId: "resume-thread" });
 
     const resume = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((message) => message.method === "thread/resume");
     expect(resume.params.developerInstructions).toBe("developer text");
@@ -145,7 +145,7 @@ describe("CodexDriver app-server protocol", () => {
       () => undefined,
     );
 
-    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: "/tmp/demo" });
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: "/tmp/demo" });
     await driver.runBuiltinCommand(status.sessionKey, { type: "review" });
     await driver.runBuiltinCommand(status.sessionKey, { type: "compact" });
     const threads = await driver.listThreads({ workspacePath: "/tmp/demo", limit: 5 });
@@ -173,7 +173,7 @@ describe("CodexDriver app-server protocol", () => {
       () => undefined,
     );
 
-    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: "/tmp/demo" });
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: "/tmp/demo" });
     const forked = await driver.forkThread(status.sessionKey);
     await driver.renameThread(status.sessionKey, "New name");
     await driver.cleanBackgroundTerminals(status.sessionKey);
@@ -198,12 +198,12 @@ describe("CodexDriver app-server protocol", () => {
       () => undefined,
     );
 
-    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
     await driver.send(status.sessionKey, "plan please", { collaborationMode: "plan" });
     await sleep(100);
 
-    expect(events).toContainEqual({ type: "message", sessionKey: "1:demo", chunk: "Plan item", turnId: "turn-1", itemId: "p1" });
-    expect(events).toContainEqual({ type: "message", sessionKey: "1:demo", chunk: "Review summary", turnId: "turn-1", itemId: "r1" });
+    expect(events).toContainEqual({ type: "message", sessionKey: "codex:1:demo", chunk: "Plan item", turnId: "turn-1", itemId: "p1" });
+    expect(events).toContainEqual({ type: "message", sessionKey: "codex:1:demo", chunk: "Review summary", turnId: "turn-1", itemId: "r1" });
     const turnStart = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((message) => message.method === "turn/start" && message.params.input[0].text === "plan please");
     expect(turnStart.params.collaborationMode.mode).toBe("plan");
     await driver.stop(status.sessionKey);
@@ -217,7 +217,7 @@ describe("CodexDriver app-server protocol", () => {
       () => undefined,
     );
 
-    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
     await driver.send(status.sessionKey, "inspect", { images: [{ path: "/tmp/image.jpg" }] });
 
     const turnStart = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((message) => message.method === "turn/start");
@@ -239,13 +239,13 @@ describe("CodexDriver app-server protocol", () => {
       () => undefined,
     );
 
-    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
     await driver.send(status.sessionKey, "image output");
     await sleep(100);
 
     expect(events).toContainEqual({
       type: "image",
-      sessionKey: "1:demo",
+      sessionKey: "codex:1:demo",
       data: "aW1hZ2U=",
       caption: "revised",
       turnId: "turn-1",
@@ -262,7 +262,7 @@ describe("CodexDriver app-server protocol", () => {
       () => undefined,
     );
 
-    const status = await driver.start({ chatId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
     await driver.send(status.sessionKey, "status please");
     await sleep(100);
 

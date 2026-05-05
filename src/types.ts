@@ -1,9 +1,11 @@
-export type ChatId = number;
-export type UserId = number;
+export type ProviderId = string;
+export type ConversationId = string | number;
+export type UserId = string | number;
+export type MessageId = string | number;
 
-export type TelegramParseMode = "HTML";
+export type TextParseMode = "HTML";
 
-export type TelegramMessageEntityType =
+export type TextEntityType =
   | "bold"
   | "italic"
   | "code"
@@ -11,8 +13,8 @@ export type TelegramMessageEntityType =
   | "text_link"
   | "blockquote";
 
-export interface TelegramMessageEntity {
-  type: TelegramMessageEntityType;
+export interface TextEntity {
+  type: TextEntityType;
   offset: number;
   length: number;
   url?: string;
@@ -29,28 +31,28 @@ export interface InlineKeyboardButton {
 }
 
 export interface SendMessageOptions {
-  parseMode?: TelegramParseMode;
-  entities?: TelegramMessageEntity[];
+  parseMode?: TextParseMode;
+  entities?: TextEntity[];
   replyMarkup?: InlineKeyboardMarkup;
   forceReply?: boolean;
   disableWebPagePreview?: boolean;
-  replyToMessageId?: number;
+  replyToMessageId?: MessageId;
 }
 
 export interface EditMessageTextOptions extends SendMessageOptions {
-  messageId: number;
+  messageId: MessageId;
 }
 
 export interface SendMessageResult {
-  messageId?: number;
+  messageId?: MessageId;
 }
 
 export interface SendPhotoOptions {
   caption?: string;
-  replyToMessageId?: number;
+  replyToMessageId?: MessageId;
 }
 
-export interface TelegramInboundPhoto {
+export interface InboundMediaFile {
   fileId: string;
   fileUniqueId?: string;
   width: number;
@@ -58,7 +60,7 @@ export interface TelegramInboundPhoto {
   fileSize?: number;
 }
 
-export interface TelegramDownloadedFile {
+export interface DownloadedFile {
   bytes: ArrayBuffer;
   filePath?: string;
   fileSize?: number;
@@ -67,50 +69,70 @@ export interface TelegramDownloadedFile {
 export interface TextInboundMessage {
   kind: "message";
   id: string;
-  messageId: number;
-  chatId: ChatId;
+  messageId: MessageId;
+  conversationId: ConversationId;
   userId: UserId;
   text: string;
-  replyToMessageId?: number;
+  replyToMessageId?: MessageId;
   date?: number;
 }
 
 export interface MediaInboundMessage {
   kind: "media";
   id: string;
-  messageId: number;
-  chatId: ChatId;
+  messageId: MessageId;
+  conversationId: ConversationId;
   userId: UserId;
   caption?: string;
-  photos: TelegramInboundPhoto[];
+  photos: InboundMediaFile[];
   mediaGroupId?: string;
-  replyToMessageId?: number;
+  replyToMessageId?: MessageId;
   date?: number;
 }
 
 export interface CallbackInboundMessage {
   kind: "callback_query";
   id: string;
-  chatId: ChatId;
+  conversationId: ConversationId;
   userId: UserId;
   callbackQueryId: string;
-  messageId?: number;
+  messageId?: MessageId;
   data: string;
   date?: number;
 }
 
 export type InboundMessage = TextInboundMessage | MediaInboundMessage | CallbackInboundMessage;
 
-export interface IMAdapter {
-  start(onMessage: (message: InboundMessage) => Promise<void>): Promise<void>;
-  sendMessage(chatId: ChatId, text: string, options?: SendMessageOptions): Promise<SendMessageResult>;
-  sendPhoto(chatId: ChatId, photo: Blob, options?: SendPhotoOptions): Promise<SendMessageResult>;
-  editMessageText(chatId: ChatId, text: string, options: EditMessageTextOptions): Promise<void>;
-  answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void>;
-  sendChatAction(chatId: ChatId, action?: "typing"): Promise<void>;
-  setMessageReaction(chatId: ChatId, messageId: number, emoji?: string): Promise<void>;
-  downloadFile(fileId: string): Promise<TelegramDownloadedFile>;
+export interface MessagingAdapterCapabilities {
+  editMessage: boolean;
+  forceReply: boolean;
+  inlineActions: boolean;
+  reactions: boolean;
+  typing: boolean;
+  mediaDownload: boolean;
+  imageUpload: boolean;
 }
+
+export interface MessagingAdapter {
+  readonly providerId: ProviderId;
+  readonly capabilities: MessagingAdapterCapabilities;
+  start(onMessage: (message: InboundMessage) => Promise<void>): Promise<void>;
+  stop?(): void;
+  sendMessage(conversationId: ConversationId, text: string, options?: SendMessageOptions): Promise<SendMessageResult>;
+  sendPhoto?(conversationId: ConversationId, photo: Blob, options?: SendPhotoOptions): Promise<SendMessageResult>;
+  editMessageText?(conversationId: ConversationId, text: string, options: EditMessageTextOptions): Promise<void>;
+  answerCallbackQuery?(callbackQueryId: string, text?: string): Promise<void>;
+  sendChatAction?(conversationId: ConversationId, action?: "typing"): Promise<void>;
+  setMessageReaction?(conversationId: ConversationId, messageId: MessageId, emoji?: string): Promise<void>;
+  downloadFile?(fileId: string): Promise<DownloadedFile>;
+}
+
+export type IMAdapter = MessagingAdapter;
+export type TelegramParseMode = TextParseMode;
+export type TelegramMessageEntityType = TextEntityType;
+export type TelegramMessageEntity = TextEntity;
+export type TelegramInboundPhoto = InboundMediaFile;
+export type TelegramDownloadedFile = DownloadedFile;
 
 export type AgentOutputHandler = (event: AgentOutputEvent) => void | Promise<void>;
 export type AgentExitHandler = (event: AgentExitEvent) => void | Promise<void>;
@@ -198,7 +220,7 @@ export interface AgentExitEvent {
 
 export interface AgentSessionStatus {
   sessionKey: string;
-  chatId: ChatId;
+  conversationId: ConversationId;
   workspaceName: string;
   workspacePath: string;
   running: boolean;
@@ -222,13 +244,15 @@ export interface AgentSessionStatus {
 }
 
 export interface StartAgentOptions {
-  chatId: ChatId;
+  conversationId: ConversationId;
   workspaceName: string;
   workspacePath: string;
   threadId?: string;
 }
 
 export interface AgentDriver {
+  readonly providerId?: ProviderId;
+  readonly capabilities?: Partial<AgentDriverCapabilities>;
   start(options: StartAgentOptions): Promise<AgentSessionStatus>;
   send(sessionKey: string, text: string, options?: AgentSendOptions): Promise<AgentSendResult>;
   stop(sessionKey: string): Promise<void>;
@@ -240,6 +264,18 @@ export interface AgentDriver {
   cleanBackgroundTerminals?(sessionKey: string): Promise<void>;
   listThreads?(options: AgentThreadListOptions): Promise<AgentThreadSummary[]>;
   listModels?(): Promise<AgentModelSummary[]>;
+}
+
+export interface AgentDriverCapabilities {
+  userInputRequests: boolean;
+  approvals: boolean;
+  builtinCommands: boolean;
+  threadFork: boolean;
+  threadRename: boolean;
+  threadList: boolean;
+  modelList: boolean;
+  localImages: boolean;
+  imageOutput: boolean;
 }
 
 export interface AgentSendOptions {
@@ -330,8 +366,8 @@ export interface WorkspaceRecord {
   createdAt: number;
 }
 
-export interface ChatBinding {
-  chatId: ChatId;
+export interface ConversationBinding {
+  conversationId: ConversationId;
   workspaceName: string;
   updatedAt: number;
 }
@@ -339,7 +375,7 @@ export interface ChatBinding {
 export type TranscriptRole = "user" | "agent" | "system";
 
 export interface TranscriptEvent {
-  chatId: ChatId;
+  conversationId: ConversationId;
   workspaceName: string;
   role: TranscriptRole;
   text: string;
@@ -349,8 +385,8 @@ export interface TranscriptEvent {
 export type PendingPromptKind = "workspace_name" | "codex_user_input" | "codex_approval" | "relay_command";
 
 export interface PendingPrompt {
-  chatId: ChatId;
-  promptMessageId: number;
+  conversationId: ConversationId;
+  promptMessageId: MessageId;
   kind: PendingPromptKind;
   createdAt: number;
   sessionKey?: string;
@@ -364,7 +400,7 @@ export type TaskStatus = "queued" | "running" | "blocked" | "done" | "failed" | 
 
 export interface RelayTask {
   id: number;
-  chatId: ChatId;
+  conversationId: ConversationId;
   workspaceName: string;
   text: string;
   inputJson?: string;
@@ -372,6 +408,6 @@ export interface RelayTask {
   createdAt: number;
   updatedAt: number;
   turnId?: string;
-  userMessageId?: number;
-  statusMessageId?: number;
+  userMessageId?: MessageId;
+  statusMessageId?: MessageId;
 }

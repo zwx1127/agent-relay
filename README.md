@@ -1,8 +1,8 @@
 # agent-relay
 
-`agent-relay` connects a Telegram bot to the local Codex app-server. It lets approved Telegram users select a workspace under `WORKSPACE_ROOT`, send prompts to Codex, answer Codex questions, approve requested actions, and manage Codex threads from Telegram.
+`agent-relay` connects a messaging provider to a local CLI agent provider. The current providers are Telegram for messaging and Codex app-server for the agent. It lets approved users select a workspace under `WORKSPACE_ROOT`, send prompts, answer agent questions, approve requested actions, and manage agent threads remotely.
 
-The project is built with Bun, TypeScript, SQLite, and the `codex app-server --listen stdio://` protocol.
+The project is built with Bun, TypeScript, SQLite, a provider-neutral router, and the `codex app-server --listen stdio://` protocol for the default agent provider.
 
 ## Requirements
 
@@ -30,7 +30,7 @@ Minimum required configuration:
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=123:abc
-TELEGRAM_ALLOWED_USER_IDS=123456
+ALLOWED_USER_IDS=123456
 WORKSPACE_ROOT=/absolute/path/to/workspaces
 ```
 
@@ -52,15 +52,17 @@ The relay loads `.env` first, then overlays shell environment variables, so expo
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
+| `MESSAGING_PROVIDER` | no | `telegram` | Messaging provider. Only `telegram` is implemented today. |
+| `AGENT_PROVIDER` | no | `codex` | Agent provider. Only `codex` is implemented today. |
+| `ALLOWED_USER_IDS` | yes | | Comma-separated provider user IDs allowed to use the relay. Stored as strings. |
+| `ALLOWED_CONVERSATION_IDS` | no | any conversation | Optional comma-separated provider conversation IDs. When set, both user and conversation must be allowed. |
 | `TELEGRAM_BOT_TOKEN` | yes | | Bot token from BotFather. |
-| `TELEGRAM_ALLOWED_USER_IDS` | yes | | Comma-separated Telegram user IDs allowed to use the bot. |
 | `WORKSPACE_ROOT` | yes | | Parent directory containing selectable cwd directories. |
-| `TELEGRAM_ALLOWED_CHAT_IDS` | no | any chat | Optional comma-separated chat IDs. When set, both user and chat must be allowed. |
 | `TELEGRAM_POLL_TIMEOUT_SECONDS` | no | `30` | Telegram long-poll timeout. |
 | `TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS` | no | `3` | Retry attempts for non-polling Telegram API calls. |
 | `TELEGRAM_RETRY_INITIAL_DELAY_MS` | no | `500` | Initial retry backoff for transient Telegram API failures. |
 | `TELEGRAM_RETRY_MAX_DELAY_MS` | no | `10000` | Maximum Telegram retry backoff. |
-| `TELEGRAM_IMAGE_MAX_BYTES` | no | `20971520` | Maximum Telegram photo download size in bytes. |
+| `MEDIA_MAX_BYTES` | no | `20971520` | Maximum inbound/outbound image size in bytes. |
 | `SQLITE_PATH` | no | `.data/agent-relay.sqlite` | SQLite database path. Parent directories are created automatically. |
 | `CODEX_BIN` | no | `codex` | Codex CLI executable. |
 | `CODEX_SANDBOX` | no | `workspace-write` | Sandbox policy passed to Codex thread start, resume, and fork calls. |
@@ -68,11 +70,33 @@ The relay loads `.env` first, then overlays shell environment variables, so expo
 | `CODEX_DEVELOPER_INSTRUCTIONS_FILE` | no | | File loaded into Codex developer instructions. |
 | `CODEX_DEVELOPER_INSTRUCTIONS` | no | | Inline developer instructions appended after file instructions. |
 | `CODEX_MODEL_INSTRUCTIONS_FILE` | no | | File loaded into Codex base/model instructions. |
-| `RELAY_CONTROL_ENABLED` | no | `false` | Enables the local Codex-to-relay capability API on `127.0.0.1`. |
+| `RELAY_CONTROL_ENABLED` | no | `false` | Enables the local agent-to-relay capability API on `127.0.0.1`. |
 | `RELAY_CONTROL_PORT` | no | `0` | Local capability API port. `0` asks the OS to choose an available port. |
 | `LOG_LEVEL` | no | `info` | One of `debug`, `info`, `warn`, or `error`. |
 
 When both `CODEX_DEVELOPER_INSTRUCTIONS_FILE` and `CODEX_DEVELOPER_INSTRUCTIONS` are set, file contents are sent first, then a blank line, then the inline text. `CODEX_MODEL_INSTRUCTIONS_FILE` is sent as Codex base instructions. The relay does not inject `AGENTS.md`; Codex discovers it normally from the selected cwd.
+
+## Provider Architecture
+
+The core router depends on `MessagingAdapter` and `AgentDriver` interfaces rather than concrete Telegram or Codex classes. `src/messaging/provider.ts` and `src/agents/provider.ts` are the only runtime factories. Adding Feishu/Lark or Claude Code should be done by implementing those interfaces, registering the provider in the factory, and adding provider-specific config validation.
+
+Conversation, user, and message IDs are treated as provider IDs and persisted as strings. This is a breaking schema change from older SQLite databases that used Telegram numeric `chat_id`; delete or recreate `.data/agent-relay.sqlite` when upgrading from the pre-provider schema.
+
+Extension points:
+
+- Messaging providers implement `MessagingAdapter` and are selected from `src/messaging/provider.ts`.
+- Agent providers implement `AgentDriver` and are selected from `src/agents/provider.ts`.
+- Agent-visible relay features register `CapabilityDefinition` entries through `CapabilityRegistry`; helper subcommands live in `bin/agent-relay-helper`.
+
+## Breaking Changes
+
+This provider refactor intentionally changes runtime configuration and the SQLite schema:
+
+- Rename `TELEGRAM_ALLOWED_USER_IDS` to `ALLOWED_USER_IDS`.
+- Rename `TELEGRAM_ALLOWED_CHAT_IDS` to `ALLOWED_CONVERSATION_IDS`.
+- Rename `TELEGRAM_IMAGE_MAX_BYTES` to `MEDIA_MAX_BYTES`.
+- Session keys now include the agent provider, for example `codex:<conversation-id>:<workspace>`.
+- Existing SQLite databases using the old numeric `chat_id` schema are not migrated automatically. Stop the relay and remove or recreate `.data/agent-relay.sqlite` before starting the new version.
 
 ## Telegram Usage
 
@@ -117,11 +141,11 @@ Telegram photo messages are supported after a cwd is selected. The relay downloa
 
 Telegram file/document attachments are intentionally not supported, even when the document MIME type is an image. Codex image outputs are sent back with Telegram `sendPhoto`; the relay does not use `sendDocument` as a fallback.
 
-Stored media lives under `.agent-relay/media/incoming` and `.agent-relay/media/outgoing` inside the selected workspace. The relay automatically writes `.agent-relay/.gitignore` with `*`, so downloaded and generated images do not appear in that workspace's Git status. `TELEGRAM_IMAGE_MAX_BYTES` limits photo downloads before they are sent to Codex.
+Stored media lives under `.agent-relay/media/incoming` and `.agent-relay/media/outgoing` inside the selected workspace. The relay automatically writes `.agent-relay/.gitignore` with `*`, so downloaded and generated images do not appear in that workspace's Git status. `MEDIA_MAX_BYTES` limits photo downloads before they are sent to Codex.
 
 ## Relay Capabilities
 
-When `RELAY_CONTROL_ENABLED=true`, agent-relay starts a local control API bound to `127.0.0.1` and injects a helper plus short capability instructions into Codex. The API is protected with a random bearer token that is generated on relay startup and passed only to the Codex child process.
+When `RELAY_CONTROL_ENABLED=true`, agent-relay starts a local control API bound to `127.0.0.1` and injects a helper plus registered capability instructions into the agent. The API is protected with a random bearer token that is generated on relay startup and passed only to the agent child process.
 
 The first capability is `send_image`, intended for remote H5/web UI debugging. Codex can render a page with Playwright, save a screenshot inside the selected workspace, and send it back to the Telegram chat:
 
@@ -129,11 +153,11 @@ The first capability is `send_image`, intended for remote H5/web UI debugging. C
 "$AGENT_RELAY_HELPER" send-image /absolute/path/to/screen.png --cwd "$PWD" --caption "current home screen"
 ```
 
-The helper calls `POST /v1/capabilities/send_image` with `{ path, cwd, sessionKey, caption }`. The relay validates that the image is a regular PNG/JPG/WEBP/GIF inside the selected workspace, enforces `TELEGRAM_IMAGE_MAX_BYTES`, copies it to `.agent-relay/media/outgoing`, and sends it with Telegram `sendPhoto`.
+The helper calls `POST /v1/capabilities/send_image` with `{ path, cwd, sessionKey, caption }`. The relay validates that the image is a regular PNG/JPG/WEBP/GIF inside the selected workspace, enforces `MEDIA_MAX_BYTES`, copies it to `.agent-relay/media/outgoing`, and sends it through the messaging adapter.
 
 ## Runtime Notes
 
-- Authorization requires `TELEGRAM_ALLOWED_USER_IDS`; if `TELEGRAM_ALLOWED_CHAT_IDS` is set, both the user and chat must match.
+- Authorization requires `ALLOWED_USER_IDS`; if `ALLOWED_CONVERSATION_IDS` is set, both the user and conversation must match.
 - On startup, pending Telegram updates are skipped so messages sent while the relay was offline are intentionally ignored.
 - Telegram polling subscribes to `message` and `callback_query` updates.
 - Transient Telegram failures are retried with exponential backoff.
@@ -143,7 +167,7 @@ The helper calls `POST /v1/capabilities/send_image` with `{ path, cwd, sessionKe
 - Creating a missing workspace makes the directory and runs `git init`.
 - Deleting a workspace physically removes that directory under `WORKSPACE_ROOT` and clears chat bindings that pointed at it.
 - Telegram photos and Codex-generated images are stored under `.agent-relay/media` inside the selected workspace. The relay writes `.agent-relay/.gitignore` with `*` so media does not appear in the workspace's Git status.
-- The relay starts one Codex app-server process and creates or resumes one Codex thread per `chat + cwd`.
+- The relay starts one agent provider process and creates or resumes one agent thread per `conversation + cwd`.
 - SQLite stores workspaces, chat bindings, Codex thread IDs, Plan mode state, Relay Home UI state, prompt/task state, transcript events, approval metadata, and paged assistant output.
 - Runtime logs go to stdout. `debug` logs include raw Telegram messages, Codex input text, and Codex output chunks.
 
@@ -155,7 +179,9 @@ src/
   config.ts      .env loading, validation, and allowlist checks
   logger.ts      Text stdout logger
   main.ts        Runtime wiring
-  types.ts       Shared Telegram, Codex, router, and persistence types
+  agents/        Agent provider factory
+  messaging/     Messaging provider factory
+  types.ts       Shared provider-neutral router and persistence types
   workspace.ts   Workspace validation, discovery, creation, and path safety
   codex/         Codex app-server driver and JSON-RPC protocol handling
   rendering/     Telegram text entities, Markdown rendering, and splitting

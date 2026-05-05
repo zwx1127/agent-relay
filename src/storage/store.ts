@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import { noopLogger, type Logger } from "../logger.ts";
-import type { AgentCollaborationMode, AgentTaskInput, ChatBinding, ChatId, HomeStatusMode, PendingPrompt, PendingPromptKind, RelayTask, TaskStatus, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "../types.ts";
+import type { AgentCollaborationMode, AgentTaskInput, ConversationBinding, ConversationId, HomeStatusMode, MessageId, PendingPrompt, PendingPromptKind, RelayTask, TaskStatus, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "../types.ts";
 
 interface WorkspaceRow {
   name: string;
@@ -11,19 +11,20 @@ interface WorkspaceRow {
 }
 
 interface BindingRow {
-  chat_id: number;
+  conversation_id: string;
   workspace_name: string;
   updated_at: number;
 }
 
 interface TranscriptRow {
+  conversation_id: string;
   text: string;
   created_at?: number;
 }
 
 interface PendingPromptRow {
-  chat_id: number;
-  prompt_message_id: number;
+  conversation_id: string;
+  prompt_message_id: string;
   kind: string;
   created_at: number;
   session_key?: string | null;
@@ -33,7 +34,7 @@ interface PendingPromptRow {
 
 export interface AgentSessionRow {
   session_key: string;
-  chat_id: number;
+  conversation_id: string;
   workspace_name: string;
   status: string;
   started_at: number;
@@ -44,7 +45,7 @@ export interface AgentSessionRow {
 
 interface PagedOutputRow {
   token: string;
-  chat_id: number;
+  conversation_id: string;
   session_key: string;
   text: string;
   created_at: number;
@@ -52,14 +53,14 @@ interface PagedOutputRow {
 }
 
 interface ChatUiStateRow {
-  chat_id: number;
-  console_message_id?: number | null;
+  conversation_id: string;
+  console_message_id?: string | null;
   home_status_mode?: string | null;
 }
 
 interface TaskRow {
   id: number;
-  chat_id: number;
+  conversation_id: string;
   workspace_name: string;
   text: string;
   input_json?: string | null;
@@ -67,13 +68,13 @@ interface TaskRow {
   created_at: number;
   updated_at: number;
   turn_id?: string | null;
-  user_message_id?: number | null;
-  status_message_id?: number | null;
+  user_message_id?: string | null;
+  status_message_id?: string | null;
 }
 
 export interface PagedOutput {
   token: string;
-  chatId: ChatId;
+  conversationId: ConversationId;
   sessionKey: string;
   text: string;
   createdAt: number;
@@ -107,7 +108,7 @@ export class Store {
     `);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS chat_bindings (
-        chat_id INTEGER PRIMARY KEY,
+        conversation_id TEXT PRIMARY KEY,
         workspace_name TEXT NOT NULL REFERENCES workspaces(name),
         updated_at INTEGER NOT NULL
       )
@@ -115,7 +116,7 @@ export class Store {
     this.db.run(`
       CREATE TABLE IF NOT EXISTS agent_sessions (
         session_key TEXT PRIMARY KEY,
-        chat_id INTEGER NOT NULL,
+        conversation_id TEXT NOT NULL,
         workspace_name TEXT NOT NULL,
         status TEXT NOT NULL,
         started_at INTEGER NOT NULL,
@@ -125,7 +126,7 @@ export class Store {
     this.db.run(`
       CREATE TABLE IF NOT EXISTS transcript_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER NOT NULL,
+        conversation_id TEXT NOT NULL,
         workspace_name TEXT NOT NULL,
         role TEXT NOT NULL,
         text TEXT NOT NULL,
@@ -134,17 +135,17 @@ export class Store {
     `);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS pending_prompts (
-        chat_id INTEGER NOT NULL,
-        prompt_message_id INTEGER NOT NULL,
+        conversation_id TEXT NOT NULL,
+        prompt_message_id TEXT NOT NULL,
         kind TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        PRIMARY KEY (chat_id, prompt_message_id)
+        PRIMARY KEY (conversation_id, prompt_message_id)
       )
     `);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS paged_outputs (
         token TEXT PRIMARY KEY,
-        chat_id INTEGER NOT NULL,
+        conversation_id TEXT NOT NULL,
         session_key TEXT NOT NULL,
         text TEXT NOT NULL,
         created_at INTEGER NOT NULL,
@@ -153,15 +154,15 @@ export class Store {
     `);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS chat_ui_state (
-        chat_id INTEGER PRIMARY KEY,
-        console_message_id INTEGER,
+        conversation_id TEXT PRIMARY KEY,
+        console_message_id TEXT,
         home_status_mode TEXT NOT NULL DEFAULT 'compact'
       )
     `);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER NOT NULL,
+        conversation_id TEXT NOT NULL,
         workspace_name TEXT NOT NULL,
         text TEXT NOT NULL,
         input_json TEXT,
@@ -169,7 +170,7 @@ export class Store {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         turn_id TEXT,
-        user_message_id INTEGER
+        user_message_id TEXT
       )
     `);
     this.addColumnIfMissing("agent_sessions", "thread_id", "TEXT");
@@ -178,7 +179,7 @@ export class Store {
     this.addColumnIfMissing("pending_prompts", "payload_json", "TEXT");
     this.addColumnIfMissing("pending_prompts", "expires_at", "INTEGER");
     this.addColumnIfMissing("chat_ui_state", "home_status_mode", "TEXT NOT NULL DEFAULT 'compact'");
-    this.addColumnIfMissing("tasks", "status_message_id", "INTEGER");
+    this.addColumnIfMissing("tasks", "status_message_id", "TEXT");
     this.addColumnIfMissing("tasks", "input_json", "TEXT");
     this.logger.debug("store.migrated");
   }
@@ -207,21 +208,21 @@ export class Store {
     })();
   }
 
-  bindChat(chatId: ChatId, workspaceName: string, updatedAt = Date.now()): void {
+  bindConversation(conversationId: ConversationId, workspaceName: string, updatedAt = Date.now()): void {
     this.db.query(`
-      INSERT INTO chat_bindings (chat_id, workspace_name, updated_at)
-      VALUES ($chatId, $workspaceName, $updatedAt)
-      ON CONFLICT(chat_id) DO UPDATE SET workspace_name = excluded.workspace_name, updated_at = excluded.updated_at
-    `).run({ $chatId: chatId, $workspaceName: workspaceName, $updatedAt: updatedAt });
+      INSERT INTO chat_bindings (conversation_id, workspace_name, updated_at)
+      VALUES ($conversationId, $workspaceName, $updatedAt)
+      ON CONFLICT(conversation_id) DO UPDATE SET workspace_name = excluded.workspace_name, updated_at = excluded.updated_at
+    `).run({ $conversationId: String(conversationId), $workspaceName: workspaceName, $updatedAt: updatedAt });
   }
 
-  getBinding(chatId: ChatId): ChatBinding | undefined {
-    const row = this.db.query<BindingRow, [number]>("SELECT chat_id, workspace_name, updated_at FROM chat_bindings WHERE chat_id = ?").get(chatId);
-    return row ? { chatId: row.chat_id, workspaceName: row.workspace_name, updatedAt: row.updated_at } : undefined;
+  getBinding(conversationId: ConversationId): ConversationBinding | undefined {
+    const row = this.db.query<BindingRow, [string]>("SELECT conversation_id, workspace_name, updated_at FROM chat_bindings WHERE conversation_id = ?").get(String(conversationId));
+    return row ? { conversationId: row.conversation_id, workspaceName: row.workspace_name, updatedAt: row.updated_at } : undefined;
   }
 
-  clearBinding(chatId: ChatId): void {
-    this.db.query("DELETE FROM chat_bindings WHERE chat_id = ?").run(chatId);
+  clearBinding(conversationId: ConversationId): void {
+    this.db.query("DELETE FROM chat_bindings WHERE conversation_id = ?").run(String(conversationId));
   }
 
   clearBindingsForWorkspace(workspaceName: string): void {
@@ -234,17 +235,17 @@ export class Store {
     this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
-  markSessionStarted(sessionKey: string, chatId: ChatId, workspaceName: string, startedAt = Date.now(), threadId?: string): void {
+  markSessionStarted(sessionKey: string, conversationId: ConversationId, workspaceName: string, startedAt = Date.now(), threadId?: string): void {
     this.db.query(`
-      INSERT INTO agent_sessions (session_key, chat_id, workspace_name, status, started_at, stopped_at, thread_id)
-      VALUES ($sessionKey, $chatId, $workspaceName, 'running', $startedAt, NULL, $threadId)
+      INSERT INTO agent_sessions (session_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id)
+      VALUES ($sessionKey, $conversationId, $workspaceName, 'running', $startedAt, NULL, $threadId)
       ON CONFLICT(session_key) DO UPDATE SET
         status = 'running',
         started_at = excluded.started_at,
         stopped_at = NULL,
         thread_id = COALESCE(excluded.thread_id, agent_sessions.thread_id)
-    `).run({ $sessionKey: sessionKey, $chatId: chatId, $workspaceName: workspaceName, $startedAt: startedAt, $threadId: threadId ?? null });
-    this.logger.info("store.session_marked_started", { session_key: sessionKey, chat_id: chatId, workspace: workspaceName });
+    `).run({ $sessionKey: sessionKey, $conversationId: String(conversationId), $workspaceName: workspaceName, $startedAt: startedAt, $threadId: threadId ?? null });
+    this.logger.info("store.session_marked_started", { session_key: sessionKey, conversation_id: conversationId, workspace: workspaceName });
   }
 
   markSessionStopped(sessionKey: string, stoppedAt = Date.now()): void {
@@ -274,7 +275,7 @@ export class Store {
 
   getSession(sessionKey: string): AgentSessionRow | undefined {
     const row = this.db.query<AgentSessionRow, [string]>(`
-      SELECT session_key, chat_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode
+      SELECT session_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode
       FROM agent_sessions
       WHERE session_key = ?
     `).get(sessionKey);
@@ -283,7 +284,7 @@ export class Store {
 
   listRunningSessions(): AgentSessionRow[] {
     return this.db.query<AgentSessionRow, []>(`
-      SELECT session_key, chat_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode
+      SELECT session_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode
       FROM agent_sessions
       WHERE status = 'running'
       ORDER BY started_at DESC
@@ -292,10 +293,10 @@ export class Store {
 
   appendTranscript(event: TranscriptEvent): void {
     this.db.query(`
-      INSERT INTO transcript_events (chat_id, workspace_name, role, text, created_at)
-      VALUES ($chatId, $workspaceName, $role, $text, $createdAt)
+      INSERT INTO transcript_events (conversation_id, workspace_name, role, text, created_at)
+      VALUES ($conversationId, $workspaceName, $role, $text, $createdAt)
     `).run({
-      $chatId: event.chatId,
+      $conversationId: String(event.conversationId),
       $workspaceName: event.workspaceName,
       $role: event.role,
       $text: event.text,
@@ -303,30 +304,30 @@ export class Store {
     });
   }
 
-  latestTranscriptEvent(chatId: ChatId, workspaceName: string, role: TranscriptRole): TranscriptEvent | undefined {
-    const row = this.db.query<TranscriptRow, [number, string, string]>(`
-      SELECT text, created_at FROM transcript_events
-      WHERE chat_id = ? AND workspace_name = ? AND role = ?
+  latestTranscriptEvent(conversationId: ConversationId, workspaceName: string, role: TranscriptRole): TranscriptEvent | undefined {
+    const row = this.db.query<TranscriptRow, [string, string, string]>(`
+      SELECT conversation_id, text, created_at FROM transcript_events
+      WHERE conversation_id = ? AND workspace_name = ? AND role = ?
       ORDER BY id DESC LIMIT 1
-    `).get(chatId, workspaceName, role);
+    `).get(String(conversationId), workspaceName, role);
     return row
-      ? { chatId, workspaceName, role, text: row.text, createdAt: row.created_at ?? 0 }
+      ? { conversationId: row.conversation_id, workspaceName, role, text: row.text, createdAt: row.created_at ?? 0 }
       : undefined;
   }
 
   setPendingPrompt(prompt: PendingPrompt): void {
     this.db.query(`
-      INSERT INTO pending_prompts (chat_id, prompt_message_id, kind, created_at, session_key, payload_json, expires_at)
-      VALUES ($chatId, $promptMessageId, $kind, $createdAt, $sessionKey, $payloadJson, $expiresAt)
-      ON CONFLICT(chat_id, prompt_message_id) DO UPDATE SET
+      INSERT INTO pending_prompts (conversation_id, prompt_message_id, kind, created_at, session_key, payload_json, expires_at)
+      VALUES ($conversationId, $promptMessageId, $kind, $createdAt, $sessionKey, $payloadJson, $expiresAt)
+      ON CONFLICT(conversation_id, prompt_message_id) DO UPDATE SET
         kind = excluded.kind,
         created_at = excluded.created_at,
         session_key = excluded.session_key,
         payload_json = excluded.payload_json,
         expires_at = excluded.expires_at
     `).run({
-      $chatId: prompt.chatId,
-      $promptMessageId: prompt.promptMessageId,
+      $conversationId: String(prompt.conversationId),
+      $promptMessageId: String(prompt.promptMessageId),
       $kind: prompt.kind,
       $createdAt: prompt.createdAt,
       $sessionKey: prompt.sessionKey ?? null,
@@ -335,33 +336,33 @@ export class Store {
     });
   }
 
-  getPendingPrompt(chatId: ChatId, promptMessageId: number): PendingPrompt | undefined {
-    const row = this.db.query<PendingPromptRow, [number, number]>(`
-      SELECT chat_id, prompt_message_id, kind, created_at, session_key, payload_json, expires_at
+  getPendingPrompt(conversationId: ConversationId, promptMessageId: MessageId): PendingPrompt | undefined {
+    const row = this.db.query<PendingPromptRow, [string, string]>(`
+      SELECT conversation_id, prompt_message_id, kind, created_at, session_key, payload_json, expires_at
       FROM pending_prompts
-      WHERE chat_id = ? AND prompt_message_id = ?
-    `).get(chatId, promptMessageId);
+      WHERE conversation_id = ? AND prompt_message_id = ?
+    `).get(String(conversationId), String(promptMessageId));
     return row ? rowToPendingPrompt(row) : undefined;
   }
 
-  deletePendingPrompt(chatId: ChatId, promptMessageId: number): void {
-    this.db.query("DELETE FROM pending_prompts WHERE chat_id = ? AND prompt_message_id = ?").run(chatId, promptMessageId);
+  deletePendingPrompt(conversationId: ConversationId, promptMessageId: MessageId): void {
+    this.db.query("DELETE FROM pending_prompts WHERE conversation_id = ? AND prompt_message_id = ?").run(String(conversationId), String(promptMessageId));
   }
 
   setPagedOutput(output: PagedOutput): void {
     this.prunePagedOutputs(Date.now());
     this.db.query(`
-      INSERT INTO paged_outputs (token, chat_id, session_key, text, created_at, expires_at)
-      VALUES ($token, $chatId, $sessionKey, $text, $createdAt, $expiresAt)
+      INSERT INTO paged_outputs (token, conversation_id, session_key, text, created_at, expires_at)
+      VALUES ($token, $conversationId, $sessionKey, $text, $createdAt, $expiresAt)
       ON CONFLICT(token) DO UPDATE SET
-        chat_id = excluded.chat_id,
+        conversation_id = excluded.conversation_id,
         session_key = excluded.session_key,
         text = excluded.text,
         created_at = excluded.created_at,
         expires_at = excluded.expires_at
     `).run({
       $token: output.token,
-      $chatId: output.chatId,
+      $conversationId: String(output.conversationId),
       $sessionKey: output.sessionKey,
       $text: output.text,
       $createdAt: output.createdAt,
@@ -371,7 +372,7 @@ export class Store {
 
   getPagedOutput(token: string): PagedOutput | undefined {
     const row = this.db.query<PagedOutputRow, [string]>(`
-      SELECT token, chat_id, session_key, text, created_at, expires_at
+      SELECT token, conversation_id, session_key, text, created_at, expires_at
       FROM paged_outputs
       WHERE token = ?
     `).get(token);
@@ -386,55 +387,55 @@ export class Store {
     this.db.query("DELETE FROM paged_outputs WHERE expires_at < ?").run(now);
   }
 
-  getConsoleMessageId(chatId: ChatId): number | undefined {
-    const row = this.db.query<ChatUiStateRow, [number]>("SELECT chat_id, console_message_id FROM chat_ui_state WHERE chat_id = ?").get(chatId);
+  getConsoleMessageId(conversationId: ConversationId): MessageId | undefined {
+    const row = this.db.query<ChatUiStateRow, [string]>("SELECT conversation_id, console_message_id FROM chat_ui_state WHERE conversation_id = ?").get(String(conversationId));
     return row?.console_message_id ?? undefined;
   }
 
-  setConsoleMessageId(chatId: ChatId, messageId: number): void {
+  setConsoleMessageId(conversationId: ConversationId, messageId: MessageId): void {
     this.db.query(`
-      INSERT INTO chat_ui_state (chat_id, console_message_id)
+      INSERT INTO chat_ui_state (conversation_id, console_message_id)
       VALUES (?, ?)
-      ON CONFLICT(chat_id) DO UPDATE SET console_message_id = excluded.console_message_id
-    `).run(chatId, messageId);
+      ON CONFLICT(conversation_id) DO UPDATE SET console_message_id = excluded.console_message_id
+    `).run(String(conversationId), String(messageId));
   }
 
-  getHomeStatusMode(chatId: ChatId): HomeStatusMode {
-    const row = this.db.query<ChatUiStateRow, [number]>("SELECT chat_id, home_status_mode FROM chat_ui_state WHERE chat_id = ?").get(chatId);
+  getHomeStatusMode(conversationId: ConversationId): HomeStatusMode {
+    const row = this.db.query<ChatUiStateRow, [string]>("SELECT conversation_id, home_status_mode FROM chat_ui_state WHERE conversation_id = ?").get(String(conversationId));
     return row?.home_status_mode === "details" ? "details" : "compact";
   }
 
-  setHomeStatusMode(chatId: ChatId, mode: HomeStatusMode): void {
+  setHomeStatusMode(conversationId: ConversationId, mode: HomeStatusMode): void {
     this.db.query(`
-      INSERT INTO chat_ui_state (chat_id, home_status_mode)
+      INSERT INTO chat_ui_state (conversation_id, home_status_mode)
       VALUES (?, ?)
-      ON CONFLICT(chat_id) DO UPDATE SET home_status_mode = excluded.home_status_mode
-    `).run(chatId, mode);
+      ON CONFLICT(conversation_id) DO UPDATE SET home_status_mode = excluded.home_status_mode
+    `).run(conversationId, mode);
   }
 
   createTask(task: {
-    chatId: ChatId;
+    conversationId: ConversationId;
     workspaceName: string;
     text: string;
     input?: AgentTaskInput;
     status: TaskStatus;
     createdAt?: number;
-    userMessageId?: number;
+    userMessageId?: MessageId;
   }): RelayTask {
     const now = task.createdAt ?? Date.now();
     const inputJson = task.input ? JSON.stringify(task.input) : null;
     const result = this.db.query(`
-      INSERT INTO tasks (chat_id, workspace_name, text, input_json, status, created_at, updated_at, user_message_id)
-      VALUES ($chatId, $workspaceName, $text, $inputJson, $status, $createdAt, $updatedAt, $userMessageId)
+      INSERT INTO tasks (conversation_id, workspace_name, text, input_json, status, created_at, updated_at, user_message_id)
+      VALUES ($conversationId, $workspaceName, $text, $inputJson, $status, $createdAt, $updatedAt, $userMessageId)
     `).run({
-      $chatId: task.chatId,
+      $conversationId: String(task.conversationId),
       $workspaceName: task.workspaceName,
       $text: task.text,
       $inputJson: inputJson,
       $status: task.status,
       $createdAt: now,
       $updatedAt: now,
-      $userMessageId: task.userMessageId ?? null,
+      $userMessageId: task.userMessageId !== undefined ? String(task.userMessageId) : null,
     });
     const id = Number(result.lastInsertRowid);
     return this.getTask(id)!;
@@ -442,52 +443,52 @@ export class Store {
 
   getTask(id: number): RelayTask | undefined {
     const row = this.db.query<TaskRow, [number]>(`
-      SELECT id, chat_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+      SELECT id, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
       FROM tasks WHERE id = ?
     `).get(id);
     return row ? rowToTask(row) : undefined;
   }
 
-  listTasks(chatId: ChatId, workspaceName: string, statuses?: TaskStatus[], limit = 20): RelayTask[] {
+  listTasks(conversationId: ConversationId, workspaceName: string, statuses?: TaskStatus[], limit = 20): RelayTask[] {
     const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
     if (statuses && statuses.length > 0) {
       const placeholders = statuses.map(() => "?").join(", ");
       return this.db.query<TaskRow, any>(`
-        SELECT id, chat_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+        SELECT id, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
         FROM tasks
-        WHERE chat_id = ? AND workspace_name = ? AND status IN (${placeholders})
+        WHERE conversation_id = ? AND workspace_name = ? AND status IN (${placeholders})
         ORDER BY id ASC LIMIT ?
-      `).all(chatId, workspaceName, ...statuses, safeLimit).map(rowToTask);
+    `).all(String(conversationId), workspaceName, ...statuses, safeLimit).map(rowToTask);
     }
-    return this.db.query<TaskRow, [number, string, number]>(`
-      SELECT id, chat_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+    return this.db.query<TaskRow, [string, string, number]>(`
+      SELECT id, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
       FROM tasks
-      WHERE chat_id = ? AND workspace_name = ?
+      WHERE conversation_id = ? AND workspace_name = ?
       ORDER BY id DESC LIMIT ?
-    `).all(chatId, workspaceName, safeLimit).map(rowToTask);
+    `).all(String(conversationId), workspaceName, safeLimit).map(rowToTask);
   }
 
-  nextQueuedTask(chatId: ChatId, workspaceName: string): RelayTask | undefined {
-    const row = this.db.query<TaskRow, [number, string]>(`
-      SELECT id, chat_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+  nextQueuedTask(conversationId: ConversationId, workspaceName: string): RelayTask | undefined {
+    const row = this.db.query<TaskRow, [string, string]>(`
+      SELECT id, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
       FROM tasks
-      WHERE chat_id = ? AND workspace_name = ? AND status = 'queued'
+      WHERE conversation_id = ? AND workspace_name = ? AND status = 'queued'
       ORDER BY id ASC LIMIT 1
-    `).get(chatId, workspaceName);
+    `).get(String(conversationId), workspaceName);
     return row ? rowToTask(row) : undefined;
   }
 
-  activeTask(chatId: ChatId, workspaceName: string): RelayTask | undefined {
-    const row = this.db.query<TaskRow, [number, string]>(`
-      SELECT id, chat_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+  activeTask(conversationId: ConversationId, workspaceName: string): RelayTask | undefined {
+    const row = this.db.query<TaskRow, [string, string]>(`
+      SELECT id, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
       FROM tasks
-      WHERE chat_id = ? AND workspace_name = ? AND status IN ('running', 'blocked')
+      WHERE conversation_id = ? AND workspace_name = ? AND status IN ('running', 'blocked')
       ORDER BY id DESC LIMIT 1
-    `).get(chatId, workspaceName);
+    `).get(String(conversationId), workspaceName);
     return row ? rowToTask(row) : undefined;
   }
 
-  updateTask(id: number, updates: { status?: TaskStatus; turnId?: string | null; statusMessageId?: number | null }): void {
+  updateTask(id: number, updates: { status?: TaskStatus; turnId?: string | null; statusMessageId?: MessageId | null }): void {
     const current = this.getTask(id);
     if (!current) return;
     this.db.query(`
@@ -497,19 +498,19 @@ export class Store {
     `).run(
       updates.status ?? current.status,
       updates.turnId === undefined ? current.turnId ?? null : updates.turnId,
-      updates.statusMessageId === undefined ? current.statusMessageId ?? null : updates.statusMessageId,
+      updates.statusMessageId === undefined ? current.statusMessageId ?? null : updates.statusMessageId === null ? null : String(updates.statusMessageId),
       Date.now(),
       id,
     );
   }
 
-  countTasks(chatId: ChatId, workspaceName: string, statuses: TaskStatus[]): number {
+  countTasks(conversationId: ConversationId, workspaceName: string, statuses: TaskStatus[]): number {
     if (statuses.length === 0) return 0;
     const placeholders = statuses.map(() => "?").join(", ");
     const row = this.db.query<{ count: number }, any>(`
       SELECT COUNT(*) as count FROM tasks
-      WHERE chat_id = ? AND workspace_name = ? AND status IN (${placeholders})
-    `).get(chatId, workspaceName, ...statuses);
+      WHERE conversation_id = ? AND workspace_name = ? AND status IN (${placeholders})
+    `).get(String(conversationId), workspaceName, ...statuses);
     return row?.count ?? 0;
   }
 }
@@ -520,7 +521,7 @@ function rowToWorkspace(row: WorkspaceRow): WorkspaceRecord {
 
 function rowToPendingPrompt(row: PendingPromptRow): PendingPrompt {
   return {
-    chatId: row.chat_id,
+    conversationId: row.conversation_id,
     promptMessageId: row.prompt_message_id,
     kind: row.kind as PendingPromptKind,
     createdAt: row.created_at,
@@ -533,7 +534,7 @@ function rowToPendingPrompt(row: PendingPromptRow): PendingPrompt {
 function rowToPagedOutput(row: PagedOutputRow): PagedOutput {
   return {
     token: row.token,
-    chatId: row.chat_id,
+    conversationId: row.conversation_id,
     sessionKey: row.session_key,
     text: row.text,
     createdAt: row.created_at,
@@ -544,7 +545,7 @@ function rowToPagedOutput(row: PagedOutputRow): PagedOutput {
 function rowToTask(row: TaskRow): RelayTask {
   return {
     id: row.id,
-    chatId: row.chat_id,
+    conversationId: row.conversation_id,
     workspaceName: row.workspace_name,
     text: row.text,
     ...(row.input_json ? { inputJson: row.input_json } : {}),

@@ -7,30 +7,40 @@ import type { AppConfig } from "../src/config.ts";
 import { MessageRouter } from "../src/router/message-router.ts";
 import { Store } from "../src/storage/store.ts";
 import { TextLogger, type LogLevel } from "../src/logger.ts";
-import type { AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentThreadListOptions, AgentThreadSummary, ChatId, EditMessageTextOptions, SendMessageOptions } from "../src/types.ts";
+import type { AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentThreadListOptions, AgentThreadSummary, ConversationId, EditMessageTextOptions, MessageId, SendMessageOptions } from "../src/types.ts";
 
 class FakeAdapter {
-  sent: Array<{ chatId: ChatId; text: string; options?: SendMessageOptions; messageId?: number }> = [];
-  photos: Array<{ chatId: ChatId; photo: Blob; options?: unknown; messageId?: number }> = [];
-  edited: Array<{ chatId: ChatId; text: string; options: EditMessageTextOptions }> = [];
+  readonly providerId = "fake";
+  readonly capabilities = {
+    editMessage: true,
+    forceReply: true,
+    inlineActions: true,
+    reactions: true,
+    typing: true,
+    mediaDownload: true,
+    imageUpload: true,
+  };
+  sent: Array<{ conversationId: ConversationId; text: string; options?: SendMessageOptions; messageId?: number }> = [];
+  photos: Array<{ conversationId: ConversationId; photo: Blob; options?: unknown; messageId?: number }> = [];
+  edited: Array<{ conversationId: ConversationId; text: string; options: EditMessageTextOptions }> = [];
   answered: Array<{ callbackQueryId: string; text?: string }> = [];
-  chatActions: Array<{ chatId: ChatId; action?: "typing" }> = [];
-  reactions: Array<{ chatId: ChatId; messageId: number; emoji?: string }> = [];
+  chatActions: Array<{ conversationId: ConversationId; action?: "typing" }> = [];
+  reactions: Array<{ conversationId: ConversationId; messageId: MessageId; emoji?: string }> = [];
   downloads = new Map<string, ArrayBuffer>();
   nextMessageId = 100;
   sendMessageDelayMs = 0;
   failReaction?: Error;
 
-  async sendMessage(chatId: ChatId, text: string, options?: SendMessageOptions): Promise<{ messageId?: number }> {
+  async sendMessage(conversationId: ConversationId, text: string, options?: SendMessageOptions): Promise<{ messageId?: number }> {
     if (this.sendMessageDelayMs > 0) await sleep(this.sendMessageDelayMs);
     const messageId = this.nextMessageId++;
-    this.sent.push({ chatId, text, options, messageId });
+    this.sent.push({ conversationId, text, options, messageId });
     return { messageId };
   }
 
-  async sendPhoto(chatId: ChatId, photo: Blob, options?: unknown): Promise<{ messageId?: number }> {
+  async sendPhoto(conversationId: ConversationId, photo: Blob, options?: unknown): Promise<{ messageId?: number }> {
     const messageId = this.nextMessageId++;
-    this.photos.push({ chatId, photo, options, messageId });
+    this.photos.push({ conversationId, photo, options, messageId });
     return { messageId };
   }
 
@@ -41,21 +51,21 @@ class FakeAdapter {
     };
   }
 
-  async editMessageText(chatId: ChatId, text: string, options: EditMessageTextOptions): Promise<void> {
-    this.edited.push({ chatId, text, options });
+  async editMessageText(conversationId: ConversationId, text: string, options: EditMessageTextOptions): Promise<void> {
+    this.edited.push({ conversationId, text, options });
   }
 
   async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
     this.answered.push({ callbackQueryId, text });
   }
 
-  async sendChatAction(chatId: ChatId, action?: "typing"): Promise<void> {
-    this.chatActions.push({ chatId, action });
+  async sendChatAction(conversationId: ConversationId, action?: "typing"): Promise<void> {
+    this.chatActions.push({ conversationId, action });
   }
 
-  async setMessageReaction(chatId: ChatId, messageId: number, emoji?: string): Promise<void> {
+  async setMessageReaction(conversationId: ConversationId, messageId: MessageId, emoji?: string): Promise<void> {
     if (this.failReaction) throw this.failReaction;
-    this.reactions.push({ chatId, messageId, emoji });
+    this.reactions.push({ conversationId, messageId, emoji });
   }
 }
 
@@ -73,11 +83,11 @@ class FakeAgent implements AgentDriver {
   models: AgentModelSummary[] = [];
   failSend?: Error;
 
-  async start(options: { chatId: ChatId; workspaceName: string; workspacePath: string; threadId?: string }): Promise<AgentSessionStatus> {
-    const key = sessionKey(options.chatId, options.workspaceName);
+  async start(options: { conversationId: ConversationId; workspaceName: string; workspacePath: string; threadId?: string }): Promise<AgentSessionStatus> {
+    const key = sessionKey(options.conversationId, options.workspaceName);
     const status = {
       sessionKey: key,
-      chatId: options.chatId,
+      conversationId: options.conversationId,
       workspaceName: options.workspaceName,
       workspacePath: options.workspacePath,
       running: true,
@@ -158,13 +168,15 @@ function fixture(logLevel: LogLevel = "info"): { router: MessageRouter; store: S
   const logLines: string[] = [];
   const logger = new TextLogger(logLevel, (line) => logLines.push(line), () => new Date("2026-05-02T08:00:00.000Z"));
   const config: AppConfig = {
+    messagingProvider: "telegram",
+    agentProvider: "codex",
     telegramBotToken: "token",
-    telegramAllowedUserIds: new Set([7]),
+    allowedUserIds: new Set(["7"]),
+    mediaMaxBytes: 20 * 1024 * 1024,
     telegramPollTimeoutSeconds: 30,
     telegramRequestRetryMaxAttempts: 3,
     telegramRetryInitialDelayMs: 500,
     telegramRetryMaxDelayMs: 10000,
-    telegramImageMaxBytes: 20 * 1024 * 1024,
     workspaceRoot: root,
     sqlitePath: join(data, "db.sqlite"),
     codexBin: "codex",
@@ -202,12 +214,12 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle(textMessage("hello codex"));
 
-    expect(agent.sent).toEqual([{ key: "1:demo", text: "hello codex" }]);
-    expect(agent.getStatus("1:demo")?.running).toBe(true);
+    expect(agent.sent).toEqual([{ key: "codex:1:demo", text: "hello codex" }]);
+    expect(agent.getStatus("codex:1:demo")?.running).toBe(true);
   });
 
   test("info logs message metadata without raw text", async () => {
@@ -215,7 +227,7 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle(textMessage("secret prompt"));
 
@@ -230,7 +242,7 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle(textMessage("secret prompt"));
 
@@ -242,13 +254,13 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle(textMessage("/unknown"));
 
-    expect(agent.sent).toEqual([{ key: "1:demo", text: "/unknown" }]);
+    expect(agent.sent).toEqual([{ key: "codex:1:demo", text: "/unknown" }]);
     expect(adapter.sent).toEqual([]);
-    expect(adapter.reactions).toEqual([{ chatId: 1, messageId: 1, emoji: "✍" }]);
+    expect(adapter.reactions).toEqual([{ conversationId: "1", messageId: "1", emoji: "✍" }]);
   });
 
   test("console no longer exposes raw tail action", async () => {
@@ -256,7 +268,7 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle(textMessage("/relay"));
 
@@ -269,9 +281,9 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
-    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "**Done** `src/app.ts`\n" });
+    await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "**Done** `src/app.ts`\n" });
     await sleep(850);
 
     expect(adapter.sent.at(-1)?.text).toBe("Done src/app.ts\n");
@@ -283,22 +295,22 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle({ ...textMessage("hello"), messageId: 44, id: "44" });
-    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "answer", turnId: "turn-1" });
+    await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "answer", turnId: "turn-1" });
     await sleep(850);
 
-    expect(adapter.sent.at(-1)?.options?.replyToMessageId).toBe(44);
+    expect(adapter.sent.at(-1)?.options?.replyToMessageId).toBe("44");
   });
 
   test("starts a new telegram message after a completed turn", async () => {
     const { router, adapter } = fixture();
 
-    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "first", turnId: "turn-1" });
-    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-1" });
-    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "second", turnId: "turn-2" });
-    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-2" });
+    await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "first", turnId: "turn-1" });
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "second", turnId: "turn-2" });
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-2" });
 
     expect(adapter.sent.map((message) => message.text)).toEqual(["first", "second"]);
     expect(adapter.edited).toEqual([]);
@@ -309,26 +321,26 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
-    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+    store.bindConversation(1, "demo");
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
 
-    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "before", turnId: "turn-1" });
+    await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "before", turnId: "turn-1" });
     await sleep(850);
     await router.handle(textMessage("follow up"));
-    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "after", turnId: "turn-1" });
+    await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "after", turnId: "turn-1" });
     await sleep(850);
 
     expect(adapter.sent.map((message) => message.text)).toEqual(["before", "after"]);
     expect(adapter.edited).toEqual([]);
-    expect(adapter.reactions).toEqual([{ chatId: 1, messageId: 1, emoji: "✍" }]);
-    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "follow up" });
+    expect(adapter.reactions).toEqual([{ conversationId: "1", messageId: "1", emoji: "✍" }]);
+    expect(agent.sent.at(-1)).toEqual({ key: "codex:1:demo", text: "follow up" });
   });
 
   test("long agent output is paged in one telegram message", async () => {
     const { router, adapter } = fixture();
     const longText = Array.from({ length: 900 }, (_, index) => `line ${index}`).join("\n");
 
-    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: longText, turnId: "turn-1" });
+    await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: longText, turnId: "turn-1" });
     await sleep(50);
 
     const paged = adapter.sent.at(-1)!;
@@ -343,7 +355,7 @@ describe("router", () => {
     expect(adapter.edited.at(-1)?.text).toMatch(/Page \d+\/\d+$/);
     expect(adapter.sent).toHaveLength(1);
 
-    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-1" });
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
     expect(adapter.edited.at(-1)?.text).toContain("line 0");
     expect(adapter.edited.at(-1)?.text).toMatch(/Page 1\/\d+$/);
   });
@@ -353,14 +365,14 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
-    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "before approval", turnId: "turn-1" });
+    await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "before approval", turnId: "turn-1" });
     await sleep(850);
     const firstMessageId = adapter.sent.at(-1)?.messageId;
     await router.handleAgentOutput({
       type: "approval_request",
-      sessionKey: "1:demo",
+      sessionKey: "codex:1:demo",
       requestId: 91,
       method: "item/commandExecution/requestApproval",
       approvalKind: "command",
@@ -375,10 +387,10 @@ describe("router", () => {
     expect(prompt.options!.replyMarkup!.inline_keyboard[0]!.map((button) => button.text)).toEqual(["✅", "❎"]);
 
     await router.handle(callbackMessage(approve.callback_data, 7, "cba", prompt.messageId));
-    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "after approval", turnId: "turn-1" });
+    await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "after approval", turnId: "turn-1" });
     await sleep(850);
 
-    expect(agent.responses).toEqual([{ key: "1:demo", requestId: 91, result: { decision: "accept" } }]);
+    expect(agent.responses).toEqual([{ key: "codex:1:demo", requestId: 91, result: { decision: "accept" } }]);
     expect(adapter.edited.some((message) => message.options.messageId === firstMessageId && message.text.includes("after approval"))).toBe(false);
     expect(adapter.sent.map((message) => message.text)).toEqual([
       "before approval",
@@ -391,11 +403,11 @@ describe("router", () => {
     const { router, adapter } = fixture();
     adapter.sendMessageDelayMs = 80;
 
-    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "before approval", turnId: "turn-1" });
+    await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "before approval", turnId: "turn-1" });
     await sleep(820);
     await router.handleAgentOutput({
       type: "approval_request",
-      sessionKey: "1:demo",
+      sessionKey: "codex:1:demo",
       requestId: 91,
       method: "item/commandExecution/requestApproval",
       approvalKind: "command",
@@ -416,10 +428,10 @@ describe("router", () => {
     const { router, adapter } = fixture();
     adapter.sendMessageDelayMs = 80;
 
-    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: "first", turnId: "turn-1" });
+    await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "first", turnId: "turn-1" });
     await sleep(820);
-    await router.handleAgentOutput({ sessionKey: "1:demo", chunk: " second", turnId: "turn-1" });
-    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-1" });
+    await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: " second", turnId: "turn-1" });
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
 
     expect(adapter.sent.map((message) => message.text)).toEqual(["first"]);
     expect(adapter.edited.map((message) => message.text)).toEqual(["first second"]);
@@ -449,7 +461,7 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle(textMessage("/help"));
     await router.handle(textMessage("/codex"));
@@ -466,7 +478,7 @@ describe("router", () => {
     ]);
     expect(agent.builtins).toEqual([]);
     expect(adapter.sent).toEqual([]);
-    expect(adapter.reactions).toEqual([{ chatId: 1, messageId: 1, emoji: "✍" }]);
+    expect(adapter.reactions).toEqual([{ conversationId: "1", messageId: "1", emoji: "✍" }]);
   });
 
   test("/review and /compact run Codex built-ins", async () => {
@@ -474,15 +486,15 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle(textMessage("/review branch main"));
     await router.handle(textMessage("/compact"));
 
     expect(agent.sent).toEqual([]);
     expect(agent.builtins).toEqual([
-      { key: "1:demo", command: { type: "review", target: { type: "baseBranch", branch: "main" } } },
-      { key: "1:demo", command: { type: "compact" } },
+      { key: "codex:1:demo", command: { type: "review", target: { type: "baseBranch", branch: "main" } } },
+      { key: "codex:1:demo", command: { type: "compact" } },
     ]);
     expect(adapter.sent.map((message) => message.text)).toEqual(["Review started.", "Compaction started."]);
   });
@@ -492,11 +504,11 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle(textMessage("/init"));
 
-    expect(agent.sent).toEqual([{ key: "1:demo", text: "Generate a file named AGENTS.md that serves as a contributor guide for this repository." }]);
+    expect(agent.sent).toEqual([{ key: "codex:1:demo", text: "Generate a file named AGENTS.md that serves as a contributor guide for this repository." }]);
   });
 
   test("/clear starts a fresh thread while keeping the workspace selected", async () => {
@@ -504,15 +516,15 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
-    store.markSessionStarted("1:demo", 1, "demo", 1, "old-thread");
-    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path, threadId: "old-thread" });
+    store.bindConversation(1, "demo");
+    store.markSessionStarted("codex:1:demo", 1, "demo", 1, "old-thread");
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "old-thread" });
 
     await router.handle(textMessage("/clear"));
 
-    expect(agent.stopped).toEqual(["1:demo"]);
+    expect(agent.stopped).toEqual(["codex:1:demo"]);
     expect(store.getBinding(1)?.workspaceName).toBe("demo");
-    expect(store.getSession("1:demo")?.thread_id).toBe("thread-1");
+    expect(store.getSession("codex:1:demo")?.thread_id).toBe("thread-1");
     expect(agent.sent).toEqual([]);
     expect(adapter.sent.at(-1)?.text).toContain("Started a new chat.");
   });
@@ -522,14 +534,14 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
-    store.markSessionStarted("1:demo", 1, "demo", 1, "old-thread");
-    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path, threadId: "old-thread" });
+    store.bindConversation(1, "demo");
+    store.markSessionStarted("codex:1:demo", 1, "demo", 1, "old-thread");
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "old-thread" });
 
     await router.handle(callbackMessage("ar:clear?"));
 
     expect(agent.stopped).toEqual([]);
-    expect(store.getSession("1:demo")?.thread_id).toBe("old-thread");
+    expect(store.getSession("codex:1:demo")?.thread_id).toBe("old-thread");
     expect(adapter.edited.at(-1)?.text).toContain("Error: Unknown callback.");
   });
 
@@ -538,8 +550,8 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
-    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path, threadId: "current-thread" });
+    store.bindConversation(1, "demo");
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "current-thread" });
     agent.threads = [{ id: "saved-thread", name: "Saved work", cwd: path, updatedAt: 1 }];
 
     await router.handle(textMessage("/resume saved"));
@@ -550,9 +562,9 @@ describe("router", () => {
 
     await router.handle(callbackMessage(resumeButton!.callback_data, 7, "cb-resume", adapter.sent.at(-1)?.messageId));
 
-    expect(agent.stopped).toEqual(["1:demo"]);
-    expect(agent.getStatus("1:demo")?.threadId).toBe("saved-thread");
-    expect(store.getSession("1:demo")?.thread_id).toBe("saved-thread");
+    expect(agent.stopped).toEqual(["codex:1:demo"]);
+    expect(agent.getStatus("codex:1:demo")?.threadId).toBe("saved-thread");
+    expect(store.getSession("codex:1:demo")?.thread_id).toBe("saved-thread");
     expect(adapter.edited.at(-1)?.text).toContain("Resumed chat.");
   });
 
@@ -561,15 +573,15 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle(textMessage("/fork"));
     await router.handle(textMessage("/rename Ship it"));
     await router.handle(textMessage("/stop"));
 
-    expect(agent.forks).toEqual(["1:demo"]);
-    expect(agent.renames).toEqual([{ key: "1:demo", name: "Ship it" }]);
-    expect(agent.cleaned).toEqual(["1:demo"]);
+    expect(agent.forks).toEqual(["codex:1:demo"]);
+    expect(agent.renames).toEqual([{ key: "codex:1:demo", name: "Ship it" }]);
+    expect(agent.cleaned).toEqual(["codex:1:demo"]);
     expect(store.getBinding(1)?.workspaceName).toBe("demo");
     expect(adapter.sent.map((message) => message.text)).toEqual(["Forked chat.\n\nThread: Forked", "Renamed chat.\n\nShip it", "Background terminals stopped."]);
   });
@@ -579,19 +591,19 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle(textMessage("/plan design this"));
 
-    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "design this", options: { collaborationMode: "plan" } });
-    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-1" });
+    expect(agent.sent.at(-1)).toEqual({ key: "codex:1:demo", text: "design this", options: { collaborationMode: "plan" } });
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
     const planButton = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Implement");
     expect(planButton?.callback_data).toMatch(/^ar:cmd:plan:/);
 
     await router.handle(callbackMessage(planButton!.callback_data, 7, "cb-plan", adapter.sent.at(-1)?.messageId));
 
-    expect(store.getCollaborationMode("1:demo")).toBe("default");
-    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "Implement the approved plan." });
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
+    expect(agent.sent.at(-1)).toEqual({ key: "codex:1:demo", text: "Implement the approved plan." });
   });
 
   test("resume callback is no longer supported", async () => {
@@ -599,22 +611,22 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
-    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path, threadId: "current-thread" });
+    store.bindConversation(1, "demo");
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "current-thread" });
     agent.threads = [{ id: "saved-thread", name: "Saved work", cwd: path, updatedAt: 1 }];
 
     await router.handle(callbackMessage("ar:rl:0"));
 
     expect(agent.threadLists).toEqual([]);
     expect(agent.stopped).toEqual([]);
-    expect(agent.getStatus("1:demo")?.threadId).toBe("current-thread");
+    expect(agent.getStatus("codex:1:demo")?.threadId).toBe("current-thread");
     expect(adapter.edited.at(-1)?.text).toContain("Error: Unknown callback.");
   });
 
   test("status toggle renders details and persists by chat", async () => {
     const { router, store, adapter } = fixture();
     store.upsertWorkspace({ name: "demo", path: "/tmp/<demo>&", createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle(textMessage("/relay"));
     await router.handle(callbackMessage("ar:status", 7, "cb-details", adapter.sent.at(-1)?.messageId));
@@ -656,7 +668,7 @@ describe("router", () => {
     await router.handle(textMessage("demo", 7, promptId));
 
     expect(store.getBinding(1)?.workspaceName).toBe("demo");
-    expect(agent.getStatus("1:demo")?.running).toBe(true);
+    expect(agent.getStatus("codex:1:demo")?.running).toBe(true);
     expect(adapter.sent.at(-1)?.text).toContain("created and selected");
     expect(existsSync(join(root, "demo", ".git"))).toBe(true);
   });
@@ -672,7 +684,7 @@ describe("router", () => {
 
     expect(store.getBinding(1)?.workspaceName).toBe(workspaceName);
     expect(store.getWorkspace(workspaceName)?.path).toBe(join(root, workspaceName));
-    expect(agent.getStatus(`1:${workspaceName}`)?.running).toBe(true);
+    expect(agent.getStatus(sessionKey(1, workspaceName))?.running).toBe(true);
     expect(adapter.sent.at(-1)?.text).toContain("selected");
     expect(adapter.sent.at(-1)?.text).not.toContain("created and selected");
     expect(existsSync(join(root, workspaceName, ".git"))).toBe(false);
@@ -683,7 +695,7 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle(callbackMessage("ar:i"));
 
@@ -696,8 +708,8 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
-    const status = await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+    store.bindConversation(1, "demo");
+    const status = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
     status.activeTurnId = "turn-1";
 
     await router.handle(callbackMessage("ar:i"));
@@ -711,13 +723,13 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
-    const status = await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+    store.bindConversation(1, "demo");
+    const status = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
     status.activeTurnId = "turn-1";
 
     await router.handle(textMessage("new task while busy"));
 
-    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "new task while busy" });
+    expect(agent.sent.at(-1)).toEqual({ key: "codex:1:demo", text: "new task while busy" });
     expect(adapter.sent).toEqual([]);
     expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(0);
   });
@@ -727,13 +739,13 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
-    const status = await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+    store.bindConversation(1, "demo");
+    const status = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
     status.activeTurnId = "turn-1";
 
     await router.handle(textMessage("/add include tests"));
 
-    expect(agent.sent.at(-1)).toEqual({ key: "1:demo", text: "/add include tests" });
+    expect(agent.sent.at(-1)).toEqual({ key: "codex:1:demo", text: "/add include tests" });
     expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(0);
   });
 
@@ -742,13 +754,13 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await (router as any).submitTask(1, "queued work", 88, "queue");
 
     expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(1);
     expect(adapter.sent).toEqual([]);
-    expect(adapter.reactions).toEqual([{ chatId: 1, messageId: 88, emoji: "🫡" }]);
+    expect(adapter.reactions).toEqual([{ conversationId: "1", messageId: "88", emoji: "🫡" }]);
   });
 
   test("prompt without a user message id does not send a status card or reaction", async () => {
@@ -756,11 +768,11 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await (router as any).submitTask(1, "run without id", undefined, "immediate");
 
-    expect(agent.sent).toEqual([{ key: "1:demo", text: "run without id" }]);
+    expect(agent.sent).toEqual([{ key: "codex:1:demo", text: "run without id" }]);
     expect(adapter.sent).toEqual([]);
     expect(adapter.reactions).toEqual([]);
   });
@@ -770,12 +782,12 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
     adapter.failReaction = new Error("reaction unavailable");
 
     await router.handle(textMessage("run task"));
 
-    expect(agent.sent).toEqual([{ key: "1:demo", text: "run task" }]);
+    expect(agent.sent).toEqual([{ key: "codex:1:demo", text: "run task" }]);
     expect(adapter.sent).toEqual([]);
     expect(adapter.reactions).toEqual([]);
     expect(logLines.join("\n")).toContain("router.task_reaction_failed");
@@ -786,16 +798,16 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle(textMessage("run task"));
-    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "1:demo", turnId: "turn-1" });
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
 
     expect(adapter.sent).toEqual([]);
     expect(adapter.edited).toEqual([]);
     expect(adapter.reactions).toEqual([
-      { chatId: 1, messageId: 1, emoji: "✍" },
-      { chatId: 1, messageId: 1, emoji: "😎" },
+      { conversationId: "1", messageId: "1", emoji: "✍" },
+      { conversationId: "1", messageId: "1", emoji: "😎" },
     ]);
   });
 
@@ -804,7 +816,7 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
     agent.failSend = new Error("send exploded");
 
     await router.handle(textMessage("run task"));
@@ -813,8 +825,8 @@ describe("router", () => {
     expect(adapter.sent.at(-1)?.text).toContain("Error:");
     expect(adapter.edited).toEqual([]);
     expect(adapter.reactions).toEqual([
-      { chatId: 1, messageId: 1, emoji: "✍" },
-      { chatId: 1, messageId: 1, emoji: "😱" },
+      { conversationId: "1", messageId: "1", emoji: "✍" },
+      { conversationId: "1", messageId: "1", emoji: "😱" },
     ]);
   });
 
@@ -823,13 +835,13 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
     adapter.downloads.set("photo-large", new Uint8Array([1, 2, 3]).buffer);
 
     await router.handle(mediaMessage("inspect this"));
 
     expect(agent.sent).toHaveLength(1);
-    expect(agent.sent[0]?.key).toBe("1:demo");
+    expect(agent.sent[0]?.key).toBe("codex:1:demo");
     expect(agent.sent[0]?.text).toBe("inspect this");
     const imagePath = agent.sent[0]?.options?.images?.[0]?.path;
     expect(imagePath).toContain(join(path, ".agent-relay", "media", "incoming"));
@@ -843,7 +855,7 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handle(mediaMessage());
 
@@ -856,12 +868,12 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
     await router.handle(textMessage("make image"));
     const generated = join(path, "generated.png");
     writeFileSync(generated, new Uint8Array([1, 2, 3]));
 
-    await router.handleAgentOutput({ type: "image", sessionKey: "1:demo", path: generated, caption: "result" });
+    await router.handleAgentOutput({ type: "image", sessionKey: "codex:1:demo", path: generated, caption: "result" });
 
     expect(adapter.photos).toHaveLength(1);
     const outgoingDayDirs = readdirSync(join(path, ".agent-relay", "media", "outgoing"));
@@ -874,7 +886,7 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
     await router.handle(textMessage("debug h5"));
     const screenshot = join(path, "screen.png");
     writeFileSync(screenshot, new Uint8Array([1, 2, 3]));
@@ -883,7 +895,7 @@ describe("router", () => {
 
     expect(result.path).toContain(join(path, ".agent-relay", "media", "outgoing"));
     expect(adapter.photos).toHaveLength(1);
-    expect(adapter.photos[0]?.options).toEqual({ caption: "home screen", replyToMessageId: 1 });
+    expect(adapter.photos[0]?.options).toEqual({ caption: "home screen", replyToMessageId: "1" });
   });
 
   test("send_image capability rejects paths outside workspace", async () => {
@@ -891,7 +903,7 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
     await router.handle(textMessage("debug h5"));
     const screenshot = join(root, "outside.png");
     writeFileSync(screenshot, new Uint8Array([1, 2, 3]));
@@ -904,7 +916,7 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
     await router.handle(textMessage("debug h5"));
     const screenshot = join(path, "screen.png");
     writeFileSync(screenshot, new Uint8Array(20 * 1024 * 1024 + 1));
@@ -919,10 +931,10 @@ describe("router", () => {
     mkdirSync(second, { recursive: true });
     store.upsertWorkspace({ name: "demo", path: first, createdAt: 1 });
     store.upsertWorkspace({ name: "nested", path: second, createdAt: 1 });
-    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: first });
-    await agent.start({ chatId: 2, workspaceName: "nested", workspacePath: second });
-    store.markSessionStarted("1:demo", 1, "demo", 1, "thread-1");
-    store.markSessionStarted("2:nested", 2, "nested", 1, "thread-2");
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: first });
+    await agent.start({ conversationId: 2, workspaceName: "nested", workspacePath: second });
+    store.markSessionStarted("codex:1:demo", 1, "demo", 1, "thread-1");
+    store.markSessionStarted("codex:2:nested", 2, "nested", 1, "thread-2");
     const screenshot = join(second, "screen.png");
     writeFileSync(screenshot, new Uint8Array([1, 2, 3]));
 
@@ -934,8 +946,8 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
-    store.createTask({ chatId: 1, workspaceName: "demo", text: "queued work", status: "queued" });
+    store.bindConversation(1, "demo");
+    store.createTask({ conversationId: "1", workspaceName: "demo", text: "queued work", status: "queued" });
 
     await router.handle(callbackMessage("ar:queue"));
 
@@ -951,7 +963,7 @@ describe("router", () => {
     const secondMessageId = adapter.sent.at(-1)?.messageId;
 
     expect(secondMessageId).not.toBe(firstMessageId);
-    expect(store.getConsoleMessageId(1)).toBe(secondMessageId);
+    expect(store.getConsoleMessageId(1)).toBe(String(secondMessageId));
     expect(adapter.sent).toHaveLength(2);
     expect(adapter.edited).toHaveLength(0);
   });
@@ -965,7 +977,7 @@ describe("router", () => {
 
     await router.handle(callbackMessage("ar:s", 7, "cb-refresh", currentMessageId));
 
-    expect(store.getConsoleMessageId(1)).toBe(currentMessageId);
+    expect(store.getConsoleMessageId(1)).toBe(String(currentMessageId));
     expect(adapter.sent).toHaveLength(2);
     expect(adapter.edited.at(-1)?.options.messageId).toBe(currentMessageId);
   });
@@ -978,7 +990,7 @@ describe("router", () => {
     mkdirSync(second);
     store.upsertWorkspace({ name: "first", path: first, createdAt: 1 });
     store.upsertWorkspace({ name: "second", path: second, createdAt: 1 });
-    store.bindChat(1, "first");
+    store.bindConversation(1, "first");
 
     await router.handle(callbackMessage("ar:w"));
     const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((candidate) => candidate.text.startsWith("▫️ second"));
@@ -987,7 +999,7 @@ describe("router", () => {
     await router.handle(callbackMessage(button!.callback_data, 7, "cb2", adapter.edited.at(-1)?.options.messageId));
 
     expect(store.getBinding(1)?.workspaceName).toBe("second");
-    expect(agent.getStatus("1:second")?.running).toBe(true);
+    expect(agent.getStatus("codex:1:second")?.running).toBe(true);
     expect(adapter.edited.at(-1)?.text).toContain("cwd: second");
     expect(adapter.edited.at(-1)?.options.entities?.some((entity) => entity.type === "code")).toBe(true);
     expect(adapter.edited.at(-1)?.options.messageId).toBe(42);
@@ -1021,8 +1033,8 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
-    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+    store.bindConversation(1, "demo");
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
 
     await router.handle(callbackMessage("ar:w"));
     const deleteButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wd?:"));
@@ -1038,7 +1050,7 @@ describe("router", () => {
     expect(existsSync(path)).toBe(false);
     expect(store.getWorkspace("demo")).toBeUndefined();
     expect(store.getBinding(1)).toBeUndefined();
-    expect(agent.stopped).toEqual(["1:demo"]);
+    expect(agent.stopped).toEqual(["codex:1:demo"]);
     expect(adapter.edited.at(-1)?.text).toContain("No cwd directories found.");
   });
 
@@ -1048,7 +1060,7 @@ describe("router", () => {
     await router.handle(textMessage("/cd demo"));
 
     expect(store.getBinding(1)).toBeUndefined();
-    expect(agent.getStatus("1:demo")).toBeUndefined();
+    expect(agent.getStatus("codex:1:demo")).toBeUndefined();
     expect(adapter.sent.at(-1)?.text).toContain("Relay Home");
     expect(adapter.sent.at(-1)?.text).toContain("cwd: none");
     expect(existsSync(join(root, "demo"))).toBe(false);
@@ -1074,12 +1086,12 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
-    await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+    store.bindConversation(1, "demo");
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
 
     await router.handle(callbackMessage("ar:stop"));
 
-    expect(agent.stopped).toEqual(["1:demo"]);
+    expect(agent.stopped).toEqual(["codex:1:demo"]);
     expect(store.getBinding(1)).toBeUndefined();
     expect(adapter.edited.at(-1)?.text).toContain("cwd: none");
   });
@@ -1098,12 +1110,12 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
     await router.handle(textMessage("ask mode"));
 
     await router.handleAgentOutput({
       type: "user_input_request",
-      sessionKey: "1:demo",
+      sessionKey: "codex:1:demo",
       requestId: 77,
       questions: [{
         id: "choice",
@@ -1122,15 +1134,15 @@ describe("router", () => {
     await router.handle(textMessage("Fast", 7, prompt.messageId));
 
     expect(agent.responses).toEqual([{
-      key: "1:demo",
+      key: "codex:1:demo",
       requestId: 77,
       result: { answers: { choice: { answers: ["Fast"] } } },
     }]);
     expect(adapter.sent.at(-1)?.text).toContain("Answered");
     expect(adapter.reactions).toEqual([
-      { chatId: 1, messageId: 1, emoji: "✍" },
-      { chatId: 1, messageId: 1, emoji: "🤔" },
-      { chatId: 1, messageId: 1, emoji: "✍" },
+      { conversationId: "1", messageId: "1", emoji: "✍" },
+      { conversationId: "1", messageId: "1", emoji: "🤔" },
+      { conversationId: "1", messageId: "1", emoji: "✍" },
     ]);
   });
 
@@ -1147,11 +1159,11 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handleAgentOutput({
       type: "user_input_request",
-      sessionKey: "1:demo",
+      sessionKey: "codex:1:demo",
       requestId: "req1",
       questions: [{ id: "notes", header: "Notes", question: "What should I use?" }],
     });
@@ -1161,7 +1173,7 @@ describe("router", () => {
     await router.handle(textMessage("Use SQLite", 7, promptId));
 
     expect(agent.responses).toEqual([{
-      key: "1:demo",
+      key: "codex:1:demo",
       requestId: "req1",
       result: { answers: { notes: { answers: ["Use SQLite"] } } },
     }]);
@@ -1173,8 +1185,8 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
-    const status = await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+    store.bindConversation(1, "demo");
+    const status = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
     status.waitingForUserInput = true;
 
     await router.handle(textMessage("not a reply"));
@@ -1188,8 +1200,8 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
-    const status = await agent.start({ chatId: 1, workspaceName: "demo", workspacePath: path });
+    store.bindConversation(1, "demo");
+    const status = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
     status.waitingForApproval = true;
 
     await router.handle(textMessage("keep going"));
@@ -1203,11 +1215,11 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
 
     await router.handleAgentOutput({
       type: "user_input_request",
-      sessionKey: "1:demo",
+      sessionKey: "codex:1:demo",
       requestId: 88,
       questions: [
         { id: "first", header: "First", question: "A?", options: [{ label: "A", description: "" }] },
@@ -1236,13 +1248,13 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
     store.setPendingPrompt({
-      chatId: 1,
+      conversationId: "1",
       promptMessageId: 501,
       kind: "codex_user_input",
       createdAt: 1,
-      sessionKey: "1:demo",
+      sessionKey: "codex:1:demo",
       expiresAt: Date.now() - 1,
       payloadJson: JSON.stringify({ requestId: "old", questionId: "q" }),
     });
@@ -1258,12 +1270,12 @@ describe("router", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
-    store.bindChat(1, "demo");
+    store.bindConversation(1, "demo");
     await router.handle(textMessage("run tests"));
 
     await router.handleAgentOutput({
       type: "approval_request",
-      sessionKey: "1:demo",
+      sessionKey: "codex:1:demo",
       requestId: 91,
       method: "item/commandExecution/requestApproval",
       approvalKind: "command",
@@ -1276,30 +1288,30 @@ describe("router", () => {
 
     await router.handle(callbackMessage(approve.callback_data, 7, "cba", prompt.messageId));
 
-    expect(agent.responses).toEqual([{ key: "1:demo", requestId: 91, result: { decision: "accept" } }]);
+    expect(agent.responses).toEqual([{ key: "codex:1:demo", requestId: 91, result: { decision: "accept" } }]);
     expect(adapter.edited.at(-1)?.text).toContain("Approved");
     expect(adapter.edited.at(-1)?.text).toContain("Approve command?");
     expect(adapter.edited.at(-1)?.text).toContain("Run tests");
     expect(adapter.edited.at(-1)?.text).toContain("/tmp/demo");
     expect(adapter.edited.at(-1)?.text).toContain("bun test");
     expect(adapter.reactions).toEqual([
-      { chatId: 1, messageId: 1, emoji: "✍" },
-      { chatId: 1, messageId: 1, emoji: "🤔" },
-      { chatId: 1, messageId: 1, emoji: "✍" },
+      { conversationId: "1", messageId: "1", emoji: "✍" },
+      { conversationId: "1", messageId: "1", emoji: "🤔" },
+      { conversationId: "1", messageId: "1", emoji: "✍" },
     ]);
   });
 });
 
 function textMessage(text: string, userId = 7, replyToMessageId?: number) {
-  return { kind: "message" as const, id: "1", messageId: 1, chatId: 1, userId, text, replyToMessageId };
+  return { kind: "message" as const, id: "1", messageId: "1", conversationId: "1", userId, text, replyToMessageId };
 }
 
 function mediaMessage(caption?: string, userId = 7) {
   return {
     kind: "media" as const,
     id: "1",
-    messageId: 1,
-    chatId: 1,
+    messageId: "1",
+    conversationId: "1",
     userId,
     ...(caption ? { caption } : {}),
     photos: [
@@ -1309,11 +1321,11 @@ function mediaMessage(caption?: string, userId = 7) {
   };
 }
 
-function callbackMessage(data: string, userId = 7, callbackQueryId = "cb1", messageId = 42) {
+function callbackMessage(data: string, userId = 7, callbackQueryId = "cb1", messageId: MessageId = 42) {
   return {
     kind: "callback_query" as const,
     id: callbackQueryId,
-    chatId: 1,
+    conversationId: "1",
     userId,
     callbackQueryId,
     messageId,

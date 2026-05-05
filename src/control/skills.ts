@@ -1,9 +1,15 @@
-export function relayCapabilityInstructions(helperPath: string): string {
+export function relayCapabilityInstructions(helperPath: string, capabilityInstructions?: string): string {
   return [
     "## Agent Relay Capabilities",
     "",
     "This Codex session can call local agent-relay capabilities through the helper exposed in `AGENT_RELAY_HELPER`.",
     "",
+    capabilityInstructions ?? sendImageCapabilityInstructions(helperPath),
+  ].join("\n");
+}
+
+export function sendImageCapabilityInstructions(helperPath: string): string {
+  return [
     "### send_image",
     "",
     "Use this capability when working on H5/web UI, Playwright browser rendering, visual regressions, layout inspection, or any task where the user needs to see a rendered screen remotely.",

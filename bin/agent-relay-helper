@@ -3,13 +3,12 @@
 const [command, ...args] = process.argv.slice(2);
 
 async function main(): Promise<void> {
-  if (command !== "send-image") {
-    throw new Error("usage: agent-relay-helper send-image <path> [--cwd <cwd>] [--session-key <key>] [--caption <text>]");
-  }
-  const parsed = parseSendImageArgs(args);
+  const definition = helperCommands[command ?? ""];
+  if (!definition) throw new Error(usage());
+  const parsed = definition.parse(args);
   const url = requiredEnv("AGENT_RELAY_CONTROL_URL");
   const token = requiredEnv("AGENT_RELAY_CONTROL_TOKEN");
-  const response = await fetch(`${url.replace(/\/+$/, "")}/v1/capabilities/send_image`, {
+  const response = await fetch(`${url.replace(/\/+$/, "")}/v1/capabilities/${encodeURIComponent(definition.capability)}`, {
     method: "POST",
     headers: {
       "authorization": `Bearer ${token}`,
@@ -22,6 +21,18 @@ async function main(): Promise<void> {
     throw new Error(payload?.error || `agent-relay returned HTTP ${response.status}`);
   }
   console.log(payload.message || "image sent");
+}
+
+const helperCommands: Record<string, { capability: string; parse(args: string[]): unknown; usage: string }> = {
+  "send-image": {
+    capability: "send_image",
+    parse: parseSendImageArgs,
+    usage: "agent-relay-helper send-image <path> [--cwd <cwd>] [--session-key <key>] [--caption <text>]",
+  },
+};
+
+function usage(): string {
+  return `usage: ${Object.values(helperCommands).map((definition) => definition.usage).join(" | ")}`;
 }
 
 function parseSendImageArgs(args: string[]): { path: string; cwd?: string; sessionKey?: string; caption?: string } {

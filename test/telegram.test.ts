@@ -22,7 +22,7 @@ describe("telegram adapter", () => {
     });
     await done;
 
-    expect(received).toEqual([{ kind: "message", id: "9", messageId: 9, chatId: 2, userId: 3, text: "hi", date: 1 }]);
+    expect(received).toEqual([{ kind: "message", id: "9", messageId: "9", conversationId: "2", userId: "3", text: "hi", date: 1 }]);
   });
 
   test("routes long polling photo messages", async () => {
@@ -60,9 +60,9 @@ describe("telegram adapter", () => {
     expect(received).toEqual([{
       kind: "media",
       id: "9",
-      messageId: 9,
-      chatId: 2,
-      userId: 3,
+      messageId: "9",
+      conversationId: "2",
+      userId: "3",
       caption: "inspect",
       mediaGroupId: "album-1",
       photos: [
@@ -107,7 +107,7 @@ describe("telegram adapter", () => {
       { offset: -1, timeout: 0, allowed_updates: ["message", "callback_query"] },
       { offset: 6, timeout: 30, allowed_updates: ["message", "callback_query"] },
     ]);
-    expect(received).toEqual([{ kind: "message", id: "10", messageId: 10, chatId: 2, userId: 3, text: "new", date: 2 }]);
+    expect(received).toEqual([{ kind: "message", id: "10", messageId: "10", conversationId: "2", userId: "3", text: "new", date: 2 }]);
   });
 
   test("uses configured long polling timeout", async () => {
@@ -170,7 +170,7 @@ describe("telegram adapter", () => {
       { offset: -1, timeout: 0, allowed_updates: ["message", "callback_query"] },
       { offset: 0, timeout: 30, allowed_updates: ["message", "callback_query"] },
     ]);
-    expect(received).toEqual([{ kind: "message", id: "10", messageId: 10, chatId: 2, userId: 3, text: "new", date: 2 }]);
+    expect(received).toEqual([{ kind: "message", id: "10", messageId: "10", conversationId: "2", userId: "3", text: "new", date: 2 }]);
   });
 
   test("routes long polling callback queries", async () => {
@@ -203,9 +203,9 @@ describe("telegram adapter", () => {
       kind: "callback_query",
       id: "cb1",
       callbackQueryId: "cb1",
-      chatId: 2,
-      userId: 3,
-      messageId: 9,
+      conversationId: "2",
+      userId: "3",
+      messageId: "9",
       data: "ar:s",
       date: 1,
     }]);
@@ -240,7 +240,7 @@ describe("telegram adapter", () => {
       },
     });
 
-    await expect(adapter.sendMessage(1, "hi")).resolves.toEqual({ messageId: 9 });
+    await expect(adapter.sendMessage(1, "hi")).resolves.toEqual({ messageId: "9" });
     expect(calls).toBe(2);
     expect(delays).toEqual([25]);
   });
@@ -293,7 +293,7 @@ describe("telegram adapter", () => {
       replyMarkup: { inline_keyboard: [[{ text: "Status", callback_data: "ar:s" }]] },
     });
 
-    expect(result).toEqual({ messageId: 77 });
+    expect(result).toEqual({ messageId: "77" });
     expect(sentBodies.at(-1)).toEqual({
       chat_id: 1,
       text: "<b>Help</b>",
@@ -363,7 +363,7 @@ describe("telegram adapter", () => {
       replyToMessageId: 99,
     });
 
-    expect(result).toEqual({ messageId: 12 });
+    expect(result).toEqual({ messageId: "12" });
     expect(requests[0]?.method).toBe("sendPhoto");
     expect(requests[0]?.body.get("chat_id")).toBe("1");
     expect(requests[0]?.body.get("caption")).toBe("caption");

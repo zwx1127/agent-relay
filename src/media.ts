@@ -22,7 +22,7 @@ export async function saveRelayMedia(
   workspacePath: string,
   kind: RelayMediaKind,
   bytes: ArrayBuffer | Uint8Array,
-  options: { extension?: string; messageId?: number; createdAt?: Date } = {},
+  options: { extension?: string; messageId?: string | number; createdAt?: Date } = {},
 ): Promise<string> {
   const relayRoot = await ensureRelayMediaRoot(workspacePath);
   const day = utcDay(options.createdAt ?? new Date());
