@@ -1,5 +1,5 @@
 import type { AgentSessionStatus } from "../../ports/agent.ts";
-import { contextUsageBar, renderTelegramText, truncateForTelegramLabel, type RenderedTelegramText, type TelegramTextPart } from "../../presentation/telegram/text.ts";
+import { renderTelegramText, truncateForTelegramLabel, type RenderedTelegramText, type TelegramTextPart } from "../../presentation/telegram/text.ts";
 import type { HomeStatusMode, RelayTask, WorkspaceRecord } from "../types.ts";
 import type { StatusView } from "./status-view.ts";
 import { bold, code } from "./text-parts.ts";
@@ -98,10 +98,8 @@ export function formatDetailsMessage(status: StatusView): RenderedTelegramText {
     formatWaiting(status),
     "\nPrompts: ",
     formatTaskCounts(status),
-    "\nContext: ",
-    formatContext(status),
-    "\nToken usage: ",
-    formatTokens(status),
+    "\nUsage: ",
+    formatTokenContextUsage(status),
   );
   if (status.recentOutputAt) parts.push("\nLast output: ", relativeTime(status.recentOutputAt));
   if (status.recentError) parts.push("\nError: ", truncateForTelegramLabel(status.recentError.trim(), 120));
@@ -137,29 +135,26 @@ export function formatTaskCounts(status: StatusView): string {
   return parts.length > 0 ? parts.join(", ") : "none";
 }
 
-export function formatTokens(status: StatusView): string {
+export function formatTokenContextUsage(status: StatusView): string {
   const total = status.tokenUsage?.total?.totalTokens;
   const context = status.contextWindow;
-  if (typeof total !== "number" && typeof context !== "number") return "unknown";
+  const last = status.tokenUsage?.last?.totalTokens;
+  const parts: string[] = [];
+
   if (typeof total === "number" && typeof context === "number" && context > 0) {
     const percent = Math.round((total / context) * 100);
-    return `${total}/${context} (${percent}%)`;
+    const remaining = Math.max(0, context - total);
+    parts.push(`total ${total}/${context} (${percent}%, ${remaining} left)`);
+  } else if (typeof total === "number") {
+    parts.push(`total ${total}`);
+  } else if (typeof context === "number") {
+    parts.push(`context ${context}`);
+  } else {
+    parts.push("unknown");
   }
-  return typeof total === "number" ? String(total) : `context ${context}`;
-}
 
-export function contextPercent(status: StatusView): number | undefined {
-  const total = status.tokenUsage?.total?.totalTokens;
-  const context = status.contextWindow;
-  if (typeof total !== "number" || typeof context !== "number" || context <= 0) return undefined;
-  return Math.round((total / context) * 100);
-}
-
-export function formatContext(status: StatusView): string {
-  const percent = contextPercent(status);
-  return typeof percent === "number"
-    ? `${contextUsageBar(percent)} ${percent}%`
-    : `${contextUsageBar(undefined)} ${formatTokens(status)}`;
+  if (typeof last === "number") parts.push(`last ${last}`);
+  return parts.join("; ");
 }
 
 export function relativeTime(timestamp: number): string {

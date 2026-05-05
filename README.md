@@ -109,7 +109,7 @@ This provider refactor intentionally changes runtime configuration and the SQLit
 
 ## Telegram Usage
 
-Send `/relay` to open Relay Home. Relay Home shows the selected cwd, Codex status, waiting state, and recent errors. The detail toggle shows thread, model, approval/sandbox policy, token usage, context usage, prompt counts, and recent output timing.
+Send `/relay` to open Relay Home. Relay Home shows the selected cwd, Codex status, waiting state, and recent errors. The detail toggle shows thread, model, approval/sandbox policy, combined numeric token/context usage, prompt counts, and recent output timing.
 
 Relay Home actions:
 
