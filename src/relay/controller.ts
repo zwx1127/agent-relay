@@ -14,9 +14,7 @@ import type {
   AgentApprovalRequestEvent,
   AgentBuiltinCommand,
   AgentCollaborationMode,
-  AgentDriver,
   AgentOutputEvent,
-  AgentSendOptions,
   AgentSessionStatus,
   AgentUserInputQuestion,
   AgentUserInputRequestEvent,
@@ -30,32 +28,85 @@ import type {
 } from "../ports/messaging.ts";
 import type {
   HomeStatusMode,
-  RelayTask,
+  PendingPrompt,
   WorkspaceRecord,
 } from "./types.ts";
 import { createWorkspace, discoverWorkspaceDirectories, isRealDirectory, resolveWorkspacePath, validateWorkspaceName, workspaceDirectoryExists } from "../domain/workspace.ts";
-import { renderCodexMarkdownForTelegram, renderTelegramText, splitRenderedForTelegram, type RenderedTelegramText } from "../presentation/telegram/text.ts";
+import { renderTelegramText, type RenderedTelegramText } from "../presentation/telegram/text.ts";
 import { noopLogger, type Logger } from "../domain/logger.ts";
-import { CALLBACK_PREFIX, CODEX_PROMPT_TTL_MS, DEFAULT_IMAGE_PROMPT, LIST_PAGE_SIZE, MEDIA_GROUP_QUIET_MS, PAGE_MAX_CHARS, PAGED_OUTPUT_TTL_MS, STREAM_FLUSH_CHARS, STREAM_MAX_MS, STREAM_QUIET_MS, UI_BUTTON } from "./ui/constants.ts";
-import { codexRequestKey, isConsolePayload, shortToken, workspaceCallbackToken } from "./ui/callback-data.ts";
-import { commandArgs, commandName, parseReviewTarget } from "./ui/commands.ts";
-import { approvalKeyboard, consoleKeyboard, deleteWorkspaceConfirmKeyboard, pagedOutputKeyboard, planReadyKeyboard, resumeKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
+import { CODEX_PROMPT_TTL_MS, DEFAULT_IMAGE_PROMPT, LIST_PAGE_SIZE, MEDIA_GROUP_QUIET_MS, UI_BUTTON } from "./ui/constants.ts";
+import { codexRequestKey, shortToken, workspaceCallbackToken } from "./ui/callback-data.ts";
+import { commandArgs, parseReviewTarget } from "./ui/commands.ts";
+import { approvalKeyboard, consoleKeyboard, deleteWorkspaceConfirmKeyboard, planReadyKeyboard, resumeKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
 import { bestPhoto, formatBytes, pathContains, truncateTelegramCaption } from "./ui/media-format.ts";
 import { answeredMessage, confirmMessage, formatApprovalDecisionMessage, formatApprovalMessage, formatCodexQuestion, formatErrorMessage, formatResumeMessage, formatWorkspacesMessage } from "./ui/messages.ts";
-import { decoratePagedOutput, paginateWorkspaces } from "./ui/pagination.ts";
+import { paginateWorkspaces } from "./ui/pagination.ts";
 import { approvalResponse, asPromptRecord, isExpired, parsePromptPayload } from "./ui/prompt-state.ts";
 import { formatHomeMessage, statusViewFromParts } from "./ui/status-message.ts";
 import { code, ensureRendered, messageWithTitle, textMessage } from "./ui/text-parts.ts";
-import { reactionForTaskStatus, taskInputFromTask, transcriptTextForInput } from "./tasks/input.ts";
 import type { StatusView } from "./ui/status-view.ts";
-import { type LiveOutputState, type MediaGroupState, type RelayControllerDeps } from "./controller-types.ts";
-import type { SQLiteStore } from "../storage/sqlite-store.ts";
+import { type MediaGroupState, type RelayControllerDeps } from "./controller-types.ts";
+import { SlashCommandRouter } from "./command-router.ts";
+import { CallbackRouter, isConsoleCallbackPayload } from "./callback-router.ts";
+import { OutputStreamer } from "./output-streamer.ts";
+import { TaskCoordinator, type TaskSubmitPreference } from "./task-coordinator.ts";
 
 export class RelayController {
   private readonly logger: Logger;
+  private readonly slashCommands: SlashCommandRouter;
+  private readonly callbacks: CallbackRouter;
+  private readonly outputStreamer: OutputStreamer;
+  private readonly taskCoordinator: TaskCoordinator;
 
   constructor(private readonly deps: RelayControllerDeps) {
     this.logger = deps.logger ?? noopLogger;
+    this.outputStreamer = new OutputStreamer({
+      store: deps.store,
+      logger: this.logger,
+      getReplyToMessageId: (sessionKeyValue) => this.lastUserMessageIds.get(sessionKeyValue),
+      sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
+      editRendered: (conversationId, rendered, options) => this.editRendered(conversationId, rendered, options),
+      renderCallbackPage: (message, body, replyMarkup) => this.renderCallbackPage(message, body, replyMarkup),
+    });
+    this.taskCoordinator = new TaskCoordinator({
+      store: deps.store,
+      agent: deps.agent,
+      adapter: deps.adapter,
+      logger: this.logger,
+      currentWorkspace: (conversationId) => this.currentWorkspace(conversationId),
+      renderConsole: (conversationId) => this.renderConsole(conversationId),
+      ensureAgentStarted: (conversationId, workspace, threadId) => this.ensureAgentStarted(conversationId, workspace, threadId),
+      finalizeSessionOutput: (sessionKeyValue) => this.finalizeSessionOutput(sessionKeyValue),
+      setReplyToMessageId: (sessionKeyValue, messageId) => this.lastUserMessageIds.set(sessionKeyValue, messageId),
+      sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
+    });
+    this.slashCommands = new SlashCommandRouter({
+      review: (conversationId, text) => this.runReviewCommand(conversationId, text),
+      compact: (conversationId) => this.runBuiltinCommand(conversationId, { type: "compact" }),
+      init: (conversationId, userMessageId) => this.runInitCommand(conversationId, userMessageId),
+      newThread: (conversationId) => this.startFreshThread(conversationId),
+      resume: (conversationId, searchTerm) => this.renderResumePicker(conversationId, searchTerm),
+      fork: (conversationId) => this.forkCurrentThread(conversationId),
+      rename: (conversationId, name) => this.renameCommand(conversationId, name),
+      plan: (conversationId, prompt, userMessageId) => this.planCommand(conversationId, prompt, userMessageId),
+      stop: (conversationId) => this.cleanBackgroundTerminals(conversationId),
+    });
+    this.callbacks = new CallbackRouter({
+      isStaleConsoleCallback: (message, payload) => this.isStaleConsoleCallback(message, payload),
+      renderStaleConsole: (message) => this.renderCallbackPage(message, messageWithTitle("Stale Relay Home.", "Open the latest Relay Home."), { inline_keyboard: [[{ text: UI_BUTTON.refresh, callback_data: "ar:home" }]] }),
+      home: (message) => this.renderConsole(message.conversationId),
+      status: (message) => this.renderHomeCallback(message),
+      workspaces: (message, pageIndex) => this.renderWorkspacesCallback(message, pageIndex),
+      newWorkspace: (message) => this.promptForWorkspaceName(message.conversationId),
+      toggleStatusMode: (message) => this.toggleStatusModeCallback(message),
+      approval: (message, payload) => this.answerCodexApproval(message, payload),
+      pagedOutput: (message, payload) => this.renderPagedOutputCallback(message, payload),
+      command: (message, payload) => this.handleCommandCallback(message, payload),
+      stop: (message) => this.stopFromCallback(message),
+      confirmDeleteWorkspace: (message, token) => this.confirmDeleteWorkspaceCallback(message, token),
+      deleteWorkspace: (message, token) => this.deleteWorkspaceCallback(message, token),
+      selectWorkspace: (message, token) => this.selectWorkspaceFromToken(message, token),
+    });
   }
 
   async handle(message: InboundMessage): Promise<void> {
@@ -69,7 +120,7 @@ export class RelayController {
     }
 
     const text = message.text.trim();
-    const command = text.startsWith("/") ? commandName(text) : undefined;
+    const command = this.slashCommands.command(text);
     this.logger.info("router.message_received", {
       conversation_id: message.conversationId,
       user_id: message.userId,
@@ -106,7 +157,7 @@ export class RelayController {
         await this.answerRelayCommandPrompt(message.conversationId, message.replyToMessageId!, text);
       } else if (command === "/relay") {
         await this.renderConsole(message.conversationId, { forceNewMessage: true });
-      } else if (command && await this.handleSlashCommand(message, command, text)) {
+      } else if (command && await this.slashCommands.handle(message, command, text)) {
         return;
       } else {
         await this.submitTask(message.conversationId, text, message.messageId);
@@ -418,103 +469,7 @@ export class RelayController {
   }
 
   private async routeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
-    if (!message.data.startsWith(CALLBACK_PREFIX)) throw new Error("Unknown callback.");
-    const payload = message.data.slice(CALLBACK_PREFIX.length);
-    if (this.isStaleConsoleCallback(message, payload)) {
-      await this.renderCallbackPage(message, messageWithTitle("Stale Relay Home.", "Open the latest Relay Home."), { inline_keyboard: [[{ text: UI_BUTTON.refresh, callback_data: "ar:home" }]] });
-      return;
-    }
-
-    if (payload === "home") {
-      await this.renderConsole(message.conversationId);
-      return;
-    }
-    if (payload === "s") {
-      await this.renderHomeCallback(message);
-      return;
-    }
-    if (payload === "w") {
-      await this.renderWorkspacesCallback(message, 0);
-      return;
-    }
-    if (payload === "n") {
-      await this.promptForWorkspaceName(message.conversationId);
-      return;
-    }
-    if (payload === "status") {
-      await this.toggleStatusModeCallback(message);
-      return;
-    }
-    if (payload.startsWith("a:")) {
-      await this.answerCodexApproval(message, payload);
-      return;
-    }
-    if (payload.startsWith("p:")) {
-      await this.renderPagedOutputCallback(message, payload);
-      return;
-    }
-    if (payload.startsWith("cmd:")) {
-      await this.handleCommandCallback(message, payload);
-      return;
-    }
-    if (payload.startsWith("wl:")) {
-      await this.renderWorkspacesCallback(message, Number(payload.slice("wl:".length)));
-      return;
-    }
-    if (payload === "stop") {
-      await this.stopFromCallback(message);
-      return;
-    }
-    if (payload.startsWith("wd?:")) {
-      await this.confirmDeleteWorkspaceCallback(message, payload.slice("wd?:".length));
-      return;
-    }
-    if (payload.startsWith("wd!:")) {
-      await this.deleteWorkspaceCallback(message, payload.slice("wd!:".length));
-      return;
-    }
-    if (payload.startsWith("uh:")) {
-      const token = payload.slice("uh:".length);
-      await this.selectWorkspaceFromToken(message, token);
-      return;
-    }
-
-    throw new Error("Unknown callback.");
-  }
-
-  private async handleSlashCommand(message: Extract<InboundMessage, { kind: "message" }>, command: string, text: string): Promise<boolean> {
-    switch (command) {
-      case "/review":
-        await this.runReviewCommand(message.conversationId, text);
-        return true;
-      case "/compact":
-        await this.runBuiltinCommand(message.conversationId, { type: "compact" });
-        return true;
-      case "/init":
-        await this.runInitCommand(message.conversationId, message.messageId);
-        return true;
-      case "/new":
-      case "/clear":
-        await this.startFreshThread(message.conversationId);
-        return true;
-      case "/resume":
-        await this.renderResumePicker(message.conversationId, commandArgs(text));
-        return true;
-      case "/fork":
-        await this.forkCurrentThread(message.conversationId);
-        return true;
-      case "/rename":
-        await this.renameCommand(message.conversationId, commandArgs(text));
-        return true;
-      case "/plan":
-        await this.planCommand(message.conversationId, commandArgs(text), message.messageId);
-        return true;
-      case "/stop":
-        await this.cleanBackgroundTerminals(message.conversationId);
-        return true;
-      default:
-        return false;
-    }
+    await this.callbacks.route(message);
   }
 
   private async runReviewCommand(conversationId: ConversationId, text: string): Promise<void> {
@@ -687,7 +642,7 @@ export class RelayController {
 
   private async resumeFromCallback(
     message: Extract<InboundMessage, { kind: "callback_query" }>,
-    pending: NonNullable<ReturnType<SQLiteStore["getPendingPrompt"]>>,
+    pending: PendingPrompt,
     data: Record<string, unknown>,
     rawIndex: string | undefined,
   ): Promise<void> {
@@ -710,7 +665,7 @@ export class RelayController {
 
   private async planFromCallback(
     message: Extract<InboundMessage, { kind: "callback_query" }>,
-    pending: NonNullable<ReturnType<SQLiteStore["getPendingPrompt"]>>,
+    pending: PendingPrompt,
     _data: Record<string, unknown>,
     action: string | undefined,
   ): Promise<void> {
@@ -929,102 +884,12 @@ export class RelayController {
     });
   }
 
-  private async submitTask(conversationId: ConversationId, text: string, userMessageId?: MessageId, preference: "auto" | "immediate" | "queue" = "auto", input?: AgentTaskInput): Promise<void> {
-    if (!text) return;
-    const taskInput = input ?? { text };
-    const workspace = this.currentWorkspace(conversationId);
-    if (!workspace) {
-      await this.renderConsole(conversationId);
-      return;
-    }
-    if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
-    const status = await this.ensureAgentStarted(conversationId, workspace);
-    if (await this.sendWaitingPromptNotice(conversationId, status)) return;
-    const busy = Boolean(status.activeTurnId);
-    if (preference === "auto" && busy) {
-      await this.sendToAgent(conversationId, workspace, taskInput, userMessageId, this.deps.store.activeTask(conversationId, workspace.name));
-      return;
-    }
-    const shouldQueue = preference === "queue";
-    const task = this.deps.store.createTask({
-      conversationId,
-      workspaceName: workspace.name,
-      text,
-      input: input && input.images?.length ? input : undefined,
-      status: shouldQueue ? "queued" : "running",
-      userMessageId,
-    });
-    if (shouldQueue) {
-      await this.syncTaskReaction(task.id);
-      return;
-    }
-    await this.runTask(workspace, task);
-  }
-
-  private async runTask(workspace: WorkspaceRecord, task: RelayTask): Promise<void> {
-    this.deps.store.updateTask(task.id, { status: "running" });
-    await this.syncTaskReaction(task.id);
-    await this.sendToAgent(task.conversationId, workspace, taskInputFromTask(task), task.userMessageId, task);
-  }
-
-  private async sendToAgent(conversationId: ConversationId, workspace: WorkspaceRecord, input: AgentTaskInput, userMessageId?: MessageId, task?: RelayTask): Promise<void> {
-    const key = sessionKey(conversationId, workspace.name);
-    await this.finalizeSessionOutput(key);
-    if (userMessageId) this.lastUserMessageIds.set(key, userMessageId);
-    await this.deps.adapter.sendChatAction?.(conversationId, "typing").catch((error) => {
-      this.logger.debug("router.chat_action_failed", {
-        conversation_id: conversationId,
-        error: error instanceof Error ? error : new Error(String(error)),
-      });
-    });
-    this.logger.info("router.user_input_forwarded", {
-      conversation_id: conversationId,
-      workspace: workspace.name,
-      session_key: key,
-      text_len: input.text.length,
-      image_count: input.images?.length ?? 0,
-    });
-    this.logger.debug("router.user_input_text", {
-      conversation_id: conversationId,
-      workspace: workspace.name,
-      session_key: key,
-      message_text: input.text,
-    });
-    this.deps.store.appendTranscript({
-      conversationId,
-      workspaceName: workspace.name,
-      role: "user",
-      text: transcriptTextForInput(input),
-      createdAt: Date.now(),
-    });
-    let result: Awaited<ReturnType<AgentDriver["send"]>>;
-    try {
-      const mode = this.deps.store.getCollaborationMode(key);
-      const sendOptions: AgentSendOptions = {
-        ...(mode === "plan" ? { collaborationMode: "plan" as const } : {}),
-        ...(input.images?.length ? { images: input.images } : {}),
-      };
-      result = await this.deps.agent.send(key, input.text, Object.keys(sendOptions).length > 0 ? sendOptions : undefined);
-    } catch (error) {
-      if (task) {
-        this.deps.store.updateTask(task.id, { status: "failed" });
-        await this.syncTaskReaction(task.id);
-      }
-      throw error;
-    }
-    if (task && result.turnId) this.deps.store.updateTask(task.id, { turnId: result.turnId, status: "running" });
+  private async submitTask(conversationId: ConversationId, text: string, userMessageId?: MessageId, preference: TaskSubmitPreference = "auto", input?: AgentTaskInput): Promise<void> {
+    await this.taskCoordinator.submit(conversationId, text, userMessageId, preference, input);
   }
 
   private async sendWaitingPromptNotice(conversationId: ConversationId, status: AgentSessionStatus): Promise<boolean> {
-    if (status.waitingForUserInput) {
-      await this.sendRendered(conversationId, messageWithTitle("Codex is waiting for your answer.", "Open the latest question card or reply to it. New prompts are paused while the active turn is blocked."));
-      return true;
-    }
-    if (status.waitingForApproval) {
-      await this.sendRendered(conversationId, messageWithTitle("Codex is waiting for approval.", "Use the approval buttons before sending another instruction."));
-      return true;
-    }
-    return false;
+    return await this.taskCoordinator.sendWaitingPromptNotice(conversationId, status);
   }
 
   private async ensureAgentStarted(conversationId: ConversationId, workspace: WorkspaceRecord, threadId?: string): Promise<AgentSessionStatus> {
@@ -1047,30 +912,11 @@ export class RelayController {
   }
 
   private async markActiveTask(sessionKeyValue: string, status: "blocked" | "running"): Promise<void> {
-    const parsed = parseSessionKey(sessionKeyValue);
-    if (!parsed) return;
-    const task = this.deps.store.activeTask(parsed.conversationId, parsed.workspaceName);
-    if (!task) return;
-    this.deps.store.updateTask(task.id, { status });
-    await this.syncTaskReaction(task.id);
+    await this.taskCoordinator.markActive(sessionKeyValue, status);
   }
 
   private async completeTaskAndDispatchNext(sessionKeyValue: string, turnId: string | undefined): Promise<void> {
-    const parsed = parseSessionKey(sessionKeyValue);
-    if (!parsed) return;
-    const active = this.deps.store.activeTask(parsed.conversationId, parsed.workspaceName);
-    if (active && (!turnId || !active.turnId || active.turnId === turnId)) {
-      this.deps.store.updateTask(active.id, { status: "done" });
-      await this.syncTaskReaction(active.id);
-    }
-    const workspace = this.currentWorkspace(parsed.conversationId);
-    if (!workspace || workspace.name !== parsed.workspaceName) return;
-    const status = this.deps.agent.getStatus(sessionKeyValue);
-    if (status?.waitingForApproval || status?.waitingForUserInput || status?.activeTurnId) return;
-    const next = this.deps.store.nextQueuedTask(parsed.conversationId, parsed.workspaceName);
-    if (next) {
-      await this.runTask(workspace, next);
-    }
+    await this.taskCoordinator.completeAndDispatchNext(sessionKeyValue, turnId);
   }
 
   private async sendPlanReadyPrompt(sessionKeyValue: string): Promise<void> {
@@ -1093,25 +939,8 @@ export class RelayController {
     });
   }
 
-  private async syncTaskReaction(taskId: number): Promise<void> {
-    const task = this.deps.store.getTask(taskId);
-    if (!task?.userMessageId) return;
-    if (!this.deps.adapter.setMessageReaction) return;
-    try {
-      await this.deps.adapter.setMessageReaction(task.conversationId, task.userMessageId, reactionForTaskStatus(task.status));
-    } catch (error) {
-      this.logger.warn("router.task_reaction_failed", {
-        conversation_id: task.conversationId,
-        task_id: task.id,
-        message_id: task.userMessageId,
-        status: task.status,
-        error: error instanceof Error ? error : new Error(String(error)),
-      });
-    }
-  }
-
   private isStaleConsoleCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): boolean {
-    if (!message.messageId || !isConsolePayload(payload)) return false;
+    if (!message.messageId || !isConsoleCallbackPayload(payload)) return false;
     const latest = this.deps.store.getConsoleMessageId(message.conversationId);
     return Boolean(latest && String(latest) !== String(message.messageId));
   }
@@ -1178,12 +1007,9 @@ export class RelayController {
     );
   }
 
-  private readonly liveOutput = new Map<string, LiveOutputState>();
-
   private readonly mediaGroups = new Map<string, MediaGroupState>();
 
   private readonly lastUserMessageIds = new Map<string, MessageId>();
-  private nextOutputSegmentId = 1;
 
   private readonly codexRequests = new Map<string, {
     sessionKey: string;
@@ -1272,7 +1098,7 @@ export class RelayController {
 
   private async sendNextCodexQuestion(
     conversationId: ConversationId,
-    pending: NonNullable<ReturnType<SQLiteStore["getPendingPrompt"]>>,
+    pending: PendingPrompt,
     data: Record<string, unknown>,
   ): Promise<boolean> {
     if (!pending.sessionKey) return false;
@@ -1321,7 +1147,7 @@ export class RelayController {
   }
 
   private async recordCodexAnswer(
-    pending: NonNullable<ReturnType<SQLiteStore["getPendingPrompt"]>>,
+    pending: PendingPrompt,
     data: Record<string, unknown>,
     answer: string,
   ): Promise<{ sessionKey: string; requestId: string | number; result: unknown } | "expired" | undefined> {
@@ -1381,221 +1207,14 @@ export class RelayController {
   }
 
   private async bufferAgentOutput(sessionKeyValue: string, conversationId: ConversationId, chunk: string, turnId?: string): Promise<void> {
-    let state = this.liveOutput.get(sessionKeyValue);
-    if (state?.turnId && turnId && state.turnId !== turnId) {
-      await this.finalizeSessionOutput(sessionKeyValue);
-      state = undefined;
-    }
-    if (!state) {
-      state = { conversationId, text: "", startedAt: Date.now(), segmentId: this.nextOutputSegmentId++, turnId, replyToMessageId: this.lastUserMessageIds.get(sessionKeyValue) };
-      this.liveOutput.set(sessionKeyValue, state);
-    } else if (!state.turnId && turnId) {
-      state.turnId = turnId;
-    }
-    const outputState = state;
-
-    outputState.text += chunk;
-    this.logger.debug("router.agent_output_buffered", {
-      conversation_id: conversationId,
-      session_key: sessionKeyValue,
-      chunk_len: chunk.length,
-      buffered_len: outputState.text.length,
-    });
-
-    if (outputState.timer) clearTimeout(outputState.timer);
-    const elapsed = Date.now() - outputState.startedAt;
-    const delay = outputState.text.length >= STREAM_FLUSH_CHARS || elapsed >= STREAM_MAX_MS ? 0 : STREAM_QUIET_MS;
-    const segmentId = outputState.segmentId;
-    outputState.timer = setTimeout(() => {
-      void this.flushSessionOutput(sessionKeyValue, segmentId).catch((error) => {
-        this.logger.error("router.agent_output_send_failed", {
-          conversation_id: conversationId,
-          session_key: sessionKeyValue,
-          text_len: state?.text.length ?? 0,
-          error: error instanceof Error ? error : new Error(String(error)),
-        });
-      });
-    }, delay);
+    await this.outputStreamer.buffer(sessionKeyValue, conversationId, chunk, turnId);
   }
 
   private async finalizeSessionOutput(sessionKeyValue: string): Promise<void> {
-    const state = this.liveOutput.get(sessionKeyValue);
-    if (state?.timer) {
-      clearTimeout(state.timer);
-      state.timer = undefined;
-    }
-    if (state && (state.text !== state.lastFlushedText || state.pageToken)) {
-      await this.flushSessionOutput(sessionKeyValue, undefined, true);
-    }
-    const current = this.liveOutput.get(sessionKeyValue);
-    if (current?.timer) clearTimeout(current.timer);
-    this.liveOutput.delete(sessionKeyValue);
-    if (state?.timer) clearTimeout(state.timer);
-  }
-
-  private markFlushed(sessionKeyValue: string, text: string): void {
-    const state = this.liveOutput.get(sessionKeyValue);
-    if (state) state.lastFlushedText = text;
-  }
-
-  private async flushSessionOutput(sessionKeyValue: string, expectedSegmentId?: number, final = false): Promise<void> {
-    let state = this.liveOutput.get(sessionKeyValue);
-    if (!state || state.text.length === 0) return;
-    if (expectedSegmentId !== undefined && state.segmentId !== expectedSegmentId) return;
-
-    if (state.flushPromise) {
-      await state.flushPromise;
-      state = this.liveOutput.get(sessionKeyValue);
-      if (!state || state.text.length === 0) return;
-      if (expectedSegmentId !== undefined && state.segmentId !== expectedSegmentId) return;
-      if (state.text === state.lastFlushedText && !(final && state.pageToken && !state.finalPageRendered)) return;
-      await this.flushSessionOutput(sessionKeyValue, expectedSegmentId, final);
-      return;
-    }
-
-    if (state.text === state.lastFlushedText && !(final && state.pageToken && !state.finalPageRendered)) return;
-    const flushPromise = this.flushSessionOutputOnce(sessionKeyValue, state, final);
-    state.flushPromise = flushPromise;
-    try {
-      await flushPromise;
-    } finally {
-      const current = this.liveOutput.get(sessionKeyValue);
-      if (current?.flushPromise === flushPromise) current.flushPromise = undefined;
-    }
-  }
-
-  private async flushSessionOutputOnce(
-    sessionKeyValue: string,
-    state: LiveOutputState,
-    final: boolean,
-  ): Promise<void> {
-    if (state?.timer) clearTimeout(state.timer);
-    state.timer = undefined;
-
-    const snapshotText = state.text;
-    const rendered = renderCodexMarkdownForTelegram(snapshotText);
-    const chunks = splitRenderedForTelegram(rendered, PAGE_MAX_CHARS);
-    this.logger.debug("router.agent_output_flushed", {
-      conversation_id: state.conversationId,
-      session_key: sessionKeyValue,
-      text_len: snapshotText.length,
-      chunks: chunks.length,
-    });
-
-    if (chunks.length === 1 && rendered.text.length < STREAM_FLUSH_CHARS) {
-      const chunk = chunks[0]!;
-      if (state.messageId) {
-        try {
-          await this.editRendered(state.conversationId, chunk, {
-            messageId: state.messageId,
-            disableWebPagePreview: true,
-          });
-          this.markFlushed(sessionKeyValue, snapshotText);
-          state.finalPageRendered = false;
-          return;
-        } catch (error) {
-          this.logger.warn("router.agent_output_edit_fallback", {
-            conversation_id: state.conversationId,
-            message_id: state.messageId,
-            error: error instanceof Error ? error : new Error(String(error)),
-          });
-        }
-      }
-      const result = await this.sendRendered(state.conversationId, chunk, {
-        replyToMessageId: state.replyToMessageId,
-        disableWebPagePreview: true,
-      });
-      state.messageId = result.messageId;
-      this.markFlushed(sessionKeyValue, snapshotText);
-      state.finalPageRendered = false;
-      return;
-    }
-
-    if (chunks.length > 1) {
-      const token = state.pageToken ?? shortToken();
-      state.pageToken = token;
-      this.deps.store.setPagedOutput({
-        token,
-        conversationId: state.conversationId,
-        sessionKey: sessionKeyValue,
-        text: snapshotText,
-        createdAt: state.startedAt,
-        expiresAt: Date.now() + PAGED_OUTPUT_TTL_MS,
-      });
-      const pageIndex = final ? 0 : chunks.length - 1;
-      const page = decoratePagedOutput(chunks[pageIndex]!, pageIndex, chunks.length);
-      const replyMarkup = pagedOutputKeyboard(token, pageIndex, chunks.length);
-      if (state.messageId) {
-        try {
-          await this.editRendered(state.conversationId, page, {
-            messageId: state.messageId,
-            replyMarkup,
-            disableWebPagePreview: true,
-          });
-          this.markFlushed(sessionKeyValue, snapshotText);
-          state.finalPageRendered = final;
-          return;
-        } catch (error) {
-          this.logger.warn("router.agent_output_edit_fallback", {
-            conversation_id: state.conversationId,
-            message_id: state.messageId,
-            error: error instanceof Error ? error : new Error(String(error)),
-          });
-        }
-      }
-      const result = await this.sendRendered(state.conversationId, page, {
-        replyToMessageId: state.replyToMessageId,
-        replyMarkup,
-        disableWebPagePreview: true,
-      });
-      state.messageId = result.messageId;
-      this.markFlushed(sessionKeyValue, snapshotText);
-      state.finalPageRendered = final;
-      return;
-    }
+    await this.outputStreamer.finalize(sessionKeyValue);
   }
 
   private async renderPagedOutputCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
-    const [, token, rawPage] = payload.split(":");
-    const pageIndex = Number(rawPage);
-    const output = token ? this.deps.store.getPagedOutput(token) : undefined;
-    if (!output || String(output.conversationId) !== String(message.conversationId) || output.expiresAt < Date.now()) {
-      if (token) this.deps.store.deletePagedOutput(token);
-      await this.renderCallbackPage(message, messageWithTitle("Page expired."), { inline_keyboard: [] });
-      return;
-    }
-    const pageToken = output.token;
-    const rendered = renderCodexMarkdownForTelegram(output.text);
-    const pages = splitRenderedForTelegram(rendered, PAGE_MAX_CHARS);
-    if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= pages.length) {
-      await this.renderCallbackPage(message, messageWithTitle("Page unavailable."), pagedOutputKeyboard(pageToken, pages.length - 1, pages.length));
-      return;
-    }
-    const page = decoratePagedOutput(pages[pageIndex]!, pageIndex, pages.length);
-    const replyMarkup = pagedOutputKeyboard(pageToken, pageIndex, pages.length);
-    if (!message.messageId) {
-      await this.sendRendered(message.conversationId, page, {
-        replyMarkup,
-        disableWebPagePreview: true,
-      });
-      return;
-    }
-    try {
-      await this.editRendered(message.conversationId, page, {
-        messageId: message.messageId,
-        replyMarkup,
-        disableWebPagePreview: true,
-      });
-    } catch (error) {
-      this.logger.warn("router.paged_output_edit_fallback", {
-        conversation_id: message.conversationId,
-        message_id: message.messageId,
-        error: error instanceof Error ? error : new Error(String(error)),
-      });
-      await this.sendRendered(message.conversationId, page, {
-        replyMarkup,
-        disableWebPagePreview: true,
-      });
-    }
+    await this.outputStreamer.renderPagedOutputCallback(message, payload);
   }
 }

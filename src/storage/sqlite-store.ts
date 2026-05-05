@@ -6,8 +6,9 @@ import type { ConversationId, MessageId } from "../domain/ids.ts";
 import type { AgentCollaborationMode, AgentTaskInput } from "../ports/agent.ts";
 import type { ConversationBinding, HomeStatusMode, PendingPrompt, RelayTask, TaskStatus, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "../relay/types.ts";
 import { rowToPagedOutput, rowToPendingPrompt, rowToTask, rowToWorkspace, type AgentSessionRow, type BindingRow, type ChatUiStateRow, type PagedOutput, type PagedOutputRow, type PendingPromptRow, type TaskRow, type TranscriptRow, type WorkspaceRow } from "./sqlite-rows.ts";
+import type { RelayStore } from "./store.ts";
 
-export class SQLiteStore {
+export class SQLiteStore implements RelayStore {
   readonly db: Database;
 
   constructor(path: string, private readonly logger: Logger = noopLogger) {
@@ -25,6 +26,13 @@ export class SQLiteStore {
   }
 
   migrate(): void {
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at INTEGER NOT NULL
+      )
+    `);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS workspaces (
         name TEXT PRIMARY KEY,
@@ -107,6 +115,7 @@ export class SQLiteStore {
     this.addColumnIfMissing("chat_ui_state", "home_status_mode", "TEXT NOT NULL DEFAULT 'compact'");
     this.addColumnIfMissing("tasks", "status_message_id", "TEXT");
     this.addColumnIfMissing("tasks", "input_json", "TEXT");
+    this.recordMigration(1, "baseline");
     this.logger.debug("store.migrated");
   }
 
@@ -159,6 +168,14 @@ export class SQLiteStore {
     const rows = this.db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
     if (rows.some((row) => row.name === column)) return;
     this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
+  private recordMigration(version: number, name: string): void {
+    this.db.query(`
+      INSERT INTO schema_migrations (version, name, applied_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(version) DO NOTHING
+    `).run(version, name, Date.now());
   }
 
   markSessionStarted(sessionKey: string, conversationId: ConversationId, workspaceName: string, startedAt = Date.now(), threadId?: string): void {

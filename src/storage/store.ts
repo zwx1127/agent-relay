@@ -1,0 +1,53 @@
+import type { ConversationId, MessageId } from "../domain/ids.ts";
+import type { AgentCollaborationMode, AgentTaskInput } from "../ports/agent.ts";
+import type { ConversationBinding, HomeStatusMode, PendingPrompt, RelayTask, TaskStatus, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "../relay/types.ts";
+import type { AgentSessionRow, PagedOutput } from "./sqlite-rows.ts";
+
+export interface RelayStore {
+  close(): void;
+  migrate(): void;
+  upsertWorkspace(record: WorkspaceRecord): void;
+  listWorkspaces(): WorkspaceRecord[];
+  getWorkspace(name: string): WorkspaceRecord | undefined;
+  deleteWorkspace(name: string): void;
+  bindConversation(conversationId: ConversationId, workspaceName: string, updatedAt?: number): void;
+  getBinding(conversationId: ConversationId): ConversationBinding | undefined;
+  clearBinding(conversationId: ConversationId): void;
+  clearBindingsForWorkspace(workspaceName: string): void;
+  markSessionStarted(sessionKey: string, conversationId: ConversationId, workspaceName: string, startedAt?: number, threadId?: string): void;
+  markSessionStopped(sessionKey: string, stoppedAt?: number): void;
+  clearSessionThreadId(sessionKey: string): void;
+  setSessionThreadId(sessionKey: string, threadId: string): void;
+  getCollaborationMode(sessionKey: string): AgentCollaborationMode;
+  setCollaborationMode(sessionKey: string, mode: AgentCollaborationMode): void;
+  getSession(sessionKey: string): AgentSessionRow | undefined;
+  listRunningSessions(): AgentSessionRow[];
+  appendTranscript(event: TranscriptEvent): void;
+  latestTranscriptEvent(conversationId: ConversationId, workspaceName: string, role: TranscriptRole): TranscriptEvent | undefined;
+  setPendingPrompt(prompt: PendingPrompt): void;
+  getPendingPrompt(conversationId: ConversationId, promptMessageId: MessageId): PendingPrompt | undefined;
+  deletePendingPrompt(conversationId: ConversationId, promptMessageId: MessageId): void;
+  setPagedOutput(output: PagedOutput): void;
+  getPagedOutput(token: string): PagedOutput | undefined;
+  deletePagedOutput(token: string): void;
+  prunePagedOutputs(now?: number): void;
+  getConsoleMessageId(conversationId: ConversationId): MessageId | undefined;
+  setConsoleMessageId(conversationId: ConversationId, messageId: MessageId): void;
+  getHomeStatusMode(conversationId: ConversationId): HomeStatusMode;
+  setHomeStatusMode(conversationId: ConversationId, mode: HomeStatusMode): void;
+  createTask(task: {
+    conversationId: ConversationId;
+    workspaceName: string;
+    text: string;
+    input?: AgentTaskInput;
+    status: TaskStatus;
+    createdAt?: number;
+    userMessageId?: MessageId;
+  }): RelayTask;
+  getTask(id: number): RelayTask | undefined;
+  listTasks(conversationId: ConversationId, workspaceName: string, statuses?: TaskStatus[], limit?: number): RelayTask[];
+  nextQueuedTask(conversationId: ConversationId, workspaceName: string): RelayTask | undefined;
+  activeTask(conversationId: ConversationId, workspaceName: string): RelayTask | undefined;
+  updateTask(id: number, updates: { status?: TaskStatus; turnId?: string | null; statusMessageId?: MessageId | null }): void;
+  countTasks(conversationId: ConversationId, workspaceName: string, statuses: TaskStatus[]): number;
+}

@@ -78,7 +78,14 @@ When both `CODEX_DEVELOPER_INSTRUCTIONS_FILE` and `CODEX_DEVELOPER_INSTRUCTIONS`
 
 ## Provider Architecture
 
-The relay is organized by domain. The relay controller depends on `MessagingAdapter` and `AgentDriver` ports rather than concrete Telegram or Codex classes. `src/providers/messaging/factory.ts` and `src/providers/agents/factory.ts` are the runtime provider factories. Adding Feishu/Lark or Claude Code should be done by implementing those ports, registering the provider in the factory, and adding provider-specific config validation.
+The relay is organized by domain. The relay controller depends on `MessagingAdapter`, `AgentDriver`, and `RelayStore` ports rather than concrete Telegram, Codex, or SQLite classes. `src/providers/messaging/factory.ts` and `src/providers/agents/factory.ts` are the runtime provider factories. Adding Feishu/Lark or Claude Code should be done by implementing those ports, registering the provider in the factory, and adding provider-specific config validation.
+
+The relay controller keeps the user-facing workflow together, while dedicated collaborators handle high-churn routing and streaming behavior:
+
+- `SlashCommandRouter` dispatches relay-owned slash commands and leaves unsupported commands available for the agent.
+- `CallbackRouter` dispatches inline keyboard callback payloads.
+- `TaskCoordinator` owns prompt queue state, task reactions, and sending work to the agent.
+- `OutputStreamer` owns live assistant output buffering, Telegram message edits, and paged output callbacks.
 
 Conversation, user, and message IDs are treated as provider IDs and persisted as strings. This is a breaking schema change from older SQLite databases that used Telegram numeric `chat_id`; delete or recreate `.data/agent-relay.sqlite` when upgrading from the pre-provider schema.
 
@@ -86,6 +93,7 @@ Extension points:
 
 - Messaging providers implement `MessagingAdapter` under `src/providers/messaging/<provider>/` and are selected from `src/providers/messaging/factory.ts`.
 - Agent providers implement `AgentDriver` under `src/providers/agents/<provider>/` and are selected from `src/providers/agents/factory.ts`.
+- Persistence implementations implement `RelayStore`; SQLite is the default implementation.
 - Agent-visible relay features live under `src/relay/capabilities/`, register `CapabilityDefinition` entries through `CapabilityRegistry`, and expose helper subcommands from `bin/agent-relay-helper`.
 
 ## Breaking Changes
@@ -168,7 +176,7 @@ The helper calls `POST /v1/capabilities/send_image` with `{ path, cwd, sessionKe
 - Deleting a workspace physically removes that directory under `WORKSPACE_ROOT` and clears chat bindings that pointed at it.
 - Telegram photos and Codex-generated images are stored under `.agent-relay/media` inside the selected workspace. The relay writes `.agent-relay/.gitignore` with `*` so media does not appear in the workspace's Git status.
 - The relay starts one agent provider process and creates or resumes one agent thread per `conversation + cwd`.
-- SQLite stores workspaces, chat bindings, Codex thread IDs, Plan mode state, Relay Home UI state, prompt/task state, transcript events, approval metadata, and paged assistant output.
+- SQLite stores workspaces, chat bindings, Codex thread IDs, Plan mode state, Relay Home UI state, prompt/task state, transcript events, approval metadata, paged assistant output, and schema migration metadata.
 - Runtime logs go to stdout. `debug` logs include raw Telegram messages, Codex input text, and Codex output chunks.
 
 ## Project Structure
@@ -180,11 +188,11 @@ src/
   domain/        Provider-neutral IDs, session keys, logger, and workspace safety
   ports/         Provider-neutral AgentDriver and MessagingAdapter contracts
   providers/     Codex agent provider, Telegram messaging provider, and provider factories
-  relay/         Controller, capabilities, control API, media handling, tasks, and relay UI state
-  storage/       SQLite store, row types, schema migrations, and persistence mappers
+  relay/         Controller, command/callback routers, task coordination, output streaming, capabilities, media, and relay UI state
+  storage/       RelayStore port, SQLite implementation, row types, schema migrations, and persistence mappers
   presentation/  Telegram text entities, Markdown rendering, UI text, and splitting
 test/
-  unit/          Focused unit tests for config, logger, workspace, and rendering
+  unit/          Focused unit tests for config, logger, workspace, routing, and rendering
   integration/   Router, adapter, store, control API, app-server protocol, and smoke tests
   support/       Shared fake adapter/agent test utilities
 ```
@@ -201,4 +209,10 @@ Run tests:
 
 ```bash
 bun test
+```
+
+Run the full local check:
+
+```bash
+bun run check
 ```

@@ -1,0 +1,250 @@
+import type { ConversationId, MessageId } from "../domain/ids.ts";
+import type { Logger } from "../domain/logger.ts";
+import type { InlineKeyboardMarkup, InboundMessage, SendMessageOptions, EditMessageTextOptions } from "../ports/messaging.ts";
+import type { RelayStore } from "../storage/store.ts";
+import { renderCodexMarkdownForTelegram, splitRenderedForTelegram, type RenderedTelegramText } from "../presentation/telegram/text.ts";
+import { PAGE_MAX_CHARS, PAGED_OUTPUT_TTL_MS, STREAM_FLUSH_CHARS, STREAM_MAX_MS, STREAM_QUIET_MS } from "./ui/constants.ts";
+import { shortToken } from "./ui/callback-data.ts";
+import { pagedOutputKeyboard } from "./ui/keyboards.ts";
+import { decoratePagedOutput } from "./ui/pagination.ts";
+import { messageWithTitle } from "./ui/text-parts.ts";
+import type { LiveOutputState } from "./controller-types.ts";
+
+type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
+
+export interface OutputStreamerDeps {
+  store: Pick<RelayStore, "setPagedOutput" | "getPagedOutput" | "deletePagedOutput">;
+  logger: Logger;
+  getReplyToMessageId(sessionKey: string): MessageId | undefined;
+  sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
+  editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: Omit<EditMessageTextOptions, "entities" | "parseMode">): Promise<void>;
+  renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<void>;
+}
+
+export class OutputStreamer {
+  private readonly liveOutput = new Map<string, LiveOutputState>();
+  private nextOutputSegmentId = 1;
+
+  constructor(private readonly deps: OutputStreamerDeps) {}
+
+  async buffer(sessionKeyValue: string, conversationId: ConversationId, chunk: string, turnId?: string): Promise<void> {
+    let state = this.liveOutput.get(sessionKeyValue);
+    if (state?.turnId && turnId && state.turnId !== turnId) {
+      await this.finalize(sessionKeyValue);
+      state = undefined;
+    }
+    if (!state) {
+      state = {
+        conversationId,
+        text: "",
+        startedAt: Date.now(),
+        segmentId: this.nextOutputSegmentId++,
+        turnId,
+        replyToMessageId: this.deps.getReplyToMessageId(sessionKeyValue),
+      };
+      this.liveOutput.set(sessionKeyValue, state);
+    } else if (!state.turnId && turnId) {
+      state.turnId = turnId;
+    }
+    const outputState = state;
+
+    outputState.text += chunk;
+    this.deps.logger.debug("router.agent_output_buffered", {
+      conversation_id: conversationId,
+      session_key: sessionKeyValue,
+      chunk_len: chunk.length,
+      buffered_len: outputState.text.length,
+    });
+
+    if (outputState.timer) clearTimeout(outputState.timer);
+    const elapsed = Date.now() - outputState.startedAt;
+    const delay = outputState.text.length >= STREAM_FLUSH_CHARS || elapsed >= STREAM_MAX_MS ? 0 : STREAM_QUIET_MS;
+    const segmentId = outputState.segmentId;
+    outputState.timer = setTimeout(() => {
+      void this.flush(sessionKeyValue, segmentId).catch((error) => {
+        this.deps.logger.error("router.agent_output_send_failed", {
+          conversation_id: conversationId,
+          session_key: sessionKeyValue,
+          text_len: state?.text.length ?? 0,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      });
+    }, delay);
+  }
+
+  async finalize(sessionKeyValue: string): Promise<void> {
+    const state = this.liveOutput.get(sessionKeyValue);
+    if (state?.timer) {
+      clearTimeout(state.timer);
+      state.timer = undefined;
+    }
+    if (state && (state.text !== state.lastFlushedText || state.pageToken)) {
+      await this.flush(sessionKeyValue, undefined, true);
+    }
+    const current = this.liveOutput.get(sessionKeyValue);
+    if (current?.timer) clearTimeout(current.timer);
+    this.liveOutput.delete(sessionKeyValue);
+    if (state?.timer) clearTimeout(state.timer);
+  }
+
+  private markFlushed(sessionKeyValue: string, text: string): void {
+    const state = this.liveOutput.get(sessionKeyValue);
+    if (state) state.lastFlushedText = text;
+  }
+
+  private async flush(sessionKeyValue: string, expectedSegmentId?: number, final = false): Promise<void> {
+    let state = this.liveOutput.get(sessionKeyValue);
+    if (!state || state.text.length === 0) return;
+    if (expectedSegmentId !== undefined && state.segmentId !== expectedSegmentId) return;
+
+    if (state.flushPromise) {
+      await state.flushPromise;
+      state = this.liveOutput.get(sessionKeyValue);
+      if (!state || state.text.length === 0) return;
+      if (expectedSegmentId !== undefined && state.segmentId !== expectedSegmentId) return;
+      if (state.text === state.lastFlushedText && !(final && state.pageToken && !state.finalPageRendered)) return;
+      await this.flush(sessionKeyValue, expectedSegmentId, final);
+      return;
+    }
+
+    if (state.text === state.lastFlushedText && !(final && state.pageToken && !state.finalPageRendered)) return;
+    const flushPromise = this.flushOnce(sessionKeyValue, state, final);
+    state.flushPromise = flushPromise;
+    try {
+      await flushPromise;
+    } finally {
+      const current = this.liveOutput.get(sessionKeyValue);
+      if (current?.flushPromise === flushPromise) current.flushPromise = undefined;
+    }
+  }
+
+  private async flushOnce(sessionKeyValue: string, state: LiveOutputState, final: boolean): Promise<void> {
+    if (state?.timer) clearTimeout(state.timer);
+    state.timer = undefined;
+
+    const snapshotText = state.text;
+    const rendered = renderCodexMarkdownForTelegram(snapshotText);
+    const chunks = splitRenderedForTelegram(rendered, PAGE_MAX_CHARS);
+    this.deps.logger.debug("router.agent_output_flushed", {
+      conversation_id: state.conversationId,
+      session_key: sessionKeyValue,
+      text_len: snapshotText.length,
+      chunks: chunks.length,
+    });
+
+    if (chunks.length === 1 && rendered.text.length < STREAM_FLUSH_CHARS) {
+      const chunk = chunks[0]!;
+      if (state.messageId) {
+        try {
+          await this.deps.editRendered(state.conversationId, chunk, {
+            messageId: state.messageId,
+            disableWebPagePreview: true,
+          });
+          this.markFlushed(sessionKeyValue, snapshotText);
+          state.finalPageRendered = false;
+          return;
+        } catch (error) {
+          this.deps.logger.warn("router.agent_output_edit_fallback", {
+            conversation_id: state.conversationId,
+            message_id: state.messageId,
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+        }
+      }
+      const result = await this.deps.sendRendered(state.conversationId, chunk, {
+        replyToMessageId: state.replyToMessageId,
+        disableWebPagePreview: true,
+      });
+      state.messageId = result.messageId;
+      this.markFlushed(sessionKeyValue, snapshotText);
+      state.finalPageRendered = false;
+      return;
+    }
+
+    if (chunks.length > 1) {
+      const token = state.pageToken ?? shortToken();
+      state.pageToken = token;
+      this.deps.store.setPagedOutput({
+        token,
+        conversationId: state.conversationId,
+        sessionKey: sessionKeyValue,
+        text: snapshotText,
+        createdAt: state.startedAt,
+        expiresAt: Date.now() + PAGED_OUTPUT_TTL_MS,
+      });
+      const pageIndex = final ? 0 : chunks.length - 1;
+      const page = decoratePagedOutput(chunks[pageIndex]!, pageIndex, chunks.length);
+      const replyMarkup = pagedOutputKeyboard(token, pageIndex, chunks.length);
+      if (state.messageId) {
+        try {
+          await this.deps.editRendered(state.conversationId, page, {
+            messageId: state.messageId,
+            replyMarkup,
+            disableWebPagePreview: true,
+          });
+          this.markFlushed(sessionKeyValue, snapshotText);
+          state.finalPageRendered = final;
+          return;
+        } catch (error) {
+          this.deps.logger.warn("router.agent_output_edit_fallback", {
+            conversation_id: state.conversationId,
+            message_id: state.messageId,
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+        }
+      }
+      const result = await this.deps.sendRendered(state.conversationId, page, {
+        replyToMessageId: state.replyToMessageId,
+        replyMarkup,
+        disableWebPagePreview: true,
+      });
+      state.messageId = result.messageId;
+      this.markFlushed(sessionKeyValue, snapshotText);
+      state.finalPageRendered = final;
+    }
+  }
+
+  async renderPagedOutputCallback(message: CallbackMessage, payload: string): Promise<void> {
+    const [, token, rawPage] = payload.split(":");
+    const pageIndex = Number(rawPage);
+    const output = token ? this.deps.store.getPagedOutput(token) : undefined;
+    if (!output || String(output.conversationId) !== String(message.conversationId) || output.expiresAt < Date.now()) {
+      if (token) this.deps.store.deletePagedOutput(token);
+      await this.deps.renderCallbackPage(message, messageWithTitle("Page expired."), { inline_keyboard: [] });
+      return;
+    }
+    const pageToken = output.token;
+    const rendered = renderCodexMarkdownForTelegram(output.text);
+    const pages = splitRenderedForTelegram(rendered, PAGE_MAX_CHARS);
+    if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= pages.length) {
+      await this.deps.renderCallbackPage(message, messageWithTitle("Page unavailable."), pagedOutputKeyboard(pageToken, pages.length - 1, pages.length));
+      return;
+    }
+    const page = decoratePagedOutput(pages[pageIndex]!, pageIndex, pages.length);
+    const replyMarkup = pagedOutputKeyboard(pageToken, pageIndex, pages.length);
+    if (!message.messageId) {
+      await this.deps.sendRendered(message.conversationId, page, {
+        replyMarkup,
+        disableWebPagePreview: true,
+      });
+      return;
+    }
+    try {
+      await this.deps.editRendered(message.conversationId, page, {
+        messageId: message.messageId,
+        replyMarkup,
+        disableWebPagePreview: true,
+      });
+    } catch (error) {
+      this.deps.logger.warn("router.paged_output_edit_fallback", {
+        conversation_id: message.conversationId,
+        message_id: message.messageId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+      await this.deps.sendRendered(message.conversationId, page, {
+        replyMarkup,
+        disableWebPagePreview: true,
+      });
+    }
+  }
+}
