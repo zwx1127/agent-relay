@@ -966,7 +966,7 @@ describe("relay controller", () => {
     expect(adapter.edited.at(-1)?.options.entities?.[0]?.type).toBe("bold");
   });
 
-  test("codex option question uses ForceReply and responds with typed answer", async () => {
+  test("codex option question uses inline buttons and responds with selected answer", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -989,17 +989,19 @@ describe("relay controller", () => {
     const prompt = adapter.sent.at(-1)!;
     expect(prompt.text).toContain("Mode");
     expect(prompt.options?.entities?.[0]?.type).toBe("bold");
-    expect(prompt.options?.forceReply).toBe(true);
-    expect(prompt.options?.replyMarkup).toBeUndefined();
+    expect(prompt.options?.forceReply).toBeUndefined();
+    expect(prompt.options?.replyMarkup?.inline_keyboard.map((row) => row[0]?.text)).toEqual(["Fast", "Deep"]);
+    const fast = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
 
-    await router.handle(textMessage("Fast", 7, prompt.messageId));
+    await router.handle(callbackMessage(fast.callback_data, 7, "cb-fast", prompt.messageId));
 
     expect(agent.responses).toEqual([{
       key: "codex:1:demo",
       requestId: 77,
       result: { answers: { choice: { answers: ["Fast"] } } },
     }]);
-    expect(adapter.sent.at(-1)?.text).toContain("Answered");
+    expect(adapter.edited.at(-1)?.text).toContain("Answered");
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
     expect(adapter.reactions).toEqual([
       { conversationId: "1", messageId: "1", emoji: "✍" },
       { conversationId: "1", messageId: "1", emoji: "🤔" },
@@ -1007,12 +1009,12 @@ describe("relay controller", () => {
     ]);
   });
 
-  test("codex user input callback buttons are no longer supported", async () => {
+  test("stale codex user input callback expires without responding", async () => {
     const { router, adapter } = fixture();
 
     await router.handle(callbackMessage("ar:q:old:0:0"));
 
-    expect(adapter.edited.at(-1)?.text).toContain("Error: Unknown callback.");
+    expect(adapter.edited.at(-1)?.text).toContain("Question expired.");
   });
 
   test("codex free text question uses ForceReply and reply is not forwarded as prompt", async () => {
@@ -1089,13 +1091,14 @@ describe("relay controller", () => {
     });
     const first = adapter.sent.at(-1)!;
 
-    expect(first.options?.forceReply).toBe(true);
-    await router.handle(textMessage("A", 7, first.messageId));
+    expect(first.options?.replyMarkup?.inline_keyboard[0]?.[0]?.text).toBe("A");
+    await router.handle(callbackMessage(first.options!.replyMarkup!.inline_keyboard[0]![0]!.callback_data, 7, "cb-first", first.messageId));
     expect(agent.responses).toEqual([]);
     const second = adapter.sent.at(-1)!;
     expect(second.text).toContain("Second");
+    expect(adapter.edited.at(-1)?.text).toContain("Next question sent.");
 
-    await router.handle(textMessage("B", 7, second.messageId));
+    await router.handle(callbackMessage(second.options!.replyMarkup!.inline_keyboard[0]![0]!.callback_data, 7, "cb-second", second.messageId));
     expect(agent.responses.at(-1)?.result).toEqual({
       answers: {
         first: { answers: ["A"] },

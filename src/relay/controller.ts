@@ -37,7 +37,7 @@ import { noopLogger, type Logger } from "../domain/logger.ts";
 import { CODEX_PROMPT_TTL_MS, DEFAULT_IMAGE_PROMPT, LIST_PAGE_SIZE, MEDIA_GROUP_QUIET_MS, UI_BUTTON } from "./ui/constants.ts";
 import { codexRequestKey, shortToken, workspaceCallbackToken } from "./ui/callback-data.ts";
 import { commandArgs, parseReviewTarget } from "./ui/commands.ts";
-import { approvalKeyboard, consoleKeyboard, deleteWorkspaceConfirmKeyboard, planReadyKeyboard, resumeKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
+import { approvalKeyboard, codexQuestionKeyboard, consoleKeyboard, deleteWorkspaceConfirmKeyboard, planReadyKeyboard, resumeKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
 import { bestPhoto, formatBytes, pathContains, truncateTelegramCaption } from "./ui/media-format.ts";
 import { answeredMessage, confirmMessage, formatApprovalDecisionMessage, formatApprovalMessage, formatCodexQuestion, formatErrorMessage, formatResumeMessage, formatWorkspacesMessage } from "./ui/messages.ts";
 import { paginateWorkspaces } from "./ui/pagination.ts";
@@ -100,6 +100,7 @@ export class RelayController {
       newWorkspace: (message) => this.promptForWorkspaceName(message.conversationId),
       toggleStatusMode: (message) => this.toggleStatusModeCallback(message),
       approval: (message, payload) => this.answerCodexApproval(message, payload),
+      codexQuestion: (message, payload) => this.answerCodexOptionCallback(message, payload),
       pagedOutput: (message, payload) => this.renderPagedOutputCallback(message, payload),
       command: (message, payload) => this.handleCommandCallback(message, payload),
       stop: (message) => this.stopFromCallback(message),
@@ -1093,8 +1094,9 @@ export class RelayController {
     });
     const request = this.codexRequests.get(codexRequestKey(sessionKeyValue, requestId));
     const totalQuestions = request?.questions.length ?? 1;
+    const useInlineOptions = !question.isSecret && options.length > 0 && this.deps.adapter.capabilities.inlineActions;
     const result = await this.sendRendered(conversationId, formatCodexQuestion(question, questionIndex, totalQuestions), {
-      forceReply: true,
+      ...(useInlineOptions ? { replyMarkup: codexQuestionKeyboard(token, options) } : { forceReply: true }),
       disableWebPagePreview: true,
     });
     if (!result.messageId) throw new Error("Telegram did not return a prompt message id.");
@@ -1107,6 +1109,29 @@ export class RelayController {
       payloadJson: payload,
       expiresAt,
     });
+  }
+
+  private async answerCodexOptionCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
+    const parts = payload.split(":");
+    const [, token, rawOptionIndex] = parts;
+    const pending = message.messageId ? this.deps.store.getPendingPrompt(message.conversationId, message.messageId) : undefined;
+    const data = parsePromptPayload(pending?.payloadJson);
+    if (!pending || pending.kind !== "codex_user_input" || !data || data.token !== token || isExpired(pending)) {
+      await this.expireCallbackPrompt(message);
+      return;
+    }
+
+    const optionIndex = Number(rawOptionIndex);
+    if (!Number.isInteger(optionIndex) || optionIndex < 0) throw new Error("Question selection is missing.");
+    const option = Array.isArray(data.options) ? asPromptRecord(data.options[optionIndex]) : undefined;
+    const answer = typeof option?.label === "string" ? option.label : undefined;
+    if (!answer) throw new Error("Question selection expired.");
+
+    const response = await this.recordCodexAnswer(pending, data, answer);
+    if (response === "expired") return;
+    const hasNext = !response && await this.sendNextCodexQuestion(message.conversationId, pending, data);
+    await this.renderCallbackPage(message, answeredMessage(answer, hasNext), { inline_keyboard: [] });
+    if (response) await this.respondToCodexPrompt(response);
   }
 
   private async sendNextCodexQuestion(

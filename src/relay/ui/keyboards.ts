@@ -1,4 +1,4 @@
-import type { AgentThreadSummary } from "../../ports/agent.ts";
+import type { AgentThreadSummary, AgentUserInputOption } from "../../ports/agent.ts";
 import type { InlineKeyboardMarkup } from "../../ports/im.ts";
 import type { HomeStatusMode, WorkspaceRecord } from "../types.ts";
 import { UI_BUTTON, WORKSPACE_BUTTON_LABEL_WIDTH } from "./constants.ts";
@@ -40,6 +40,15 @@ export function approvalKeyboard(token: string): InlineKeyboardMarkup {
       { text: UI_BUTTON.approve, callback_data: `ar:a:${token}:y` },
       { text: UI_BUTTON.deny, callback_data: `ar:a:${token}:n` },
     ]],
+  };
+}
+
+export function codexQuestionKeyboard(token: string, options: AgentUserInputOption[]): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: options.map((option, index) => [{
+      text: buttonLabel(option.label),
+      callback_data: `ar:q:${token}:${index}`,
+    }]),
   };
 }
 

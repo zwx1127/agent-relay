@@ -14,6 +14,7 @@ export interface CallbackHandlers {
   newWorkspace(message: CallbackMessage): Promise<CallbackResult>;
   toggleStatusMode(message: CallbackMessage): Promise<CallbackResult>;
   approval(message: CallbackMessage, payload: string): Promise<CallbackResult>;
+  codexQuestion(message: CallbackMessage, payload: string): Promise<CallbackResult>;
   pagedOutput(message: CallbackMessage, payload: string): Promise<CallbackResult>;
   command(message: CallbackMessage, payload: string): Promise<CallbackResult>;
   stop(message: CallbackMessage): Promise<CallbackResult>;
@@ -49,6 +50,9 @@ export class CallbackRouter {
     }
     if (payload.startsWith("a:")) {
       return callbackText(await this.handlers.approval(message, payload));
+    }
+    if (payload.startsWith("q:")) {
+      return callbackText(await this.handlers.codexQuestion(message, payload));
     }
     if (payload.startsWith("p:")) {
       return callbackText(await this.handlers.pagedOutput(message, payload));
