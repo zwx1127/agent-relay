@@ -682,21 +682,19 @@ export class RelayController {
     await this.renderCallbackPage(message, messageWithTitle("Continuing in Plan mode."), { inline_keyboard: [] });
   }
 
-  private async renderHomeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<string> {
+  private async renderHomeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     const status = this.statusView(message.conversationId);
     const mode = this.deps.store.getHomeStatusMode(message.conversationId);
     await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
     if (message.messageId) this.deps.store.setConsoleMessageId(message.conversationId, message.messageId);
-    return "Refreshed";
   }
 
-  private async toggleStatusModeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<string> {
+  private async toggleStatusModeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     const nextMode: HomeStatusMode = this.deps.store.getHomeStatusMode(message.conversationId) === "compact" ? "details" : "compact";
     this.deps.store.setHomeStatusMode(message.conversationId, nextMode);
     const status = this.statusView(message.conversationId);
     await this.renderCallbackPage(message, formatHomeMessage(status, nextMode), consoleKeyboard(status, nextMode));
     if (message.messageId) this.deps.store.setConsoleMessageId(message.conversationId, message.messageId);
-    return nextMode === "details" ? "Details" : "Compact";
   }
 
   private async renderWorkspacesCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, pageIndex: number): Promise<void> {
@@ -709,7 +707,7 @@ export class RelayController {
     })), page.pageIndex, page.totalPages), workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages));
   }
 
-  private async selectWorkspaceFromToken(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string): Promise<string> {
+  private async selectWorkspaceFromToken(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string): Promise<void> {
     const name = await this.workspaceNameForToken(token);
     const workspace = this.requireWorkspace(name);
     this.deps.store.bindConversation(message.conversationId, workspace.name);
@@ -719,7 +717,6 @@ export class RelayController {
     const mode = this.deps.store.getHomeStatusMode(message.conversationId);
     await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
     if (message.messageId) this.deps.store.setConsoleMessageId(message.conversationId, message.messageId);
-    return "CWD selected";
   }
 
   private async confirmDeleteWorkspaceCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string): Promise<void> {
@@ -751,7 +748,7 @@ export class RelayController {
     await this.renderWorkspacesCallback(message, 0);
   }
 
-  private async stopFromCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<string> {
+  private async stopFromCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     const workspace = this.requireCurrentWorkspace(message.conversationId);
     const key = sessionKey(message.conversationId, workspace.name);
     await this.finalizeSessionOutput(key);
@@ -762,7 +759,6 @@ export class RelayController {
     const status = this.statusView(message.conversationId);
     const mode = this.deps.store.getHomeStatusMode(message.conversationId);
     await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
-    return "Stopped";
   }
 
   private async renderCallbackPage(
@@ -1129,8 +1125,8 @@ export class RelayController {
 
     const response = await this.recordCodexAnswer(pending, data, answer);
     if (response === "expired") return;
-    const hasNext = !response && await this.sendNextCodexQuestion(message.conversationId, pending, data);
-    await this.renderCallbackPage(message, answeredMessage(answer, hasNext), { inline_keyboard: [] });
+    if (!response) await this.sendNextCodexQuestion(message.conversationId, pending, data);
+    await this.renderCallbackPage(message, answeredMessage(answer), { inline_keyboard: [] });
     if (response) await this.respondToCodexPrompt(response);
   }
 
@@ -1164,7 +1160,7 @@ export class RelayController {
     const response = await this.recordCodexAnswer(pending, data, text);
     if (response === "expired") return;
     const hasNext = !response && await this.sendNextCodexQuestion(conversationId, pending, data);
-    if (!hasNext) await this.sendRendered(conversationId, data.isSecret ? messageWithTitle("Answered.") : answeredMessage(text, false));
+    if (!hasNext) await this.sendRendered(conversationId, data.isSecret ? messageWithTitle("Answered.") : answeredMessage(text));
     if (response) await this.respondToCodexPrompt(response);
   }
 

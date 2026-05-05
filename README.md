@@ -109,7 +109,7 @@ This provider refactor intentionally changes runtime configuration and the SQLit
 
 ## Telegram Usage
 
-Send `/relay` to open Relay Home. Relay Home shows the selected cwd, Codex status, waiting state, and recent errors. The detail toggle shows waiting state, prompt counts, thread, model, combined numeric token/context usage, approval/sandbox policy, and recent output timing. Relay Home uses emoji-only inline buttons and short Telegram callback notices for successful actions.
+Send `/relay` to open Relay Home. Relay Home shows the selected cwd, Codex status, waiting state, and recent errors. The detail toggle shows waiting state, prompt counts, thread, model, combined numeric token/context usage, approval/sandbox policy, and recent output timing. Relay Home uses emoji-only inline buttons; successful actions update the message in place without extra Telegram callback notices, while errors and expired actions still show explicit feedback.
 
 Relay Home actions:
 
@@ -140,7 +140,7 @@ Relay-handled slash commands after a cwd is selected:
 
 `/relay` is the only Relay command that works without a cwd. Unsupported slash text, including `/help`, `/status`, `/model`, and `/start`, is forwarded to Codex when a cwd is selected.
 
-Codex questions with predefined options are shown with inline buttons. Free-text and secret questions are shown as ForceReply prompts. Multi-question requests are sent one question at a time. Approval requests are shown with approve/deny inline buttons. New prompts are paused while Codex is waiting for an answer or approval.
+Codex questions with predefined options are shown with inline buttons. Free-text and secret questions are shown as ForceReply prompts. Multi-question requests are sent one question at a time, and answered option cards only show the selected answer. Approval requests are shown with approve/deny inline buttons. New prompts are paused while Codex is waiting for an answer or approval.
 
 Assistant output is rendered as Telegram text entities rather than HTML parse mode. Common Markdown is supported, including headings, lists, task lists, blockquotes, emphasis, inline code, code blocks, and HTTP/HTTPS links. Long output is stored and shown as paged Telegram messages.
 

@@ -17,12 +17,11 @@ export function confirmMessage(title: string, body: string): RenderedTelegramTex
   return renderTelegramText([bold(title), "\n\n", body]);
 }
 
-export function answeredMessage(answer: string, hasNext: boolean): RenderedTelegramText {
+export function answeredMessage(answer: string): RenderedTelegramText {
   return renderTelegramText([
     bold("Answered:"),
     " ",
     answer,
-    hasNext ? "\n\nNext question sent." : "",
   ]);
 }
 
