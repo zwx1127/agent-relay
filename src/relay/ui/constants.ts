@@ -14,6 +14,7 @@ export const MEDIA_GROUP_QUIET_MS = 900;
 export const UI_BUTTON = {
   workspace: "📂",
   status: "ℹ️",
+  compact: "🔙",
   refresh: "🔄",
   stop: "🛑",
   create: "🆕",

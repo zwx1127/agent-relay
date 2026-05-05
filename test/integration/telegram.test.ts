@@ -316,6 +316,7 @@ describe("telegram adapter", () => {
         { type: "code", offset: 5, length: 10 },
       ],
       forceReply: true,
+      inputFieldPlaceholder: "repo name under WORKSPACE_ROOT",
     });
 
     expect(sentBodies.at(-1)).toEqual({
@@ -326,7 +327,7 @@ describe("telegram adapter", () => {
         { type: "bold", offset: 0, length: 4 },
         { type: "code", offset: 5, length: 10 },
       ],
-      reply_markup: { force_reply: true, selective: true },
+      reply_markup: { force_reply: true, selective: true, input_field_placeholder: "repo name under WORKSPACE_ROOT" },
     });
   });
 

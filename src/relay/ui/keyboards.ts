@@ -1,6 +1,6 @@
 import type { AgentThreadSummary } from "../../ports/agent.ts";
 import type { InlineKeyboardMarkup } from "../../ports/im.ts";
-import type { WorkspaceRecord } from "../types.ts";
+import type { HomeStatusMode, WorkspaceRecord } from "../types.ts";
 import { UI_BUTTON, WORKSPACE_BUTTON_LABEL_WIDTH } from "./constants.ts";
 import { deleteWorkspaceCallbackData, workspaceCallbackData } from "./callback-data.ts";
 
@@ -43,11 +43,11 @@ export function approvalKeyboard(token: string): InlineKeyboardMarkup {
   };
 }
 
-export function consoleKeyboard(status: { workspaceName?: string; running?: boolean }): InlineKeyboardMarkup {
+export function consoleKeyboard(status: { workspaceName?: string; running?: boolean }, mode: HomeStatusMode): InlineKeyboardMarkup {
   const rows: InlineKeyboardMarkup["inline_keyboard"] = [];
   rows.push([
     { text: UI_BUTTON.workspace, callback_data: "ar:w" },
-    { text: UI_BUTTON.status, callback_data: "ar:status" },
+    { text: mode === "details" ? UI_BUTTON.compact : UI_BUTTON.status, callback_data: "ar:status" },
     { text: UI_BUTTON.refresh, callback_data: "ar:s" },
   ]);
   if (status.workspaceName) {

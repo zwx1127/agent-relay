@@ -257,8 +257,8 @@ export class RelayController {
     }
 
     try {
-      await this.routeCallback(message);
-      await this.answerCallback(message.callbackQueryId);
+      const callbackText = await this.routeCallback(message);
+      await this.answerCallback(message.callbackQueryId, callbackText);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       this.logger.error("router.callback_failed", {
@@ -269,7 +269,7 @@ export class RelayController {
         error: error instanceof Error ? error : new Error(detail),
       });
       await this.answerCallback(message.callbackQueryId, detail.slice(0, 180));
-      await this.renderCallbackPage(message, formatErrorMessage(detail), consoleKeyboard(this.statusView(message.conversationId)));
+      await this.renderCallbackPage(message, formatErrorMessage(detail), this.consoleKeyboard(message.conversationId));
       this.appendSystem(message.conversationId, `Error: ${detail}\n`);
     }
   }
@@ -468,8 +468,8 @@ export class RelayController {
     });
   }
 
-  private async routeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
-    await this.callbacks.route(message);
+  private async routeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<string | undefined> {
+    return await this.callbacks.route(message);
   }
 
   private async runReviewCommand(conversationId: ConversationId, text: string): Promise<void> {
@@ -681,18 +681,21 @@ export class RelayController {
     await this.renderCallbackPage(message, messageWithTitle("Continuing in Plan mode."), { inline_keyboard: [] });
   }
 
-  private async renderHomeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
+  private async renderHomeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<string> {
     const status = this.statusView(message.conversationId);
-    await this.renderCallbackPage(message, formatHomeMessage(status, this.deps.store.getHomeStatusMode(message.conversationId)), consoleKeyboard(status));
+    const mode = this.deps.store.getHomeStatusMode(message.conversationId);
+    await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
     if (message.messageId) this.deps.store.setConsoleMessageId(message.conversationId, message.messageId);
+    return "Refreshed";
   }
 
-  private async toggleStatusModeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
+  private async toggleStatusModeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<string> {
     const nextMode: HomeStatusMode = this.deps.store.getHomeStatusMode(message.conversationId) === "compact" ? "details" : "compact";
     this.deps.store.setHomeStatusMode(message.conversationId, nextMode);
     const status = this.statusView(message.conversationId);
-    await this.renderCallbackPage(message, formatHomeMessage(status, nextMode), consoleKeyboard(status));
+    await this.renderCallbackPage(message, formatHomeMessage(status, nextMode), consoleKeyboard(status, nextMode));
     if (message.messageId) this.deps.store.setConsoleMessageId(message.conversationId, message.messageId);
+    return nextMode === "details" ? "Details" : "Compact";
   }
 
   private async renderWorkspacesCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, pageIndex: number): Promise<void> {
@@ -705,15 +708,17 @@ export class RelayController {
     })), page.pageIndex, page.totalPages), workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages));
   }
 
-  private async selectWorkspaceFromToken(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string): Promise<void> {
+  private async selectWorkspaceFromToken(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string): Promise<string> {
     const name = await this.workspaceNameForToken(token);
     const workspace = this.requireWorkspace(name);
     this.deps.store.bindConversation(message.conversationId, workspace.name);
     this.logger.info("router.workspace_selected", { conversation_id: message.conversationId, workspace: workspace.name, path: workspace.path });
     await this.ensureAgentStarted(message.conversationId, workspace);
     const status = this.statusView(message.conversationId);
-    await this.renderCallbackPage(message, formatHomeMessage(status, this.deps.store.getHomeStatusMode(message.conversationId)), consoleKeyboard(status));
+    const mode = this.deps.store.getHomeStatusMode(message.conversationId);
+    await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
     if (message.messageId) this.deps.store.setConsoleMessageId(message.conversationId, message.messageId);
+    return "CWD selected";
   }
 
   private async confirmDeleteWorkspaceCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string): Promise<void> {
@@ -745,7 +750,7 @@ export class RelayController {
     await this.renderWorkspacesCallback(message, 0);
   }
 
-  private async stopFromCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
+  private async stopFromCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<string> {
     const workspace = this.requireCurrentWorkspace(message.conversationId);
     const key = sessionKey(message.conversationId, workspace.name);
     await this.finalizeSessionOutput(key);
@@ -754,7 +759,9 @@ export class RelayController {
     this.deps.store.clearBinding(message.conversationId);
     this.logger.info("router.session_stopped", { conversation_id: message.conversationId, workspace: workspace.name, session_key: key });
     const status = this.statusView(message.conversationId);
-    await this.renderCallbackPage(message, formatHomeMessage(status, this.deps.store.getHomeStatusMode(message.conversationId)), consoleKeyboard(status));
+    const mode = this.deps.store.getHomeStatusMode(message.conversationId);
+    await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
+    return "Stopped";
   }
 
   private async renderCallbackPage(
@@ -815,6 +822,10 @@ export class RelayController {
     });
   }
 
+  private consoleKeyboard(conversationId: ConversationId): InlineKeyboardMarkup {
+    return consoleKeyboard(this.statusView(conversationId), this.deps.store.getHomeStatusMode(conversationId));
+  }
+
   private async renderConsole(conversationId: ConversationId, options: { forceNewMessage?: boolean } = {}): Promise<void> {
     const status = this.statusView(conversationId);
     this.logger.info("router.console_rendered", {
@@ -823,12 +834,13 @@ export class RelayController {
       running: Boolean(status.running),
     });
     const previousMessageId = options.forceNewMessage ? undefined : this.deps.store.getConsoleMessageId(conversationId);
-    const body = formatHomeMessage(status, this.deps.store.getHomeStatusMode(conversationId));
+    const mode = this.deps.store.getHomeStatusMode(conversationId);
+    const body = formatHomeMessage(status, mode);
     if (previousMessageId) {
       try {
         await this.editRendered(conversationId, body, {
           messageId: previousMessageId,
-          replyMarkup: consoleKeyboard(status),
+          replyMarkup: consoleKeyboard(status, mode),
         });
         return;
       } catch (error) {
@@ -839,13 +851,14 @@ export class RelayController {
         });
       }
     }
-    const result = await this.sendRendered(conversationId, body, { replyMarkup: consoleKeyboard(status) });
+    const result = await this.sendRendered(conversationId, body, { replyMarkup: consoleKeyboard(status, mode) });
     if (result.messageId) this.deps.store.setConsoleMessageId(conversationId, result.messageId);
   }
 
   private async promptForWorkspaceName(conversationId: ConversationId): Promise<void> {
     const result = await this.sendRendered(conversationId, textMessage("Reply with the cwd name. Existing directories under WORKSPACE_ROOT are selected; missing names are created."), {
       forceReply: true,
+      inputFieldPlaceholder: "repo name under WORKSPACE_ROOT",
       disableWebPagePreview: true,
     });
     if (!result.messageId) {
@@ -880,7 +893,7 @@ export class RelayController {
       code(name),
       ` ${existed ? "selected" : "created and selected"}.`,
     ]), {
-      replyMarkup: consoleKeyboard(this.statusView(conversationId)),
+      replyMarkup: this.consoleKeyboard(conversationId),
     });
   }
 

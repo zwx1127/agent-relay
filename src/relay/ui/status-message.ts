@@ -49,7 +49,7 @@ export function formatStatusMessage(status: StatusView): RenderedTelegramText {
       bold("Relay Home"),
       `\n\n${statusIcon(status)} ${statusLabel(status)}`,
       "\ncwd: none",
-      "\nWaiting: no",
+      "\nWaiting: none",
     ]);
   }
   const parts: TelegramTextPart[] = [
@@ -79,6 +79,10 @@ export function formatDetailsMessage(status: StatusView): RenderedTelegramText {
     code(status.workspaceName),
     "\nPath: ",
     code(status.workspacePath),
+    "\nWaiting: ",
+    formatWaiting(status),
+    "\nPrompts: ",
+    formatTaskCounts(status),
     "\nThread: ",
   ];
   const threadLabel = status.threadName || status.threadId;
@@ -90,16 +94,12 @@ export function formatDetailsMessage(status: StatusView): RenderedTelegramText {
     status.modelProvider ? ` / ${status.modelProvider}` : "",
     "\nReasoning: ",
     status.reasoningEffort ?? "unknown",
+    "\nUsage: ",
+    formatTokenContextUsage(status),
     "\nApproval policy: ",
     status.approvalPolicy ?? "unknown",
     "\nSandbox policy: ",
     status.sandboxPolicy ?? "unknown",
-    "\nWaiting: ",
-    formatWaiting(status),
-    "\nPrompts: ",
-    formatTaskCounts(status),
-    "\nUsage: ",
-    formatTokenContextUsage(status),
   );
   if (status.recentOutputAt) parts.push("\nLast output: ", relativeTime(status.recentOutputAt));
   if (status.recentError) parts.push("\nError: ", truncateForTelegramLabel(status.recentError.trim(), 120));
@@ -123,7 +123,7 @@ export function formatWaiting(status: StatusView): string {
     status.waitingForUserInput ? "user input" : undefined,
     status.waitingForApproval ? "approval" : undefined,
   ].filter(Boolean);
-  return waiting.length > 0 ? waiting.join(", ") : "no";
+  return waiting.length > 0 ? waiting.join(", ") : "none";
 }
 
 export function formatTaskCounts(status: StatusView): string {

@@ -109,14 +109,14 @@ This provider refactor intentionally changes runtime configuration and the SQLit
 
 ## Telegram Usage
 
-Send `/relay` to open Relay Home. Relay Home shows the selected cwd, Codex status, waiting state, and recent errors. The detail toggle shows thread, model, approval/sandbox policy, combined numeric token/context usage, prompt counts, and recent output timing.
+Send `/relay` to open Relay Home. Relay Home shows the selected cwd, Codex status, waiting state, and recent errors. The detail toggle shows waiting state, prompt counts, thread, model, combined numeric token/context usage, approval/sandbox policy, and recent output timing. Relay Home uses emoji-only inline buttons and short Telegram callback notices for successful actions.
 
 Relay Home actions:
 
-- Workspace: select an existing first-level directory under `WORKSPACE_ROOT`, create a new cwd through ForceReply, or delete a cwd after confirmation.
-- Status: toggle compact and detailed status views for the chat.
-- Refresh: redraw the current Relay Home message.
-- Stop: interrupt the current cwd session and clear the chat's cwd selection.
+- `📂`: select an existing first-level directory under `WORKSPACE_ROOT`, create a new cwd through ForceReply, or delete a cwd after confirmation. The create prompt includes an input placeholder for the cwd name.
+- `ℹ️` / `🔙`: toggle compact and detailed status views for the chat.
+- `🔄`: redraw the current Relay Home message.
+- `🛑`: interrupt the current cwd session and clear the chat's cwd selection.
 
 After a cwd is selected, ordinary Telegram messages are sent to Codex. Telegram photo messages are downloaded into the selected cwd and sent to Codex as image inputs; photo captions become the prompt, and photos without captions use a default inspection prompt. Telegram file/document attachments are not supported. If Codex is idle, the message starts a new turn. If a Codex turn is active, the message is sent as steering input for that turn. If no cwd is selected, ordinary text or photos open Relay Home instead.
 

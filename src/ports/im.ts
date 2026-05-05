@@ -32,6 +32,7 @@ export interface SendMessageOptions {
   entities?: TextEntity[];
   replyMarkup?: InlineKeyboardMarkup;
   forceReply?: boolean;
+  inputFieldPlaceholder?: string;
   disableWebPagePreview?: boolean;
   replyToMessageId?: MessageId;
 }

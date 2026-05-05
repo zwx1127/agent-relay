@@ -472,7 +472,15 @@ function outboundChunks(text: string, options: SendMessageOptions): Array<{ text
 
 function replyMarkupForOptions(options: SendMessageOptions, include: boolean): { reply_markup?: unknown } {
   if (!include) return {};
-  if (options.forceReply) return { reply_markup: { force_reply: true, selective: true } };
+  if (options.forceReply) {
+    return {
+      reply_markup: {
+        force_reply: true,
+        selective: true,
+        ...(options.inputFieldPlaceholder ? { input_field_placeholder: options.inputFieldPlaceholder } : {}),
+      },
+    };
+  }
   if (options.replyMarkup) return { reply_markup: options.replyMarkup };
   return {};
 }

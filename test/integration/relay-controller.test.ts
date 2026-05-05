@@ -298,6 +298,7 @@ describe("relay controller", () => {
 
     expect(adapter.sent.at(-1)?.text).toContain("Relay Home");
     expect(adapter.sent.at(-1)?.text).toContain("cwd: none");
+    expect(adapter.sent.at(-1)?.text).toContain("Waiting: none");
     expect(adapter.sent.at(-1)?.options?.entities?.[0]?.type).toBe("bold");
     expect(adapter.sent.at(-1)?.text).toContain("⚪ Stopped");
     expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["📂", "ℹ️", "🔄"]);
@@ -488,6 +489,8 @@ describe("relay controller", () => {
 
     expect(adapter.edited.at(-1)?.text).toContain("/tmp/<demo>&");
     expect(adapter.edited.at(-1)?.options.entities?.some((entity) => entity.type === "code")).toBe(true);
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["📂", "🔙", "🔄", "🛑"]);
+    expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-details", text: "Details" });
 
     await router.handle(textMessage("/relay"));
     expect(adapter.edited.at(-1)?.text).toContain("/tmp/<demo>&");
@@ -518,6 +521,7 @@ describe("relay controller", () => {
 
     await router.handle(callbackMessage("ar:n"));
     expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
+    expect(adapter.sent.at(-1)?.options?.inputFieldPlaceholder).toBe("repo name under WORKSPACE_ROOT");
     const promptId = adapter.sent.length + 99;
 
     await router.handle(textMessage("demo", 7, promptId));
@@ -835,6 +839,7 @@ describe("relay controller", () => {
     expect(store.getConsoleMessageId(1)).toBe(String(currentMessageId));
     expect(adapter.sent).toHaveLength(2);
     expect(adapter.edited.at(-1)?.options.messageId).toBe(currentMessageId);
+    expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-refresh", text: "Refreshed" });
   });
 
   test("workspace callback switches binding, auto-starts, and edits status", async () => {
@@ -858,7 +863,7 @@ describe("relay controller", () => {
     expect(adapter.edited.at(-1)?.text).toContain("cwd: second");
     expect(adapter.edited.at(-1)?.options.entities?.some((entity) => entity.type === "code")).toBe(true);
     expect(adapter.edited.at(-1)?.options.messageId).toBe(42);
-    expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb2", text: undefined });
+    expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb2", text: "CWD selected" });
   });
 
   test("workspaces callback discovers existing directories and uses short buttons", async () => {
@@ -949,6 +954,7 @@ describe("relay controller", () => {
     expect(agent.stopped).toEqual(["codex:1:demo"]);
     expect(store.getBinding(1)).toBeUndefined();
     expect(adapter.edited.at(-1)?.text).toContain("cwd: none");
+    expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb1", text: "Stopped" });
   });
 
   test("unknown callback answers and renders formatted error", async () => {
