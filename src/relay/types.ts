@@ -1,5 +1,5 @@
-import type { ConversationId, MessageId } from "../core/ids.ts";
-import type { AgentCollaborationMode, AgentTaskInput } from "../agents/types.ts";
+import type { ConversationId, MessageId } from "../domain/ids.ts";
+import type { AgentCollaborationMode, AgentTaskInput } from "../ports/agent.ts";
 
 export interface WorkspaceRecord {
   name: string;

@@ -2,14 +2,14 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store } from "../../src/persistence/store.ts";
+import { SQLiteStore } from "../../src/storage/sqlite-store.ts";
 
 let dirs: string[] = [];
 
-function tempStore(): Store {
+function tempStore(): SQLiteStore {
   const dir = mkdtempSync(join(tmpdir(), "agent-relay-store-"));
   dirs.push(dir);
-  return new Store(join(dir, "db.sqlite"));
+  return new SQLiteStore(join(dir, "db.sqlite"));
 }
 
 afterEach(() => {

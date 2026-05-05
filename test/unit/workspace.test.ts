@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { discoverWorkspaceDirectories, resolveWorkspacePath, validateWorkspaceName, workspaceDirectoryExists } from "../../src/core/workspace.ts";
+import { discoverWorkspaceDirectories, resolveWorkspacePath, validateWorkspaceName, workspaceDirectoryExists } from "../../src/domain/workspace.ts";
 
 describe("workspace", () => {
   test("accepts conservative and unicode names", () => {

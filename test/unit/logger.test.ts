@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseLogLevel, TextLogger } from "../../src/core/logger.ts";
+import { parseLogLevel, TextLogger } from "../../src/domain/logger.ts";
 
 describe("logger", () => {
   test("filters messages below the configured level", () => {

@@ -1,7 +1,7 @@
-import { sessionKey } from "../../src/core/session.ts";
-import type { ConversationId, MessageId } from "../../src/core/ids.ts";
-import type { AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentThreadListOptions, AgentThreadSummary } from "../../src/agents/types.ts";
-import type { EditMessageTextOptions, SendMessageOptions } from "../../src/messaging/types.ts";
+import { sessionKey } from "../../src/domain/session.ts";
+import type { ConversationId, MessageId } from "../../src/domain/ids.ts";
+import type { AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentThreadListOptions, AgentThreadSummary } from "../../src/ports/agent.ts";
+import type { EditMessageTextOptions, SendMessageOptions } from "../../src/ports/messaging.ts";
 
 export class FakeAdapter {
   readonly providerId = "fake";

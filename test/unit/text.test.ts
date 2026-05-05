@@ -7,7 +7,7 @@ import {
   splitHtmlForTelegram,
   splitRenderedForTelegram,
   truncateForTelegramLabel,
-} from "../../src/rendering/telegram-text.ts";
+} from "../../src/presentation/telegram/text.ts";
 
 describe("text utilities", () => {
   test("splits messages by max length", () => {

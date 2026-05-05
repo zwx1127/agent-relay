@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import type { CapabilityDefinition } from "../capabilities/registry.ts";
-import { noopLogger, type Logger } from "../../core/logger.ts";
+import { noopLogger, type Logger } from "../../domain/logger.ts";
 
 export interface ControlServerOptions {
   port: number;

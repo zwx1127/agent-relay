@@ -1,4 +1,4 @@
-import { main } from "./app/bootstrap.ts";
+import { main } from "./runtime/bootstrap.ts";
 
 if (import.meta.main) {
   await main();

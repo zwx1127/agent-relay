@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isAuthorized, loadConfig, loadDotEnvFile, parseStringSet } from "../../src/app/config.ts";
+import { isAuthorized, loadConfig, loadDotEnvFile, parseStringSet } from "../../src/runtime/config.ts";
 
 describe("config", () => {
   test("parses comma separated ids", () => {
