@@ -138,22 +138,20 @@ export function formatTaskCounts(status: StatusView): string {
 export function formatTokenContextUsage(status: StatusView): string {
   const total = status.tokenUsage?.total?.totalTokens;
   const context = status.contextWindow;
-  const last = status.tokenUsage?.last?.totalTokens;
+  const last = status.tokenUsage?.last;
   const parts: string[] = [];
 
-  if (typeof total === "number" && typeof context === "number" && context > 0) {
-    const percent = Math.round((total / context) * 100);
-    const remaining = Math.max(0, context - total);
-    parts.push(`total ${total}/${context} (${percent}%, ${remaining} left)`);
-  } else if (typeof total === "number") {
-    parts.push(`total ${total}`);
-  } else if (typeof context === "number") {
+  if (typeof last?.inputTokens === "number" && typeof context === "number" && context > 0) {
+    const percent = Math.round((last.inputTokens / context) * 100);
+    const remaining = Math.max(0, context - last.inputTokens);
+    parts.push(`context ${last.inputTokens}/${context} (${percent}%, ${remaining} left)`);
+  } else if (typeof context === "number" && context > 0) {
     parts.push(`context ${context}`);
-  } else {
-    parts.push("unknown");
   }
 
-  if (typeof last === "number") parts.push(`last ${last}`);
+  if (typeof total === "number") parts.push(`total ${total}`);
+  if (typeof last?.totalTokens === "number") parts.push(`last ${last.totalTokens}`);
+  if (parts.length === 0) parts.push("unknown");
   return parts.join("; ");
 }
 
