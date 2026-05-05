@@ -78,15 +78,15 @@ When both `CODEX_DEVELOPER_INSTRUCTIONS_FILE` and `CODEX_DEVELOPER_INSTRUCTIONS`
 
 ## Provider Architecture
 
-The core router depends on `MessagingAdapter` and `AgentDriver` interfaces rather than concrete Telegram or Codex classes. `src/messaging/provider.ts` and `src/agents/provider.ts` are the only runtime factories. Adding Feishu/Lark or Claude Code should be done by implementing those interfaces, registering the provider in the factory, and adding provider-specific config validation.
+The relay is organized by domain. The core router depends on `MessagingAdapter` and `AgentDriver` interfaces rather than concrete Telegram or Codex classes. `src/messaging/factory.ts` and `src/agents/factory.ts` are the runtime provider factories. Adding Feishu/Lark or Claude Code should be done by implementing those interfaces, registering the provider in the factory, and adding provider-specific config validation.
 
 Conversation, user, and message IDs are treated as provider IDs and persisted as strings. This is a breaking schema change from older SQLite databases that used Telegram numeric `chat_id`; delete or recreate `.data/agent-relay.sqlite` when upgrading from the pre-provider schema.
 
 Extension points:
 
-- Messaging providers implement `MessagingAdapter` and are selected from `src/messaging/provider.ts`.
-- Agent providers implement `AgentDriver` and are selected from `src/agents/provider.ts`.
-- Agent-visible relay features register `CapabilityDefinition` entries through `CapabilityRegistry`; helper subcommands live in `bin/agent-relay-helper`.
+- Messaging providers implement `MessagingAdapter` under `src/messaging/<provider>/` and are selected from `src/messaging/factory.ts`.
+- Agent providers implement `AgentDriver` under `src/agents/<provider>/` and are selected from `src/agents/factory.ts`.
+- Agent-visible relay features live under `src/relay/capabilities/`, register `CapabilityDefinition` entries through `CapabilityRegistry`, and expose helper subcommands from `bin/agent-relay-helper`.
 
 ## Breaking Changes
 
@@ -175,21 +175,18 @@ The helper calls `POST /v1/capabilities/send_image` with `{ path, cwd, sessionKe
 
 ```text
 src/
-  agent.ts       Session key helpers
-  config.ts      .env loading, validation, and allowlist checks
-  logger.ts      Text stdout logger
-  main.ts        Runtime wiring
-  agents/        Agent provider factory
-  messaging/     Messaging provider factory
-  types.ts       Shared provider-neutral router and persistence types
-  workspace.ts   Workspace validation, discovery, creation, and path safety
-  codex/         Codex app-server driver and JSON-RPC protocol handling
-  rendering/     Telegram text entities, Markdown rendering, and splitting
-  router/        Message routing, Relay Home, workspace flow, commands, and callbacks
-  storage/       SQLite schema, migrations, and persistence methods
-  telegram/      Telegram Bot API adapter, polling, retries, and outbound formatting
+  main.ts        Bun entrypoint that delegates to app/bootstrap
+  app/           Runtime bootstrap plus .env loading, validation, and allowlist checks
+  core/          Provider-neutral IDs, session keys, logger, and workspace safety
+  agents/        AgentDriver types, factory, and Codex app-server provider
+  messaging/     MessagingAdapter types, factory, and Telegram provider
+  relay/         Router, capabilities, control API, media handling, and relay state types
+  persistence/   SQLite store, row types, schema migrations, and persistence mappers
+  rendering/     Telegram text entities, Markdown rendering, UI text, and splitting
 test/
-  *.test.ts      Unit, router, adapter, store, app-server protocol, and smoke tests
+  unit/          Focused unit tests for config, logger, workspace, and rendering
+  integration/   Router, adapter, store, control API, app-server protocol, and smoke tests
+  support/       Shared fake adapter/agent test utilities
 ```
 
 ## Development

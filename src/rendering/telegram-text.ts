@@ -1,4 +1,7 @@
-import type { AgentTokenUsage, TelegramMessageEntity } from "../types.ts";
+import type { AgentTokenUsage } from "../agents/types.ts";
+import type { TextEntity } from "../messaging/types.ts";
+
+type TelegramMessageEntity = TextEntity;
 
 export interface RenderedTelegramText {
   text: string;
