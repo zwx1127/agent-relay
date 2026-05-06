@@ -925,7 +925,7 @@ describe("relay controller", () => {
     store.bindConversation(1, "first");
 
     await router.handle(callbackMessage("ar:w"));
-    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((candidate) => candidate.text.startsWith("Select second"));
+    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.find((row) => row.at(0)?.text === "second")?.at(1);
     expect(button?.callback_data).toMatch(/^ar:uh:/);
 
     await router.handle(callbackMessage(button!.callback_data, 7, "cb2", adapter.edited.at(-1)?.options.messageId));
@@ -951,8 +951,11 @@ describe("relay controller", () => {
 
     expect(adapter.edited.at(-1)?.text).toContain(longName);
     expect(store.getWorkspace(longName)?.path).toBe(longPath);
-    const demoButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:uh:") && button.text.startsWith("Select demo"));
-    expect(demoButton?.text.endsWith("\u00A0")).toBe(true);
+    const demoRow = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.find((row) => row.at(0)?.text === "demo");
+    expect(demoRow?.map((button) => button.text)).toEqual(["demo", "Select", "Delete"]);
+    expect(demoRow?.at(0)?.callback_data.startsWith("ar:wi:0:")).toBe(true);
+    expect(demoRow?.at(1)?.callback_data.startsWith("ar:uh:")).toBe(true);
+    expect(demoRow?.at(2)?.callback_data.startsWith("ar:wd?:")).toBe(true);
     const callbackData = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data);
     const createButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:n");
     const backButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:home");
@@ -964,7 +967,48 @@ describe("relay controller", () => {
     expect(refreshButton?.text).toBe("Refresh");
     expect(footer).toEqual(["Back", "New", "Refresh"]);
     expect(callbackData?.filter((data) => data.startsWith("ar:uh:"))).toHaveLength(2);
+    expect(callbackData?.filter((data) => data.startsWith("ar:wi:0:"))).toHaveLength(2);
     expect(callbackData?.every((data) => new TextEncoder().encode(data).length <= 64)).toBe(true);
+  });
+
+  test("workspace name button opens README intro and returns to workspace list", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    writeFileSync(join(path, "README.md"), "# Demo\n\nProject summary from README.\n\nMore details.");
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+
+    await router.handle(callbackMessage("ar:w"));
+    const introButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wi:0:"));
+    expect(introButton?.text).toBe("demo");
+
+    await router.handle(callbackMessage(introButton!.callback_data, 7, "cb-intro", adapter.edited.at(-1)?.options.messageId));
+
+    expect(adapter.edited.at(-1)?.text).toContain("Workspace");
+    expect(adapter.edited.at(-1)?.text).toContain("demo");
+    expect(adapter.edited.at(-1)?.text).toContain(path);
+    expect(adapter.edited.at(-1)?.text).toContain("Project summary from README.");
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Back", "Select", "Delete"]);
+
+    const backButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:wl:0");
+    await router.handle(callbackMessage(backButton!.callback_data, 7, "cb-intro-back", adapter.edited.at(-1)?.options.messageId));
+
+    expect(adapter.edited.at(-1)?.text).toContain("Workspaces");
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.find((row) => row.at(0)?.text === "demo")?.map((button) => button.text)).toEqual(["demo", "Select", "Delete"]);
+  });
+
+  test("workspace intro shows fallback when README is missing", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+
+    await router.handle(callbackMessage("ar:w"));
+    const introButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wi:0:"));
+
+    await router.handle(callbackMessage(introButton!.callback_data, 7, "cb-intro", adapter.edited.at(-1)?.options.messageId));
+
+    expect(adapter.edited.at(-1)?.text).toContain("No README found.");
   });
 
   test("workspace management back returns to Relay Home", async () => {
@@ -1052,7 +1096,7 @@ describe("relay controller", () => {
     mkdirSync(join(root, workspaceName));
 
     await router.handle(callbackMessage("ar:w"));
-    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((candidate) => candidate.text.startsWith("Select 客户 repo"));
+    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.find((row) => row.at(0)?.text.startsWith("客户 repo"))?.at(1);
     expect(button?.callback_data).toMatch(/^ar:uh:/);
 
     await router.handle(callbackMessage(button!.callback_data, 7, "cb2"));

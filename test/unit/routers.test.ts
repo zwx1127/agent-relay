@@ -47,6 +47,7 @@ describe("relay routers", () => {
       pagedOutput: async (_message, payload) => { calls.push(`page:${payload}`); },
       command: async (_message, payload) => { calls.push(`command:${payload}`); },
       stop: async () => { calls.push("stop"); },
+      workspaceIntro: async (_message, token, pageIndex) => { calls.push(`intro:${pageIndex}:${token}`); },
       confirmDeleteWorkspace: async (_message, token) => { calls.push(`confirm:${token}`); },
       deleteWorkspace: async (_message, token) => { calls.push(`delete:${token}`); },
       selectWorkspace: async (_message, token) => { calls.push(`select:${token}`); },
@@ -82,9 +83,17 @@ describe("relay routers", () => {
       conversationId: "c1",
       userId: "u1",
       callbackQueryId: "cb3",
+      data: "ar:wi:2:def",
+    });
+    await router.route({
+      kind: "callback_query",
+      id: "4",
+      conversationId: "c1",
+      userId: "u1",
+      callbackQueryId: "cb4",
       data: "ar:q:tok:1",
     });
 
-    expect(calls).toEqual(["home", "workspaces:2", "select:abc", "question:q:tok:1"]);
+    expect(calls).toEqual(["home", "workspaces:2", "select:abc", "intro:2:def", "question:q:tok:1"]);
   });
 });

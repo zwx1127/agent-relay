@@ -1,8 +1,8 @@
 import type { AgentThreadSummary, AgentUserInputOption } from "../../ports/agent.ts";
 import type { InlineKeyboardMarkup } from "../../ports/im.ts";
 import type { HomeStatusMode, WorkspaceRecord } from "../types.ts";
-import { UI_BUTTON, WORKSPACE_BUTTON_LABEL_WIDTH } from "./constants.ts";
-import { deleteWorkspaceCallbackData, workspaceCallbackData } from "./callback-data.ts";
+import { UI_BUTTON } from "./constants.ts";
+import { deleteWorkspaceCallbackData, workspaceCallbackData, workspaceIntroCallbackData } from "./callback-data.ts";
 
 export function pagedOutputKeyboard(token: string, pageIndex: number, totalPages: number): InlineKeyboardMarkup {
   if (totalPages <= 1) return { inline_keyboard: [] };
@@ -84,7 +84,11 @@ export function consoleKeyboard(status: { workspaceName?: string; running?: bool
 export function workspacesKeyboard(workspaces: WorkspaceRecord[], selected: string | undefined, pageIndex: number, totalPages: number): InlineKeyboardMarkup {
   const rows = workspaces.map((workspace) => [
     {
-      text: workspaceButtonText(workspace.name, workspace.name === selected),
+      text: buttonLabel(workspace.name),
+      callback_data: workspaceIntroCallbackData(workspace.name, pageIndex),
+    },
+    {
+      text: workspace.name === selected ? UI_BUTTON.selected : UI_BUTTON.unselected,
       callback_data: workspaceCallbackData(workspace.name),
     },
     { text: UI_BUTTON.delete, callback_data: deleteWorkspaceCallbackData(workspace.name, false) },
@@ -117,11 +121,21 @@ export function deleteWorkspaceConfirmKeyboard(name: string): InlineKeyboardMark
   };
 }
 
-export function buttonLabel(value: string): string {
-  return value.length > 40 ? `${value.slice(0, 37)}...` : value;
+export function workspaceIntroKeyboard(workspace: WorkspaceRecord, selected: boolean, pageIndex: number): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [
+      [
+        { text: UI_BUTTON.back, callback_data: `ar:wl:${pageIndex}` },
+        {
+          text: selected ? UI_BUTTON.selected : UI_BUTTON.unselected,
+          callback_data: workspaceCallbackData(workspace.name),
+        },
+        { text: UI_BUTTON.delete, callback_data: deleteWorkspaceCallbackData(workspace.name, false) },
+      ],
+    ],
+  };
 }
 
-export function workspaceButtonText(name: string, selected: boolean): string {
-  const prefix = selected ? `${UI_BUTTON.selected} ` : `${UI_BUTTON.unselected} `;
-  return `${prefix}${buttonLabel(name).padEnd(WORKSPACE_BUTTON_LABEL_WIDTH, "\u00A0")}`;
+export function buttonLabel(value: string): string {
+  return value.length > 40 ? `${value.slice(0, 37)}...` : value;
 }

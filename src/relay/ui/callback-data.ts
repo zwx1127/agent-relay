@@ -19,6 +19,14 @@ export function workspaceCallbackData(name: string): string {
   return callbackData;
 }
 
+export function workspaceIntroCallbackData(name: string, pageIndex: number): string {
+  const callbackData = `ar:wi:${pageIndex}:${workspaceCallbackToken(name)}`;
+  if (new TextEncoder().encode(callbackData).length > CALLBACK_LIMIT_BYTES) {
+    throw new Error("Workspace intro callback data is too long.");
+  }
+  return callbackData;
+}
+
 export function deleteWorkspaceCallbackData(name: string, confirmed: boolean): string {
   const callbackData = `ar:${confirmed ? "wd!" : "wd?"}:${workspaceCallbackToken(name)}`;
   if (new TextEncoder().encode(callbackData).length > CALLBACK_LIMIT_BYTES) {
@@ -38,6 +46,7 @@ export function isConsolePayload(payload: string): boolean {
     || payload === "status"
     || payload === "stop"
     || payload.startsWith("wl:")
+    || payload.startsWith("wi:")
     || payload.startsWith("wd?:")
     || payload.startsWith("wd!:")
     || payload.startsWith("uh:");

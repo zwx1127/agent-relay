@@ -38,19 +38,22 @@ import { noopLogger, type Logger, type LogFields } from "../domain/logger.ts";
 import { CODEX_PROMPT_TTL_MS, DEFAULT_IMAGE_PROMPT, LIST_PAGE_SIZE, MEDIA_GROUP_QUIET_MS, UI_BUTTON } from "./ui/constants.ts";
 import { codexRequestKey, shortToken, workspaceCallbackToken } from "./ui/callback-data.ts";
 import { commandArgs, parseReviewTarget } from "./ui/commands.ts";
-import { approvalKeyboard, codexQuestionConfirmKeyboard, codexQuestionKeyboard, consoleKeyboard, deleteWorkspaceConfirmKeyboard, planReadyKeyboard, resumeKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
+import { approvalKeyboard, codexQuestionConfirmKeyboard, codexQuestionKeyboard, consoleKeyboard, deleteWorkspaceConfirmKeyboard, planReadyKeyboard, resumeKeyboard, workspaceIntroKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
 import { bestPhoto, formatBytes, pathContains, truncateTelegramCaption } from "./ui/media-format.ts";
 import { answeredMessage, confirmMessage, formatApprovalDecisionMessage, formatApprovalMessage, formatCodexAnswerNotePrompt, formatCodexQuestion, formatCodexSelectedAnswer, formatErrorMessage, formatResumeMessage, formatWorkspacesMessage } from "./ui/messages.ts";
 import { paginateWorkspaces } from "./ui/pagination.ts";
 import { approvalResponse, asPromptRecord, isExpired, parsePromptPayload } from "./ui/prompt-state.ts";
 import { formatHomeMessage, statusViewFromParts } from "./ui/status-message.ts";
-import { code, ensureRendered, messageWithTitle, textMessage } from "./ui/text-parts.ts";
+import { bold, code, ensureRendered, messageWithTitle, textMessage } from "./ui/text-parts.ts";
 import type { StatusView } from "./ui/status-view.ts";
 import { type MediaGroupState, type RelayControllerDeps } from "./controller-types.ts";
 import { SlashCommandRouter } from "./command-router.ts";
 import { CallbackRouter, isConsoleCallbackPayload } from "./callback-router.ts";
 import { OutputStreamer } from "./output-streamer.ts";
 import { TaskCoordinator, type TaskSubmitPreference } from "./task-coordinator.ts";
+
+const WORKSPACE_INTRO_FILES = ["README.md", "README", "README.markdown", "README.txt"];
+const WORKSPACE_INTRO_MAX_CHARS = 2400;
 
 export class RelayController {
   private readonly logger: Logger;
@@ -105,6 +108,7 @@ export class RelayController {
       pagedOutput: (message, payload) => this.renderPagedOutputCallback(message, payload),
       command: (message, payload) => this.handleCommandCallback(message, payload),
       stop: (message) => this.stopFromCallback(message),
+      workspaceIntro: (message, token, pageIndex) => this.renderWorkspaceIntroCallback(message, token, pageIndex),
       confirmDeleteWorkspace: (message, token) => this.confirmDeleteWorkspaceCallback(message, token),
       deleteWorkspace: (message, token) => this.deleteWorkspaceCallback(message, token),
       selectWorkspace: (message, token) => this.selectWorkspaceFromToken(message, token),
@@ -771,6 +775,15 @@ export class RelayController {
     })), page.pageIndex, page.totalPages), workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages));
   }
 
+  private async renderWorkspaceIntroCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string, pageIndex: number): Promise<void> {
+    const name = await this.workspaceNameForToken(token);
+    const workspace = this.requireWorkspace(name);
+    const selected = this.currentWorkspace(message.conversationId)?.name === workspace.name;
+    const safePageIndex = Number.isFinite(pageIndex) && pageIndex >= 0 ? Math.floor(pageIndex) : 0;
+    const intro = await this.readWorkspaceIntro(workspace);
+    await this.renderCallbackPage(message, formatWorkspaceIntroMessage(workspace, intro), workspaceIntroKeyboard(workspace, selected, safePageIndex));
+  }
+
   private async selectWorkspaceFromToken(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string): Promise<void> {
     const name = await this.workspaceNameForToken(token);
     const workspace = this.requireWorkspace(name);
@@ -825,6 +838,23 @@ export class RelayController {
     const status = this.statusView(message.conversationId);
     const mode = this.deps.store.getHomeStatusMode(message.conversationId);
     await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
+  }
+
+  private async readWorkspaceIntro(workspace: WorkspaceRecord): Promise<string> {
+    for (const fileName of WORKSPACE_INTRO_FILES) {
+      try {
+        const text = await readFile(join(workspace.path, fileName), "utf8");
+        return workspaceIntroExcerpt(text);
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") continue;
+        this.logger.warn("router.workspace_intro_read_failed", {
+          workspace: workspace.name,
+          path: join(workspace.path, fileName),
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
+    return "No README found.";
   }
 
   private async renderCallbackPage(
@@ -1480,4 +1510,36 @@ export class RelayController {
   private async renderPagedOutputCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
     await this.outputStreamer.renderPagedOutputCallback(message, payload);
   }
+}
+
+function formatWorkspaceIntroMessage(workspace: WorkspaceRecord, intro: string): RenderedTelegramText {
+  return renderTelegramText([
+    bold("Workspace"),
+    "\n\nName: ",
+    code(workspace.name),
+    "\nPath: ",
+    code(workspace.path),
+    "\n\n",
+    bold("README"),
+    "\n\n",
+    intro,
+  ]);
+}
+
+function workspaceIntroExcerpt(text: string): string {
+  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!normalized) return "README is empty.";
+  if (normalized.length <= WORKSPACE_INTRO_MAX_CHARS) return normalized;
+  const window = normalized.slice(0, WORKSPACE_INTRO_MAX_CHARS);
+  const candidates = [
+    { index: window.lastIndexOf("\n\n"), minRatio: 0.45, width: 2 },
+    { index: window.lastIndexOf("\n"), minRatio: 0.6, width: 1 },
+    { index: window.lastIndexOf(" "), minRatio: 0.7, width: 1 },
+  ];
+  for (const candidate of candidates) {
+    if (candidate.index > Math.floor(WORKSPACE_INTRO_MAX_CHARS * candidate.minRatio)) {
+      return `${normalized.slice(0, candidate.index + candidate.width).trimEnd()}\n\n...`;
+    }
+  }
+  return `${window.trimEnd()}\n\n...`;
 }

@@ -18,6 +18,7 @@ export interface CallbackHandlers {
   pagedOutput(message: CallbackMessage, payload: string): Promise<CallbackResult>;
   command(message: CallbackMessage, payload: string): Promise<CallbackResult>;
   stop(message: CallbackMessage): Promise<CallbackResult>;
+  workspaceIntro(message: CallbackMessage, token: string, pageIndex: number): Promise<CallbackResult>;
   confirmDeleteWorkspace(message: CallbackMessage, token: string): Promise<CallbackResult>;
   deleteWorkspace(message: CallbackMessage, token: string): Promise<CallbackResult>;
   selectWorkspace(message: CallbackMessage, token: string): Promise<CallbackResult>;
@@ -65,6 +66,10 @@ export class CallbackRouter {
     }
     if (payload === "stop") {
       return callbackText(await this.handlers.stop(message));
+    }
+    if (payload.startsWith("wi:")) {
+      const [pageIndexText, token] = payload.slice("wi:".length).split(":", 2);
+      return callbackText(await this.handlers.workspaceIntro(message, token ?? "", Number(pageIndexText)));
     }
     if (payload.startsWith("wd?:")) {
       return callbackText(await this.handlers.confirmDeleteWorkspace(message, payload.slice("wd?:".length)));
