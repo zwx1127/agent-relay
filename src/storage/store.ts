@@ -49,5 +49,7 @@ export interface RelayStore {
   nextQueuedTask(conversationId: ConversationId, workspaceName: string): RelayTask | undefined;
   activeTask(conversationId: ConversationId, workspaceName: string): RelayTask | undefined;
   updateTask(id: number, updates: { status?: TaskStatus; turnId?: string | null; statusMessageId?: MessageId | null }): void;
+  updateTasksByTurn(conversationId: ConversationId, workspaceName: string, turnId: string, fromStatuses: TaskStatus[], status: TaskStatus): RelayTask[];
+  updateActiveTasks(conversationId: ConversationId, workspaceName: string, status: TaskStatus): RelayTask[];
   countTasks(conversationId: ConversationId, workspaceName: string, statuses: TaskStatus[]): number;
 }

@@ -447,6 +447,23 @@ export class SQLiteStore implements RelayStore {
     );
   }
 
+  updateTasksByTurn(conversationId: ConversationId, workspaceName: string, turnId: string, fromStatuses: TaskStatus[], status: TaskStatus): RelayTask[] {
+    if (fromStatuses.length === 0) return [];
+    const tasks = this.listTasks(conversationId, workspaceName, fromStatuses, 100).filter((task) => task.turnId === turnId);
+    for (const task of tasks) {
+      this.updateTask(task.id, { status });
+    }
+    return tasks.map((task) => this.getTask(task.id)).filter((task): task is RelayTask => Boolean(task));
+  }
+
+  updateActiveTasks(conversationId: ConversationId, workspaceName: string, status: TaskStatus): RelayTask[] {
+    const tasks = this.listTasks(conversationId, workspaceName, ["running", "blocked"], 100);
+    for (const task of tasks) {
+      this.updateTask(task.id, { status });
+    }
+    return tasks.map((task) => this.getTask(task.id)).filter((task): task is RelayTask => Boolean(task));
+  }
+
   countTasks(conversationId: ConversationId, workspaceName: string, statuses: TaskStatus[]): number {
     if (statuses.length === 0) return 0;
     const placeholders = statuses.map(() => "?").join(", ");

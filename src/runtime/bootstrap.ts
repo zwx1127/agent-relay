@@ -85,5 +85,14 @@ export async function main(): Promise<void> {
     allowed_user_count: config.allowedUserIds.size,
     allowed_conversation_count: config.allowedConversationIds?.size ?? 0,
   });
+  if (config.codexSandbox === "danger-full-access") {
+    logger.warn("app.config_risky", { setting: "CODEX_SANDBOX", value: config.codexSandbox });
+  }
+  if (config.relayControlEnabled) {
+    logger.warn("app.config_risky", { setting: "RELAY_CONTROL_ENABLED", value: String(config.relayControlEnabled) });
+  }
+  if (!config.allowedConversationIds) {
+    logger.warn("app.config_risky", { setting: "ALLOWED_CONVERSATION_IDS", value: "any" });
+  }
   await imAdapter.start((message) => router.handle(message));
 }

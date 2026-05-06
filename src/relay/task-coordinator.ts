@@ -40,6 +40,10 @@ export class TaskCoordinator {
     const status = await this.deps.ensureAgentStarted(conversationId, workspace);
     if (await this.sendWaitingPromptNotice(conversationId, status)) return;
     const busy = Boolean(status.activeTurnId);
+    if (preference === "immediate" && busy) {
+      await this.deps.sendRendered(conversationId, messageWithTitle("Codex is busy.", "Wait for the current turn before running this command."));
+      return;
+    }
     if (preference === "auto" && busy) {
       await this.sendToAgent(conversationId, workspace, taskInput, userMessageId, this.deps.store.activeTask(conversationId, workspace.name));
       return;
@@ -65,17 +69,27 @@ export class TaskCoordinator {
     if (!parsed) return;
     const task = this.deps.store.activeTask(parsed.conversationId, parsed.workspaceName);
     if (!task) return;
-    this.deps.store.updateTask(task.id, { status });
+    this.updateTaskStatus(task.id, status);
     await this.syncTaskReaction(task.id);
   }
 
   async completeAndDispatchNext(sessionKeyValue: string, turnId: string | undefined): Promise<void> {
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) return;
-    const active = this.deps.store.activeTask(parsed.conversationId, parsed.workspaceName);
-    if (active && (!turnId || !active.turnId || active.turnId === turnId)) {
-      this.deps.store.updateTask(active.id, { status: "done" });
-      await this.syncTaskReaction(active.id);
+    const completed = turnId
+      ? this.deps.store.updateTasksByTurn(parsed.conversationId, parsed.workspaceName, turnId, ["running", "blocked"], "done")
+      : [];
+    if (completed.length > 0) {
+      for (const task of completed) {
+        this.logTaskStatus(task.id, task.status, task.turnId);
+        await this.syncTaskReaction(task.id);
+      }
+    } else {
+      const active = this.deps.store.activeTask(parsed.conversationId, parsed.workspaceName);
+      if (active && (!turnId || !active.turnId || active.turnId === turnId)) {
+        this.updateTaskStatus(active.id, "done");
+        await this.syncTaskReaction(active.id);
+      }
     }
     const workspace = this.deps.currentWorkspace(parsed.conversationId);
     if (!workspace || workspace.name !== parsed.workspaceName) return;
@@ -87,8 +101,18 @@ export class TaskCoordinator {
     }
   }
 
+  async cancelActive(sessionKeyValue: string): Promise<void> {
+    const parsed = parseSessionKey(sessionKeyValue);
+    if (!parsed) return;
+    const tasks = this.deps.store.updateActiveTasks(parsed.conversationId, parsed.workspaceName, "cancelled");
+    for (const task of tasks) {
+      this.logTaskStatus(task.id, task.status, task.turnId);
+      await this.syncTaskReaction(task.id);
+    }
+  }
+
   private async runTask(workspace: WorkspaceRecord, task: RelayTask): Promise<void> {
-    this.deps.store.updateTask(task.id, { status: "running" });
+    this.updateTaskStatus(task.id, "running");
     await this.syncTaskReaction(task.id);
     await this.sendToAgent(task.conversationId, workspace, taskInputFromTask(task), task.userMessageId, task);
   }
@@ -133,12 +157,15 @@ export class TaskCoordinator {
       result = await this.deps.agent.send(key, input.text, Object.keys(sendOptions).length > 0 ? sendOptions : undefined);
     } catch (error) {
       if (task) {
-        this.deps.store.updateTask(task.id, { status: "failed" });
+        this.updateTaskStatus(task.id, "failed", task.turnId);
         await this.syncTaskReaction(task.id);
       }
       throw error;
     }
-    if (task && result.turnId) this.deps.store.updateTask(task.id, { turnId: result.turnId, status: "running" });
+    if (task && result.turnId) {
+      this.deps.store.updateTask(task.id, { turnId: result.turnId, status: "running" });
+      this.logTaskStatus(task.id, "running", result.turnId);
+    }
   }
 
   async sendWaitingPromptNotice(conversationId: ConversationId, status: AgentSessionStatus): Promise<boolean> {
@@ -168,5 +195,18 @@ export class TaskCoordinator {
         error: error instanceof Error ? error : new Error(String(error)),
       });
     }
+  }
+
+  private updateTaskStatus(taskId: number, status: RelayTask["status"], turnId?: string): void {
+    this.deps.store.updateTask(taskId, { status, ...(turnId ? { turnId } : {}) });
+    this.logTaskStatus(taskId, status, turnId);
+  }
+
+  private logTaskStatus(taskId: number, status: RelayTask["status"], turnId?: string): void {
+    this.deps.logger.info("router.task_status_changed", {
+      task_id: taskId,
+      status,
+      turn_id: turnId,
+    });
   }
 }

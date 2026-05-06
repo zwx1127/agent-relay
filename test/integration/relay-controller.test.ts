@@ -371,6 +371,21 @@ describe("relay controller", () => {
     expect(agent.sent).toEqual([sentPrompt("Generate a file named AGENTS.md that serves as a contributor guide for this repository.")]);
   });
 
+  test("/init does not steer while a turn is active", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("run task"));
+    const sentCount = agent.sent.length;
+    await router.handle(textMessage("/init"));
+
+    expect(agent.sent).toHaveLength(sentCount);
+    expect(adapter.sent.at(-1)?.text).toContain("Codex is busy.");
+  });
+
   test("/clear starts a fresh thread while keeping the workspace selected", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
@@ -457,6 +472,7 @@ describe("relay controller", () => {
 
     expect(agent.sent.at(-1)).toEqual(sentPrompt("design this", "plan"));
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    agent.getStatus("codex:1:demo")!.activeTurnId = undefined;
     const planButton = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Implement");
     expect(planButton?.callback_data).toMatch(/^ar:cmd:plan:/);
 
@@ -464,6 +480,58 @@ describe("relay controller", () => {
 
     expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
     expect(agent.sent.at(-1)).toEqual(sentPrompt("Implement the approved plan."));
+  });
+
+  test("plan implement callback expires instead of steering into an active turn", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/plan design this"));
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    const planButton = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Implement");
+    const sentCount = agent.sent.length;
+
+    await router.handle(callbackMessage(planButton!.callback_data, 7, "cb-plan", adapter.sent.at(-1)?.messageId));
+
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+    expect(agent.sent).toHaveLength(sentCount);
+    expect(adapter.edited.at(-1)?.text).toContain("Plan action expired.");
+  });
+
+  test("turn completion marks every active task for the turn done", async () => {
+    const { router, store, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    const first = store.createTask({ conversationId: 1, workspaceName: "demo", text: "first", status: "running" });
+    const second = store.createTask({ conversationId: 1, workspaceName: "demo", text: "second", status: "running" });
+    store.updateTask(first.id, { turnId: "turn-shared" });
+    store.updateTask(second.id, { turnId: "turn-shared" });
+
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-shared" });
+
+    expect(store.getTask(first.id)?.status).toBe("done");
+    expect(store.getTask(second.id)?.status).toBe("done");
+  });
+
+  test("/clear cancels active tasks before starting a fresh thread", async () => {
+    const { router, store, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("run task"));
+    const task = store.getTask(1)!;
+    await router.handle(textMessage("/clear"));
+
+    expect(store.getTask(task.id)?.status).toBe("cancelled");
+    expect(agent.stopped).toEqual(["codex:1:demo"]);
+    expect(agent.getStatus("codex:1:demo")?.running).toBe(true);
   });
 
   test("resume callback is no longer supported", async () => {

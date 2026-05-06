@@ -190,8 +190,12 @@ export class RelayController {
       return;
     }
     if (session.type === "turn_completed") {
+      this.logger.info("router.turn_completed", {
+        session_key: session.sessionKey,
+        turn_id: session.turnId,
+      });
       await this.finalizeSessionOutput(session.sessionKey);
-      await this.sendPlanReadyPrompt(session.sessionKey);
+      await this.sendPlanReadyPrompt(session.sessionKey, session.turnId);
       await this.completeTaskAndDispatchNext(session.sessionKey, session.turnId);
       return;
     }
@@ -526,6 +530,7 @@ export class RelayController {
     const key = sessionKey(conversationId, workspace.name);
     await this.finalizeSessionOutput(key);
     await this.deps.agent.stop(key);
+    await this.cancelActiveTasks(key);
     this.deps.store.markSessionStopped(key);
     this.deps.store.clearSessionThreadId(key);
     const status = await this.ensureAgentStarted(conversationId, workspace);
@@ -569,6 +574,7 @@ export class RelayController {
     }
     if (!this.deps.agent.forkThread) throw new Error("Agent driver cannot fork threads.");
     const result = await this.deps.agent.forkThread(key);
+    await this.cancelActiveTasks(key);
     this.deps.store.setSessionThreadId(key, result.threadId);
     await this.sendRendered(conversationId, messageWithTitle("Forked chat.", `Thread: ${result.threadName ?? result.threadId}`));
     this.logger.info("router.thread_forked", { conversation_id: conversationId, workspace: workspace.name, thread_id: result.threadId });
@@ -624,6 +630,7 @@ export class RelayController {
     const { key } = await this.commandSession(conversationId);
     if (!this.deps.agent.cleanBackgroundTerminals) throw new Error("Agent driver cannot clean background terminals.");
     await this.deps.agent.cleanBackgroundTerminals(key);
+    this.logger.info("router.background_terminals_cleaned", { conversation_id: conversationId, session_key: key });
     await this.sendRendered(conversationId, messageWithTitle("Background terminals stopped."));
   }
 
@@ -678,6 +685,7 @@ export class RelayController {
     const key = sessionKey(message.conversationId, workspace.name);
     await this.finalizeSessionOutput(key);
     await this.deps.agent.stop(key);
+    await this.cancelActiveTasks(key);
     this.deps.store.markSessionStopped(key);
     const status = await this.ensureAgentStarted(message.conversationId, workspace, threadId);
     this.deps.store.setSessionThreadId(key, status.threadId ?? threadId);
@@ -693,13 +701,48 @@ export class RelayController {
   ): Promise<void> {
     const workspace = this.requireCurrentWorkspace(message.conversationId);
     const key = sessionKey(message.conversationId, workspace.name);
-    this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+    if (pending.sessionKey && pending.sessionKey !== key) {
+      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+      this.logger.info("router.plan_callback_expired", {
+        conversation_id: message.conversationId,
+        session_key: pending.sessionKey,
+        reason: "session_mismatch",
+      });
+      await this.renderCallbackPage(message, messageWithTitle("Plan action expired.", "Open the latest Plan ready card."), { inline_keyboard: [] });
+      return;
+    }
     if (action === "implement") {
+      const status = this.deps.agent.getStatus(key);
+      if (!status?.running) {
+        this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+        this.logger.info("router.plan_callback_expired", {
+          conversation_id: message.conversationId,
+          session_key: key,
+          reason: "session_not_running",
+        });
+        await this.renderCallbackPage(message, messageWithTitle("Plan action expired.", "The Codex session is no longer running."), { inline_keyboard: [] });
+        return;
+      }
+      if (this.sessionBusy(status) || this.hasTaskCreatedAfter(message.conversationId, workspace.name, pending.createdAt)) {
+        this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+        this.logger.info("router.plan_callback_busy", {
+          conversation_id: message.conversationId,
+          session_key: key,
+          active_turn_id: status.activeTurnId,
+          waiting_for_approval: status.waitingForApproval,
+          waiting_for_user_input: status.waitingForUserInput,
+        });
+        await this.renderCallbackPage(message, messageWithTitle("Plan action expired.", "A newer turn is already active or has been submitted."), { inline_keyboard: [] });
+        return;
+      }
+      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
       this.deps.store.setCollaborationMode(key, "default");
+      this.logger.info("router.plan_callback_implemented", { conversation_id: message.conversationId, session_key: key });
       await this.renderCallbackPage(message, messageWithTitle("Implementing plan."), { inline_keyboard: [] });
       await this.submitTask(message.conversationId, "Implement the approved plan.", undefined, "immediate");
       return;
     }
+    this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
     await this.renderCallbackPage(message, messageWithTitle("Continuing in Plan mode."), { inline_keyboard: [] });
   }
 
@@ -762,6 +805,7 @@ export class RelayController {
         error: error instanceof Error ? error : new Error(String(error)),
       });
     });
+    await this.cancelActiveTasks(key);
     this.deps.store.markSessionStopped(key);
     await rm(workspace.path, { recursive: true, force: true });
     this.deps.store.deleteWorkspace(workspace.name);
@@ -774,6 +818,7 @@ export class RelayController {
     const key = sessionKey(message.conversationId, workspace.name);
     await this.finalizeSessionOutput(key);
     await this.deps.agent.stop(key);
+    await this.cancelActiveTasks(key);
     this.deps.store.markSessionStopped(key);
     this.deps.store.clearBinding(message.conversationId);
     this.logger.info("router.session_stopped", { conversation_id: message.conversationId, workspace: workspace.name, session_key: key });
@@ -985,7 +1030,11 @@ export class RelayController {
     await this.taskCoordinator.completeAndDispatchNext(sessionKeyValue, turnId);
   }
 
-  private async sendPlanReadyPrompt(sessionKeyValue: string): Promise<void> {
+  private async cancelActiveTasks(sessionKeyValue: string): Promise<void> {
+    await this.taskCoordinator.cancelActive(sessionKeyValue);
+  }
+
+  private async sendPlanReadyPrompt(sessionKeyValue: string, completedTurnId?: string): Promise<void> {
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed || this.deps.store.getCollaborationMode(sessionKeyValue) !== "plan") return;
     const token = shortToken();
@@ -994,13 +1043,19 @@ export class RelayController {
       disableWebPagePreview: true,
     });
     if (!result.messageId) return;
+    this.logger.info("router.plan_ready_prompt_sent", {
+      conversation_id: parsed.conversationId,
+      session_key: sessionKeyValue,
+      turn_id: completedTurnId,
+      prompt_message_id: result.messageId,
+    });
     this.deps.store.setPendingPrompt({
       conversationId: parsed.conversationId,
       promptMessageId: result.messageId,
       kind: "relay_command",
       createdAt: Date.now(),
       sessionKey: sessionKeyValue,
-      payloadJson: JSON.stringify({ command: "plan", token }),
+      payloadJson: JSON.stringify({ command: "plan", token, completedTurnId }),
       expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
     });
   }
@@ -1071,6 +1126,11 @@ export class RelayController {
       this.deps.store.countTasks(conversationId, workspace.name, ["blocked"]),
       this.deps.store.activeTask(conversationId, workspace.name),
     );
+  }
+
+  private hasTaskCreatedAfter(conversationId: ConversationId, workspaceName: string, timestamp: number): boolean {
+    return this.deps.store.listTasks(conversationId, workspaceName, undefined, 1)
+      .some((task) => task.createdAt > timestamp);
   }
 
   private readonly mediaGroups = new Map<string, MediaGroupState>();
