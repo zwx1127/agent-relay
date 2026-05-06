@@ -101,14 +101,14 @@ When both `CODEX_DEVELOPER_INSTRUCTIONS_FILE` and `CODEX_DEVELOPER_INSTRUCTIONS`
 
 ## Telegram Usage
 
-Send `/relay` to open Relay Home. Relay Home shows the selected cwd, Codex status, waiting state, and recent errors. The detail toggle shows waiting state, prompt counts, thread, model, combined numeric token/context usage, approval/sandbox policy, and recent output timing. Relay Home uses emoji-only inline buttons; successful actions update the message in place without extra Telegram callback notices, while errors and expired actions still show explicit feedback.
+Send `/relay` to open Relay Home. Relay Home shows the selected cwd, Codex status, waiting state, and recent errors. The detail toggle shows waiting state, prompt counts, thread, model, combined numeric token/context usage, approval/sandbox policy, and recent output timing. Relay Home uses English inline buttons; successful actions update the message in place without extra Telegram callback notices, while errors and expired actions still show explicit feedback.
 
 Relay Home actions:
 
-- `📂`: select an existing first-level directory under `WORKSPACE_ROOT`, create a new cwd through ForceReply, or delete a cwd after confirmation. The create prompt includes an input placeholder for the cwd name.
-- `ℹ️` / `🔙`: toggle compact and detailed status views for the conversation.
-- `🔄`: redraw the current Relay Home message.
-- `🛑`: interrupt the current workspace session and clear the conversation's workspace selection.
+- `Workspaces`: select an existing first-level directory under `WORKSPACE_ROOT`, create a new cwd through ForceReply, or delete a cwd after confirmation. The create prompt includes an input placeholder for the cwd name.
+- `Details` / `Compact`: toggle compact and detailed status views for the conversation.
+- `Refresh`: redraw the current Relay Home message.
+- `Stop`: interrupt the current workspace session and clear the conversation's workspace selection.
 
 After a workspace is selected, ordinary Telegram messages are sent to Codex. Telegram photo messages are downloaded into the selected workspace and sent to Codex as image inputs; photo captions become the prompt, and photos without captions use a default inspection prompt. Telegram file/document attachments are not supported. If Codex is idle, the message starts a new turn. If a Codex turn is active, the message is sent as steering input for that turn. If no workspace is selected, ordinary text or photos open Relay Home instead.
 

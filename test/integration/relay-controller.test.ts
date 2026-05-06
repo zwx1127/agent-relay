@@ -205,9 +205,9 @@ describe("relay controller", () => {
     const paged = adapter.sent.at(-1)!;
     expect(adapter.sent).toHaveLength(1);
     expect(paged.text).toMatch(/Page \d+\/\d+$/);
-    expect(paged.options?.replyMarkup?.inline_keyboard[0]?.map((button) => button.text)).toEqual(["⏮️", "◀️", "▶️", "⏭️"]);
+    expect(paged.options?.replyMarkup?.inline_keyboard[0]?.map((button) => button.text)).toEqual(["First", "Prev", "Next", "Last"]);
 
-    const previous = paged.options!.replyMarkup!.inline_keyboard[0]!.find((button) => button.text === "◀️")!;
+    const previous = paged.options!.replyMarkup!.inline_keyboard[0]!.find((button) => button.text === "Prev")!;
     await router.handle(callbackMessage(previous.callback_data, 7, "cb-page", paged.messageId));
 
     expect(adapter.edited.at(-1)?.options.messageId).toBe(paged.messageId);
@@ -243,7 +243,7 @@ describe("relay controller", () => {
     });
     const prompt = adapter.sent.at(-1)!;
     const approve = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
-    expect(prompt.options!.replyMarkup!.inline_keyboard[0]!.map((button) => button.text)).toEqual(["✅", "❎"]);
+    expect(prompt.options!.replyMarkup!.inline_keyboard[0]!.map((button) => button.text)).toEqual(["Approve", "Deny"]);
 
     await router.handle(callbackMessage(approve.callback_data, 7, "cba", prompt.messageId));
     await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "after approval", turnId: "turn-1" });
@@ -305,7 +305,7 @@ describe("relay controller", () => {
     expect(adapter.sent.at(-1)?.text).toContain("Waiting: none");
     expect(adapter.sent.at(-1)?.options?.entities?.[0]?.type).toBe("bold");
     expect(adapter.sent.at(-1)?.text).toContain("⚪ Stopped");
-    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["📂", "ℹ️", "🔄"]);
+    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Workspaces", "Details", "Refresh"]);
   });
 
   test("/relay opens Relay Home", async () => {
@@ -561,7 +561,7 @@ describe("relay controller", () => {
 
     expect(adapter.edited.at(-1)?.text).toContain("/tmp/<demo>&");
     expect(adapter.edited.at(-1)?.options.entities?.some((entity) => entity.type === "code")).toBe(true);
-    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["📂", "🔙", "🔄", "🛑"]);
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Workspaces", "Compact", "Refresh", "Stop"]);
     expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-details", text: undefined });
 
     await router.handle(textMessage("/relay"));
@@ -925,7 +925,7 @@ describe("relay controller", () => {
     store.bindConversation(1, "first");
 
     await router.handle(callbackMessage("ar:w"));
-    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((candidate) => candidate.text.startsWith("▫️ second"));
+    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((candidate) => candidate.text.startsWith("Select second"));
     expect(button?.callback_data).toMatch(/^ar:uh:/);
 
     await router.handle(callbackMessage(button!.callback_data, 7, "cb2", adapter.edited.at(-1)?.options.messageId));
@@ -951,11 +951,11 @@ describe("relay controller", () => {
 
     expect(adapter.edited.at(-1)?.text).toContain(longName);
     expect(store.getWorkspace(longName)?.path).toBe(longPath);
-    const demoButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:uh:") && button.text.startsWith("▫️ demo"));
+    const demoButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:uh:") && button.text.startsWith("Select demo"));
     expect(demoButton?.text.endsWith("\u00A0")).toBe(true);
     const callbackData = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data);
     const createButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:n");
-    expect(createButton?.text).toBe("🆕");
+    expect(createButton?.text).toBe("New");
     expect(callbackData?.filter((data) => data.startsWith("ar:uh:"))).toHaveLength(2);
     expect(callbackData?.every((data) => new TextEncoder().encode(data).length <= 64)).toBe(true);
   });
@@ -970,7 +970,7 @@ describe("relay controller", () => {
 
     await router.handle(callbackMessage("ar:w"));
     const deleteButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wd?:"));
-    expect(deleteButton?.text).toBe("🗑️");
+    expect(deleteButton?.text).toBe("Delete");
 
     await router.handle(callbackMessage(deleteButton!.callback_data, 7, "cb-delete?", adapter.edited.at(-1)?.options.messageId));
     expect(existsSync(path)).toBe(true);
@@ -1004,7 +1004,7 @@ describe("relay controller", () => {
     mkdirSync(join(root, workspaceName));
 
     await router.handle(callbackMessage("ar:w"));
-    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((candidate) => candidate.text.startsWith("▫️ 客户 repo"));
+    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((candidate) => candidate.text.startsWith("Select 客户 repo"));
     expect(button?.callback_data).toMatch(/^ar:uh:/);
 
     await router.handle(callbackMessage(button!.callback_data, 7, "cb2"));
