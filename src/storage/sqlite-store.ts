@@ -425,7 +425,7 @@ export class SQLiteStore implements RelayStore {
     const row = this.db.query<TaskRow, [string, string]>(`
       SELECT id, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
       FROM tasks
-      WHERE conversation_id = ? AND workspace_name = ? AND status IN ('running', 'blocked')
+      WHERE conversation_id = ? AND workspace_name = ? AND status IN ('waiting', 'running', 'blocked')
       ORDER BY id DESC LIMIT 1
     `).get(String(conversationId), workspaceName);
     return row ? rowToTask(row) : undefined;
@@ -457,7 +457,7 @@ export class SQLiteStore implements RelayStore {
   }
 
   updateActiveTasks(conversationId: ConversationId, workspaceName: string, status: TaskStatus): RelayTask[] {
-    const tasks = this.listTasks(conversationId, workspaceName, ["running", "blocked"], 100);
+    const tasks = this.listTasks(conversationId, workspaceName, ["waiting", "running", "blocked"], 100);
     for (const task of tasks) {
       this.updateTask(task.id, { status });
     }

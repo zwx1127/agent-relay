@@ -29,6 +29,7 @@ export function transcriptTextForInput(input: AgentTaskInput): string {
 
 export function reactionForTaskStatus(status: RelayTask["status"]): string {
   switch (status) {
+    case "waiting":
     case "queued":
       return "🫡";
     case "running":

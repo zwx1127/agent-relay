@@ -45,7 +45,16 @@ export class TaskCoordinator {
       return;
     }
     if (preference === "auto" && busy) {
-      await this.sendToAgent(conversationId, workspace, taskInput, userMessageId, this.deps.store.activeTask(conversationId, workspace.name));
+      const task = this.deps.store.createTask({
+        conversationId,
+        workspaceName: workspace.name,
+        text,
+        input: input && input.images?.length ? input : undefined,
+        status: "waiting",
+        userMessageId,
+      });
+      await this.syncTaskReaction(task.id);
+      await this.sendToAgent(conversationId, workspace, taskInput, userMessageId, task);
       return;
     }
     const shouldQueue = preference === "queue";
@@ -64,11 +73,28 @@ export class TaskCoordinator {
     await this.runTask(workspace, task);
   }
 
-  async markActive(sessionKeyValue: string, status: "blocked" | "running"): Promise<void> {
+  async markActive(sessionKeyValue: string, status: "blocked" | "running", turnId?: string): Promise<void> {
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) return;
+    if (turnId) {
+      const fromStatuses: RelayTask["status"][] = status === "blocked" ? ["running"] : ["blocked"];
+      const tasks = this.deps.store.updateTasksByTurn(parsed.conversationId, parsed.workspaceName, turnId, fromStatuses, status);
+      for (const task of tasks) {
+        this.logTaskStatus(task.id, task.status, task.turnId);
+        await this.syncTaskReaction(task.id);
+      }
+      if (tasks.length > 0) return;
+    }
+    if (status === "running") {
+      const tasks = this.deps.store.listTasks(parsed.conversationId, parsed.workspaceName, ["blocked"], 100);
+      for (const task of tasks) {
+        this.updateTaskStatus(task.id, status, task.turnId);
+        await this.syncTaskReaction(task.id);
+      }
+      if (tasks.length > 0) return;
+    }
     const task = this.deps.store.activeTask(parsed.conversationId, parsed.workspaceName);
-    if (!task) return;
+    if (!task || task.status === "waiting") return;
     this.updateTaskStatus(task.id, status);
     await this.syncTaskReaction(task.id);
   }
@@ -86,7 +112,7 @@ export class TaskCoordinator {
       }
     } else {
       const active = this.deps.store.activeTask(parsed.conversationId, parsed.workspaceName);
-      if (active && (!turnId || !active.turnId || active.turnId === turnId)) {
+      if (active && active.status !== "waiting" && (!turnId || !active.turnId || active.turnId === turnId)) {
         this.updateTaskStatus(active.id, "done");
         await this.syncTaskReaction(active.id);
       }
@@ -95,6 +121,7 @@ export class TaskCoordinator {
     if (!workspace || workspace.name !== parsed.workspaceName) return;
     const status = this.deps.agent.getStatus(sessionKeyValue);
     if (status?.waitingForApproval || status?.waitingForUserInput || status?.activeTurnId) return;
+    if (this.deps.store.countTasks(parsed.conversationId, parsed.workspaceName, ["waiting"]) > 0) return;
     const next = this.deps.store.nextQueuedTask(parsed.conversationId, parsed.workspaceName);
     if (next) {
       await this.runTask(workspace, next);
@@ -105,6 +132,16 @@ export class TaskCoordinator {
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) return;
     const tasks = this.deps.store.updateActiveTasks(parsed.conversationId, parsed.workspaceName, "cancelled");
+    for (const task of tasks) {
+      this.logTaskStatus(task.id, task.status, task.turnId);
+      await this.syncTaskReaction(task.id);
+    }
+  }
+
+  async failActive(sessionKeyValue: string): Promise<void> {
+    const parsed = parseSessionKey(sessionKeyValue);
+    if (!parsed) return;
+    const tasks = this.deps.store.updateActiveTasks(parsed.conversationId, parsed.workspaceName, "failed");
     for (const task of tasks) {
       this.logTaskStatus(task.id, task.status, task.turnId);
       await this.syncTaskReaction(task.id);
@@ -163,8 +200,10 @@ export class TaskCoordinator {
       throw error;
     }
     if (task && result.turnId) {
+      const previousStatus = this.deps.store.getTask(task.id)?.status;
       this.deps.store.updateTask(task.id, { turnId: result.turnId, status: "running" });
       this.logTaskStatus(task.id, "running", result.turnId);
+      if (previousStatus !== "running") await this.syncTaskReaction(task.id);
     }
   }
 

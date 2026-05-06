@@ -9,6 +9,7 @@ export function statusViewFromParts(
   status: AgentSessionStatus | undefined,
   recentOutputAt: number | undefined,
   recentError: string | undefined,
+  waitingTaskCount = 0,
   queuedTaskCount = 0,
   blockedTaskCount = 0,
   activeTask?: RelayTask,
@@ -32,6 +33,7 @@ export function statusViewFromParts(
     contextWindow: status?.contextWindow,
     waitingForApproval: status?.waitingForApproval,
     waitingForUserInput: status?.waitingForUserInput,
+    waitingTaskCount,
     queuedTaskCount,
     blockedTaskCount,
     activeTaskId: activeTask?.id,
@@ -129,6 +131,7 @@ export function formatWaiting(status: StatusView): string {
 export function formatTaskCounts(status: StatusView): string {
   const parts = [
     status.activeTaskId ? `#${status.activeTaskId} ${status.activeTaskStatus ?? "active"}` : undefined,
+    status.waitingTaskCount ? `${status.waitingTaskCount} waiting` : undefined,
     status.queuedTaskCount ? `${status.queuedTaskCount} queued` : undefined,
     status.blockedTaskCount ? `${status.blockedTaskCount} blocked` : undefined,
   ].filter(Boolean);

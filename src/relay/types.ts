@@ -37,7 +37,7 @@ export interface PendingPrompt {
 
 export type HomeStatusMode = "compact" | "details";
 
-export type TaskStatus = "queued" | "running" | "blocked" | "done" | "failed" | "cancelled";
+export type TaskStatus = "waiting" | "queued" | "running" | "blocked" | "done" | "failed" | "cancelled";
 
 export interface RelayTask {
   id: number;

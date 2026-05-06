@@ -338,7 +338,7 @@ describe("relay controller", () => {
     ]);
     expect(agent.builtins).toEqual([]);
     expect(adapter.sent).toEqual([]);
-    expect(adapter.reactions).toEqual([{ conversationId: "1", messageId: "1", emoji: "✍" }]);
+    expect(adapter.reactions.map((reaction) => reaction.emoji)).toEqual(["✍", "🫡", "✍", "🫡", "✍", "🫡", "✍", "🫡", "✍"]);
   });
 
   test("/review and /compact run Codex built-ins", async () => {
@@ -480,6 +480,16 @@ describe("relay controller", () => {
 
     expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
     expect(agent.sent.at(-1)).toEqual(sentPrompt("Implement the approved plan."));
+    expect(adapter.reactions).toEqual([
+      { conversationId: "1", messageId: "1", emoji: "✍" },
+      { conversationId: "1", messageId: "1", emoji: "😎" },
+      { conversationId: "1", messageId: "100", emoji: "✍" },
+    ]);
+
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-2" });
+
+    expect(store.getTask(2)?.status).toBe("done");
+    expect(adapter.reactions.at(-1)).toEqual({ conversationId: "1", messageId: "100", emoji: "😎" });
   });
 
   test("plan implement callback expires instead of steering into an active turn", async () => {
@@ -516,6 +526,64 @@ describe("relay controller", () => {
 
     expect(store.getTask(first.id)?.status).toBe("done");
     expect(store.getTask(second.id)?.status).toBe("done");
+  });
+
+  test("turn blocking and resume update every active task for the turn", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    const first = store.createTask({ conversationId: 1, workspaceName: "demo", text: "first", status: "running", userMessageId: 11 });
+    const second = store.createTask({ conversationId: 1, workspaceName: "demo", text: "second", status: "running", userMessageId: 12 });
+    store.updateTask(first.id, { turnId: "turn-shared" });
+    store.updateTask(second.id, { turnId: "turn-shared" });
+
+    await router.handleAgentOutput({
+      type: "approval_request",
+      sessionKey: "codex:1:demo",
+      requestId: 91,
+      method: "item/commandExecution/requestApproval",
+      approvalKind: "command",
+      title: "Approve command?",
+      body: "Run tests",
+      params: { command: "bun test" },
+      turnId: "turn-shared",
+    });
+
+    expect(store.getTask(first.id)?.status).toBe("blocked");
+    expect(store.getTask(second.id)?.status).toBe("blocked");
+
+    const approve = adapter.sent.at(-1)!.options!.replyMarkup!.inline_keyboard[0]![0]!;
+    await router.handle(callbackMessage(approve.callback_data, 7, "cb-approval", adapter.sent.at(-1)!.messageId));
+
+    expect(store.getTask(first.id)?.status).toBe("running");
+    expect(store.getTask(second.id)?.status).toBe("running");
+    expect(adapter.reactions).toEqual([
+      { conversationId: "1", messageId: "11", emoji: "🤔" },
+      { conversationId: "1", messageId: "12", emoji: "🤔" },
+      { conversationId: "1", messageId: "11", emoji: "✍" },
+      { conversationId: "1", messageId: "12", emoji: "✍" },
+    ]);
+  });
+
+  test("agent exit marks active tasks failed", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    const running = store.createTask({ conversationId: 1, workspaceName: "demo", text: "running", status: "running", userMessageId: 11 });
+    const waiting = store.createTask({ conversationId: 1, workspaceName: "demo", text: "waiting", status: "waiting", userMessageId: 12 });
+
+    await router.handleAgentExit("codex:1:demo", "Agent exited.");
+
+    expect(store.getTask(running.id)?.status).toBe("failed");
+    expect(store.getTask(waiting.id)?.status).toBe("failed");
+    expect(adapter.reactions).toEqual([
+      { conversationId: "1", messageId: "11", emoji: "😱" },
+      { conversationId: "1", messageId: "12", emoji: "😱" },
+    ]);
   });
 
   test("/clear cancels active tasks before starting a fresh thread", async () => {
@@ -662,11 +730,18 @@ describe("relay controller", () => {
 
     expect(agent.sent.at(-1)).toEqual(sentPrompt("new task while busy"));
     expect(adapter.sent).toEqual([]);
+    expect(store.getTask(1)?.status).toBe("running");
+    expect(store.getTask(1)?.turnId).toBe("turn-1");
     expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(0);
+    expect(store.listTasks(1, "demo", ["waiting"])).toHaveLength(0);
+    expect(adapter.reactions).toEqual([
+      { conversationId: "1", messageId: "1", emoji: "🫡" },
+      { conversationId: "1", messageId: "1", emoji: "✍" },
+    ]);
   });
 
   test("/add is forwarded literally and steers the active turn", async () => {
-    const { router, store, agent, root } = fixture();
+    const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
@@ -677,7 +752,32 @@ describe("relay controller", () => {
     await router.handle(textMessage("/add include tests"));
 
     expect(agent.sent.at(-1)).toEqual(sentPrompt("/add include tests"));
+    expect(store.getTask(1)?.status).toBe("running");
     expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(0);
+    expect(adapter.reactions).toEqual([
+      { conversationId: "1", messageId: "1", emoji: "🫡" },
+      { conversationId: "1", messageId: "1", emoji: "✍" },
+    ]);
+  });
+
+  test("busy prompt failure updates the waiting message reaction", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    const status = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
+    status.activeTurnId = "turn-1";
+    agent.failSend = new Error("steer exploded");
+
+    await router.handle(textMessage("new task while busy"));
+
+    expect(store.getTask(1)?.status).toBe("failed");
+    expect(adapter.sent.at(-1)?.text).toContain("Error:");
+    expect(adapter.reactions).toEqual([
+      { conversationId: "1", messageId: "1", emoji: "🫡" },
+      { conversationId: "1", messageId: "1", emoji: "😱" },
+    ]);
   });
 
   test("queued prompt updates the user message reaction", async () => {

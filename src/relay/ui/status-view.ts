@@ -19,6 +19,7 @@ export interface StatusView {
   contextWindow?: number;
   waitingForUserInput?: boolean;
   waitingForApproval?: boolean;
+  waitingTaskCount?: number;
   queuedTaskCount?: number;
   blockedTaskCount?: number;
   activeTaskId?: number;

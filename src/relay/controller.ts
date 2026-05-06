@@ -205,13 +205,13 @@ export class RelayController {
     }
     if (session.type === "user_input_request") {
       await this.finalizeSessionOutput(session.sessionKey);
-      await this.markActiveTask(session.sessionKey, "blocked");
+      await this.markActiveTask(session.sessionKey, "blocked", session.turnId);
       await this.handleCodexUserInputRequest(session);
       return;
     }
     if (session.type === "approval_request") {
       await this.finalizeSessionOutput(session.sessionKey);
-      await this.markActiveTask(session.sessionKey, "blocked");
+      await this.markActiveTask(session.sessionKey, "blocked", session.turnId);
       await this.handleCodexApprovalRequest(session);
       return;
     }
@@ -250,6 +250,7 @@ export class RelayController {
     });
     this.deps.store.markSessionStopped(sessionKeyValue);
     await this.finalizeSessionOutput(sessionKeyValue);
+    await this.failActiveTasks(sessionKeyValue);
     await this.sendRendered(parsed.conversationId, messageWithTitle(exitText));
   }
 
@@ -743,7 +744,7 @@ export class RelayController {
       this.deps.store.setCollaborationMode(key, "default");
       this.logger.info("router.plan_callback_implemented", { conversation_id: message.conversationId, session_key: key });
       await this.renderCallbackPage(message, messageWithTitle("Implementing plan."), { inline_keyboard: [] });
-      await this.submitTask(message.conversationId, "Implement the approved plan.", undefined, "immediate");
+      await this.submitTask(message.conversationId, "Implement the approved plan.", message.messageId, "immediate");
       return;
     }
     this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
@@ -1052,8 +1053,8 @@ export class RelayController {
     return status;
   }
 
-  private async markActiveTask(sessionKeyValue: string, status: "blocked" | "running"): Promise<void> {
-    await this.taskCoordinator.markActive(sessionKeyValue, status);
+  private async markActiveTask(sessionKeyValue: string, status: "blocked" | "running", turnId?: string): Promise<void> {
+    await this.taskCoordinator.markActive(sessionKeyValue, status, turnId);
   }
 
   private async completeTaskAndDispatchNext(sessionKeyValue: string, turnId: string | undefined): Promise<void> {
@@ -1062,6 +1063,10 @@ export class RelayController {
 
   private async cancelActiveTasks(sessionKeyValue: string): Promise<void> {
     await this.taskCoordinator.cancelActive(sessionKeyValue);
+  }
+
+  private async failActiveTasks(sessionKeyValue: string): Promise<void> {
+    await this.taskCoordinator.failActive(sessionKeyValue);
   }
 
   private async sendPlanReadyPrompt(sessionKeyValue: string, completedTurnId?: string): Promise<void> {
@@ -1152,6 +1157,7 @@ export class RelayController {
       status,
       recentOutput?.createdAt,
       recentError?.text,
+      this.deps.store.countTasks(conversationId, workspace.name, ["waiting"]),
       this.deps.store.countTasks(conversationId, workspace.name, ["queued"]),
       this.deps.store.countTasks(conversationId, workspace.name, ["blocked"]),
       this.deps.store.activeTask(conversationId, workspace.name),
