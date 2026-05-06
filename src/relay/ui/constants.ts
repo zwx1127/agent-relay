@@ -16,6 +16,7 @@ export const UI_BUTTON = {
   status: "Details",
   compact: "Compact",
   refresh: "Refresh",
+  back: "Back",
   stop: "Stop",
   create: "New",
   delete: "Delete",

@@ -113,11 +113,11 @@ export function approvalMessageParts(title: string, body: string): TelegramTextP
 export function formatWorkspacesMessage(workspaces: Array<{ name: string; selected: boolean }>, pageIndex: number, totalPages: number): RenderedTelegramText {
   if (workspaces.length === 0) {
     return renderTelegramText([
-      bold("Workspace"),
+      bold("Workspaces"),
       `\n\nNo cwd directories found.\nUse ${UI_BUTTON.create} to create one.`,
     ]);
   }
-  const parts: TelegramTextPart[] = [bold("Workspace"), `\n\nPage ${pageIndex + 1}/${totalPages}\n`];
+  const parts: TelegramTextPart[] = [bold("Workspaces"), `\n\nPage ${pageIndex + 1}/${totalPages}\n`];
   for (const workspace of workspaces) {
     parts.push("\n", workspace.selected ? `${UI_BUTTON.selected} ` : `${UI_BUTTON.unselected} `, code(workspace.name));
   }

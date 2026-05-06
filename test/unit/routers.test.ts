@@ -58,6 +58,14 @@ describe("relay routers", () => {
       conversationId: "c1",
       userId: "u1",
       callbackQueryId: "cb1",
+      data: "ar:home",
+    });
+    await router.route({
+      kind: "callback_query",
+      id: "1",
+      conversationId: "c1",
+      userId: "u1",
+      callbackQueryId: "cb1",
       data: "ar:wl:2",
     });
     await router.route({
@@ -77,6 +85,6 @@ describe("relay routers", () => {
       data: "ar:q:tok:1",
     });
 
-    expect(calls).toEqual(["workspaces:2", "select:abc", "question:q:tok:1"]);
+    expect(calls).toEqual(["home", "workspaces:2", "select:abc", "question:q:tok:1"]);
   });
 });

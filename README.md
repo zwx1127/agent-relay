@@ -107,7 +107,7 @@ Send `/relay` to open Relay Home. Relay Home shows the selected cwd, Codex statu
 
 Relay Home actions:
 
-- `Workspaces`: select an existing first-level directory under `WORKSPACE_ROOT`, create a new cwd through ForceReply, or delete a cwd after confirmation. The create prompt includes an input placeholder for the cwd name.
+- `Workspaces`: open the workspace management view. It lists first-level directories under `WORKSPACE_ROOT`, keeps `Back`, `New`, and `Refresh` actions fixed at the bottom, and supports selecting a cwd or deleting one after confirmation. `Back` returns to Relay Home, and the create prompt includes an input placeholder for the cwd name.
 - `Details` / `Compact`: toggle compact and detailed status views for the conversation.
 - `Refresh`: redraw the current Relay Home message.
 - `Stop`: interrupt the current workspace session and clear the conversation's workspace selection.

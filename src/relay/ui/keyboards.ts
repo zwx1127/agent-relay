@@ -100,6 +100,7 @@ export function workspacesKeyboard(workspaces: WorkspaceRecord[], selected: stri
     inline_keyboard: [
       ...rows,
       [
+        { text: UI_BUTTON.back, callback_data: "ar:home" },
         { text: UI_BUTTON.create, callback_data: "ar:n" },
         { text: UI_BUTTON.refresh, callback_data: "ar:w" },
       ],
@@ -111,7 +112,7 @@ export function deleteWorkspaceConfirmKeyboard(name: string): InlineKeyboardMark
   return {
     inline_keyboard: [[
       { text: UI_BUTTON.delete, callback_data: deleteWorkspaceCallbackData(name, true) },
-      { text: UI_BUTTON.workspace, callback_data: "ar:w" },
+      { text: UI_BUTTON.back, callback_data: "ar:home" },
     ]],
   };
 }

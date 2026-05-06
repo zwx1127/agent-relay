@@ -955,9 +955,33 @@ describe("relay controller", () => {
     expect(demoButton?.text.endsWith("\u00A0")).toBe(true);
     const callbackData = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data);
     const createButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:n");
+    const backButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:home");
+    const refreshButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:w");
+    const footer = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.at(-1)?.map((button) => button.text);
+    expect(adapter.edited.at(-1)?.text).toContain("Workspaces");
+    expect(backButton?.text).toBe("Back");
     expect(createButton?.text).toBe("New");
+    expect(refreshButton?.text).toBe("Refresh");
+    expect(footer).toEqual(["Back", "New", "Refresh"]);
     expect(callbackData?.filter((data) => data.startsWith("ar:uh:"))).toHaveLength(2);
     expect(callbackData?.every((data) => new TextEncoder().encode(data).length <= 64)).toBe(true);
+  });
+
+  test("workspace management back returns to Relay Home", async () => {
+    const { router, adapter } = fixture();
+    await router.handle(textMessage("/relay"));
+    const homeMessageId = adapter.sent.at(-1)?.messageId;
+
+    await router.handle(callbackMessage("ar:w", 7, "cb-workspaces", homeMessageId));
+    const backButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:home");
+    expect(backButton?.text).toBe("Back");
+
+    await router.handle(callbackMessage(backButton!.callback_data, 7, "cb-back", adapter.edited.at(-1)?.options.messageId));
+
+    expect(adapter.edited.at(-1)?.text).toContain("Relay Home");
+    expect(adapter.edited.at(-1)?.text).toContain("cwd: none");
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Workspaces", "Details", "Refresh"]);
+    expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-back", text: undefined });
   });
 
   test("workspace delete requires confirmation and removes directory and binding", async () => {
@@ -975,6 +999,7 @@ describe("relay controller", () => {
     await router.handle(callbackMessage(deleteButton!.callback_data, 7, "cb-delete?", adapter.edited.at(-1)?.options.messageId));
     expect(existsSync(path)).toBe(true);
     expect(adapter.edited.at(-1)?.text).toContain("Delete workspace?");
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Delete", "Back"]);
 
     const confirmButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wd!:"));
     await router.handle(callbackMessage(confirmButton!.callback_data, 7, "cb-delete!", adapter.edited.at(-1)?.options.messageId));
@@ -984,6 +1009,29 @@ describe("relay controller", () => {
     expect(store.getBinding(1)).toBeUndefined();
     expect(agent.stopped).toEqual(["codex:1:demo"]);
     expect(adapter.edited.at(-1)?.text).toContain("No cwd directories found.");
+  });
+
+  test("workspace delete confirmation back returns to Relay Home", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/relay"));
+    const homeMessageId = adapter.sent.at(-1)?.messageId;
+    await router.handle(callbackMessage("ar:w", 7, "cb-workspaces", homeMessageId));
+    const deleteButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wd?:"));
+    await router.handle(callbackMessage(deleteButton!.callback_data, 7, "cb-delete?", adapter.edited.at(-1)?.options.messageId));
+    const backButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:home");
+
+    await router.handle(callbackMessage(backButton!.callback_data, 7, "cb-back", adapter.edited.at(-1)?.options.messageId));
+
+    expect(existsSync(path)).toBe(true);
+    expect(store.getBinding(1)?.workspaceName).toBe("demo");
+    expect(adapter.edited.at(-1)?.text).toContain("Relay Home");
+    expect(adapter.edited.at(-1)?.text).toContain("cwd: demo");
+    expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-back", text: undefined });
   });
 
   test("/cd without a workspace opens Relay Home instead of creating cwd directly", async () => {
