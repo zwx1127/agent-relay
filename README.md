@@ -61,7 +61,7 @@ scripts/relay.sh restart
 scripts/relay.sh clean-data
 ```
 
-The script writes the process id to `.data/agent-relay.pid` and appends logs to `logs/agent-relay.log`. `clean-data` removes `.data/` and `logs/`, and refuses to run while the relay process is still active.
+The script writes the process id to `.data/agent-relay.pid` and appends logs to `logs/agent-relay.log`. `restart` stops the relay, removes `.data/` and `logs/`, then starts a fresh process. `clean-data` removes `.data/` and `logs/`, and refuses to run while the relay process is still active.
 
 For development with file watching:
 
