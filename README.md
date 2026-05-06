@@ -63,6 +63,8 @@ scripts/relay.sh clean-data
 
 The script writes the process id to `.data/agent-relay.pid` and appends logs to `logs/agent-relay.log`. `restart` stops the relay, removes `.data/` and `logs/`, then starts a fresh process. `clean-data` removes `.data/` and `logs/`, and refuses to run while the relay process is still active.
 
+agent-relay can be used to develop itself: select this repository as the workspace, ask Codex to make changes, and use `scripts/relay.sh restart` when the running relay should restart with clean `.data/` and `logs/`.
+
 For development with file watching:
 
 ```bash
@@ -148,7 +150,7 @@ Stored media lives under `.agent-relay/media/incoming` and `.agent-relay/media/o
 
 When `RELAY_CONTROL_ENABLED=true`, agent-relay starts a local control API bound to `127.0.0.1` and injects a helper plus registered capability instructions into the agent. The API is protected with a random bearer token that is generated on relay startup and passed only to the agent child process.
 
-The first capability is `send_image`, intended for remote H5/web UI debugging. Codex can render a page with Playwright, save a screenshot inside the selected workspace, and send it back to the Telegram chat:
+The registered capability is `send_image`, intended for remote H5/web UI debugging. Codex can render a page with Playwright, save a screenshot inside the selected workspace, and send it back to the Telegram chat:
 
 ```bash
 "$AGENT_RELAY_HELPER" send-image /absolute/path/to/screen.png --cwd "$PWD" --caption "current home screen"
@@ -190,23 +192,10 @@ Extension points:
 - Persistence implementations implement `RelayStore`; SQLite is the default implementation.
 - Agent-visible relay features live under `src/relay/capabilities/`, register `CapabilityDefinition` entries through `CapabilityRegistry`, and expose helper subcommands from `bin/agent-relay-helper`.
 
-## Upgrade Notes
-
-The provider refactor changed runtime configuration and the SQLite schema:
-
-- Rename `TELEGRAM_ALLOWED_USER_IDS` to `ALLOWED_USER_IDS`.
-- Rename `TELEGRAM_ALLOWED_CHAT_IDS` to `ALLOWED_CONVERSATION_IDS`.
-- Rename `TELEGRAM_IMAGE_MAX_BYTES` to `MEDIA_MAX_BYTES`.
-- Rename `MESSAGING_PROVIDER` to `IM_PROVIDER`.
-- Session keys now include the agent provider, for example `codex:<conversation-id>:<workspace>`.
-- Conversation, user, and message IDs are treated as provider IDs and persisted as strings.
-- Existing SQLite databases using the old numeric `chat_id` schema are not migrated automatically. Stop the relay and remove or recreate `.data/agent-relay.sqlite` before starting the new version.
-
 ## Known Limitations
 
 - Only the Telegram IM provider and Codex agent provider are implemented today.
 - Telegram file/document attachments are not supported, including document uploads whose MIME type is an image.
-- Existing pre-provider SQLite databases are not automatically migrated.
 - The repository is intended for GitHub source use. npm publication is not configured, and `package.json` remains marked as private.
 
 ## Security and Privacy
