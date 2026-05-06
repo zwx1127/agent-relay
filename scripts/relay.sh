@@ -214,10 +214,17 @@ pid_is_ancestor() {
 schedule_restart() {
   local pid="$1"
   mkdir -p "$DATA_DIR" "$LOG_DIR"
-  (
-    cd "$ROOT_DIR"
-    nohup "$ROOT_DIR/scripts/relay.sh" __restart-worker >>"$LOG_FILE" 2>&1 &
-  )
+  if command -v setsid >/dev/null 2>&1; then
+    (
+      cd "$ROOT_DIR"
+      setsid -f "$ROOT_DIR/scripts/relay.sh" __restart-worker </dev/null >>"$LOG_FILE" 2>&1
+    )
+  else
+    (
+      cd "$ROOT_DIR"
+      nohup "$ROOT_DIR/scripts/relay.sh" __restart-worker </dev/null >>"$LOG_FILE" 2>&1 &
+    )
+  fi
   echo "agent-relay restart scheduled (pid $pid)"
   echo "log: $LOG_FILE"
 }
