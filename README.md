@@ -51,6 +51,18 @@ Start the relay:
 bun run start
 ```
 
+Run the relay in the background with the project management script:
+
+```bash
+scripts/relay.sh start
+scripts/relay.sh status
+scripts/relay.sh stop
+scripts/relay.sh restart
+scripts/relay.sh clean-data
+```
+
+The script writes the process id to `.data/agent-relay.pid` and appends logs to `logs/agent-relay.log`. `clean-data` removes `.data/` and `logs/`, and refuses to run while the relay process is still active.
+
 For development with file watching:
 
 ```bash
