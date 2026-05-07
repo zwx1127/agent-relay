@@ -17,6 +17,7 @@ export class FakeImAdapter {
   sent: Array<{ conversationId: ConversationId; text: string; options?: SendMessageOptions; messageId?: number }> = [];
   photos: Array<{ conversationId: ConversationId; photo: Blob; options?: unknown; messageId?: number }> = [];
   edited: Array<{ conversationId: ConversationId; text: string; options: EditMessageTextOptions }> = [];
+  deleted: Array<{ conversationId: ConversationId; messageId: MessageId }> = [];
   answered: Array<{ callbackQueryId: string; text?: string }> = [];
   chatActions: Array<{ conversationId: ConversationId; action?: "typing" }> = [];
   reactions: Array<{ conversationId: ConversationId; messageId: MessageId; emoji?: string }> = [];
@@ -25,6 +26,7 @@ export class FakeImAdapter {
   sendMessageDelayMs = 0;
   failSendMessage?: Error;
   failEditMessage?: Error;
+  failDeleteMessage?: Error;
   failReaction?: Error;
 
   async sendMessage(conversationId: ConversationId, text: string, options?: SendMessageOptions): Promise<{ messageId?: number }> {
@@ -51,6 +53,11 @@ export class FakeImAdapter {
   async editMessageText(conversationId: ConversationId, text: string, options: EditMessageTextOptions): Promise<void> {
     if (this.failEditMessage) throw this.failEditMessage;
     this.edited.push({ conversationId, text, options });
+  }
+
+  async deleteMessage(conversationId: ConversationId, messageId: MessageId): Promise<void> {
+    if (this.failDeleteMessage) throw this.failDeleteMessage;
+    this.deleted.push({ conversationId, messageId });
   }
 
   async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {

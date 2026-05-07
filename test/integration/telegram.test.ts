@@ -457,6 +457,7 @@ describe("telegram adapter", () => {
     });
     await adapter.answerCallbackQuery("cb1", "Done");
     await adapter.sendChatAction(1);
+    await adapter.deleteMessage(1, 2);
 
     expect(requests).toEqual([
       {
@@ -482,6 +483,13 @@ describe("telegram adapter", () => {
         body: {
           chat_id: 1,
           action: "typing",
+        },
+      },
+      {
+        method: "deleteMessage",
+        body: {
+          chat_id: 1,
+          message_id: 2,
         },
       },
     ]);

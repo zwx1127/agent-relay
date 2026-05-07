@@ -8,7 +8,7 @@ import type { RelayStore } from "../storage/store.ts";
 export interface RelayControllerDeps {
   config: AppConfig;
   store: RelayStore;
-  adapter: Pick<ImAdapter, "sendMessage" | "sendPhoto" | "editMessageText" | "answerCallbackQuery" | "sendChatAction" | "setMessageReaction" | "downloadFile" | "capabilities">;
+  adapter: Pick<ImAdapter, "sendMessage" | "sendPhoto" | "editMessageText" | "deleteMessage" | "answerCallbackQuery" | "sendChatAction" | "setMessageReaction" | "downloadFile" | "capabilities">;
   agent: AgentDriver;
   logger?: Logger;
 }

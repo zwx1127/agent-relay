@@ -492,6 +492,54 @@ describe("relay controller", () => {
     expect(adapter.reactions.at(-1)).toEqual({ conversationId: "1", messageId: "100", emoji: "😎" });
   });
 
+  test("plan continue callback deletes the plan ready prompt without sending text", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/plan design this"));
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    const planMessage = adapter.sent.at(-1)!;
+    const continueButton = planMessage.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Continue");
+    const sentCount = agent.sent.length;
+
+    await router.handle(callbackMessage(continueButton!.callback_data, 7, "cb-plan-continue", planMessage.messageId));
+
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+    expect(agent.sent).toHaveLength(sentCount);
+    expect(store.getPendingPrompt("1", planMessage.messageId!)).toBeUndefined();
+    expect(adapter.deleted).toEqual([{ conversationId: "1", messageId: planMessage.messageId! }]);
+    expect(adapter.edited.map((message) => message.text)).not.toContain("Continuing in Plan mode.");
+    expect(adapter.edited.map((message) => message.text)).not.toContain("Plan ready.");
+  });
+
+  test("plan continue callback clears buttons without continuing text when delete fails", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    adapter.failDeleteMessage = new Error("delete failed");
+
+    await router.handle(textMessage("/plan design this"));
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    const planMessage = adapter.sent.at(-1)!;
+    const continueButton = planMessage.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Continue");
+    const sentCount = agent.sent.length;
+
+    await router.handle(callbackMessage(continueButton!.callback_data, 7, "cb-plan-continue", planMessage.messageId));
+
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+    expect(agent.sent).toHaveLength(sentCount);
+    expect(store.getPendingPrompt("1", planMessage.messageId!)).toBeUndefined();
+    expect(adapter.edited.at(-1)?.text).toBe("");
+    expect(adapter.edited.at(-1)?.options.replyMarkup).toEqual({ inline_keyboard: [] });
+    expect(adapter.edited.at(-1)?.text).not.toContain("Continuing in Plan mode.");
+    expect(adapter.edited.at(-1)?.text).not.toContain("Plan ready.");
+  });
+
   test("plan implement callback expires instead of steering into an active turn", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");

@@ -259,6 +259,13 @@ export class TelegramAdapter implements ImAdapter {
     }
   }
 
+  async deleteMessage(conversationId: ConversationId, messageId: MessageId): Promise<void> {
+    await this.request("deleteMessage", {
+      chat_id: conversationId,
+      message_id: Number(messageId),
+    });
+  }
+
   async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
     await this.request("answerCallbackQuery", {
       callback_query_id: callbackQueryId,

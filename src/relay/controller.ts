@@ -748,7 +748,24 @@ export class RelayController {
       return;
     }
     this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-    await this.renderCallbackPage(message, messageWithTitle("Continuing in Plan mode."), { inline_keyboard: [] });
+    await this.dismissPlanReadyPrompt(message);
+  }
+
+  private async dismissPlanReadyPrompt(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
+    if (!message.messageId) return;
+    if (this.deps.adapter.deleteMessage) {
+      try {
+        await this.deps.adapter.deleteMessage(message.conversationId, message.messageId);
+        return;
+      } catch (error) {
+        this.logger.warn("router.plan_ready_delete_failed", {
+          conversation_id: message.conversationId,
+          message_id: message.messageId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
+    await this.renderCallbackPage(message, textMessage(""), { inline_keyboard: [] });
   }
 
   private async renderHomeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {

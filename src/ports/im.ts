@@ -119,6 +119,7 @@ export interface ImAdapter {
   sendMessage(conversationId: ConversationId, text: string, options?: SendMessageOptions): Promise<SendMessageResult>;
   sendPhoto?(conversationId: ConversationId, photo: Blob, options?: SendPhotoOptions): Promise<SendMessageResult>;
   editMessageText?(conversationId: ConversationId, text: string, options: EditMessageTextOptions): Promise<void>;
+  deleteMessage?(conversationId: ConversationId, messageId: MessageId): Promise<void>;
   answerCallbackQuery?(callbackQueryId: string, text?: string): Promise<void>;
   sendChatAction?(conversationId: ConversationId, action?: "typing"): Promise<void>;
   setMessageReaction?(conversationId: ConversationId, messageId: MessageId, emoji?: string): Promise<void>;
