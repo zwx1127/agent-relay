@@ -420,6 +420,24 @@ describe("relay controller", () => {
     expect(adapter.edited.at(-1)?.text).toContain("Error: Unknown callback.");
   });
 
+  test("auto-resume falls back to a fresh thread when the saved Codex thread is missing", async () => {
+    const { router, store, agent, root, logLines } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    store.markSessionStarted("codex:1:demo", 1, "demo", 1, "missing-thread");
+    store.markSessionStopped("codex:1:demo", 2);
+    agent.failStartForThreadIds.set("missing-thread", new Error("Codex thread/resume failed: no rollout found for thread id missing-thread"));
+
+    await router.handle(textMessage("hello after restart"));
+
+    expect(agent.getStatus("codex:1:demo")?.threadId).toBe("thread-1");
+    expect(store.getSession("codex:1:demo")?.thread_id).toBe("thread-1");
+    expect(agent.sent).toEqual([sentPrompt("hello after restart")]);
+    expect(logLines.join("\n")).toContain("router.session_auto_resume_failed_starting_fresh");
+  });
+
   test("/resume renders a picker and switches to the selected thread", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");

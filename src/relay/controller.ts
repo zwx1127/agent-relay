@@ -1065,14 +1065,33 @@ export class RelayController {
     const existing = this.deps.agent.getStatus(key);
     if (existing?.running && !threadId) return existing;
 
-    this.logger.info("router.session_starting", { conversation_id: conversationId, workspace: workspace.name, session_key: key, thread_id: threadId });
     const previous = threadId ? undefined : this.deps.store.getSession(key);
-    const status = await this.deps.agent.start({
-      conversationId,
-      workspaceName: workspace.name,
-      workspacePath: workspace.path,
-      threadId: threadId ?? previous?.thread_id ?? undefined,
-    });
+    const resumeThreadId = threadId ?? previous?.thread_id ?? undefined;
+    this.logger.info("router.session_starting", { conversation_id: conversationId, workspace: workspace.name, session_key: key, thread_id: resumeThreadId });
+    let status: AgentSessionStatus;
+    try {
+      status = await this.deps.agent.start({
+        conversationId,
+        workspaceName: workspace.name,
+        workspacePath: workspace.path,
+        threadId: resumeThreadId,
+      });
+    } catch (error) {
+      if (threadId || !previous?.thread_id || !isMissingCodexThreadError(error)) throw error;
+      this.logger.warn("router.session_auto_resume_failed_starting_fresh", {
+        conversation_id: conversationId,
+        workspace: workspace.name,
+        session_key: key,
+        thread_id: previous.thread_id,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+      this.deps.store.clearSessionThreadId(key);
+      status = await this.deps.agent.start({
+        conversationId,
+        workspaceName: workspace.name,
+        workspacePath: workspace.path,
+      });
+    }
     this.deps.store.markSessionStarted(key, conversationId, workspace.name, Date.now(), status.threadId);
     this.logger.info("router.session_started", { conversation_id: conversationId, workspace: workspace.name, session_key: key, thread_id: status.threadId });
     return status;
@@ -1541,6 +1560,11 @@ export class RelayController {
   private async renderPagedOutputCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
     await this.outputStreamer.renderPagedOutputCallback(message, payload);
   }
+}
+
+function isMissingCodexThreadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.toLowerCase().includes("no rollout found");
 }
 
 function formatWorkspaceIntroMessage(workspace: WorkspaceRecord, intro: string): RenderedTelegramText {
