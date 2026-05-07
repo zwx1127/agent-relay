@@ -82,7 +82,7 @@ The relay loads `.env` first, then overlays shell environment variables, so expo
 | `ALLOWED_USER_IDS` | yes | | Comma-separated provider user IDs allowed to use the relay. Stored as strings. |
 | `ALLOWED_CONVERSATION_IDS` | no | any conversation | Optional comma-separated provider conversation IDs. When set, both user and conversation must be allowed. |
 | `TELEGRAM_BOT_TOKEN` | yes | | Bot token from BotFather. |
-| `WORKSPACE_ROOT` | yes | | Parent directory containing selectable cwd directories. |
+| `WORKSPACE_ROOT` | yes | | Parent directory containing selectable workspace directories. |
 | `TELEGRAM_POLL_TIMEOUT_SECONDS` | no | `30` | Telegram long-poll timeout. |
 | `TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS` | no | `3` | Retry attempts for non-polling Telegram API calls. |
 | `TELEGRAM_RETRY_INITIAL_DELAY_MS` | no | `500` | Initial retry backoff for transient Telegram API failures. |
@@ -99,15 +99,15 @@ The relay loads `.env` first, then overlays shell environment variables, so expo
 | `RELAY_CONTROL_PORT` | no | `0` | Local capability API port. `0` asks the OS to choose an available port. |
 | `LOG_LEVEL` | no | `info` | One of `debug`, `info`, `warn`, or `error`. |
 
-When both `CODEX_DEVELOPER_INSTRUCTIONS_FILE` and `CODEX_DEVELOPER_INSTRUCTIONS` are set, file contents are sent first, then a blank line, then the inline text. `CODEX_MODEL_INSTRUCTIONS_FILE` is sent as Codex base instructions. The relay does not inject `AGENTS.md`; Codex discovers it normally from the selected cwd.
+When both `CODEX_DEVELOPER_INSTRUCTIONS_FILE` and `CODEX_DEVELOPER_INSTRUCTIONS` are set, file contents are sent first, then a blank line, then the inline text. `CODEX_MODEL_INSTRUCTIONS_FILE` is sent as Codex base instructions. The relay does not inject `AGENTS.md`; Codex discovers it normally from the selected workspace.
 
 ## Telegram Usage
 
-Send `/relay` to open Relay Home. Relay Home shows the selected cwd, Codex status, waiting state, and recent errors. The detail toggle shows waiting state, prompt counts, thread, model, combined numeric token/context usage, approval/sandbox policy, and recent output timing. Relay Home uses English inline buttons; successful actions update the message in place without extra Telegram callback notices, while errors and expired actions still show explicit feedback.
+Send `/relay` to open Relay Home. Relay Home shows the selected workspace, Codex status, waiting state, and recent errors. The detail toggle shows waiting state, prompt counts, thread, model, combined numeric token/context usage, approval/sandbox policy, and recent output timing. Relay Home uses English inline buttons; successful actions update the message in place without extra Telegram callback notices, while errors and expired actions still show explicit feedback.
 
 Relay Home actions:
 
-- `Workspaces`: open the workspace management view. It lists first-level directories under `WORKSPACE_ROOT`, keeps `Back`, `New`, and `Refresh` actions fixed at the bottom, and supports selecting a cwd or deleting one after confirmation. `Back` returns to Relay Home, and the create prompt includes an input placeholder for the cwd name.
+- `Workspaces`: open the workspace management view. It lists first-level directories under `WORKSPACE_ROOT`, keeps `Back`, `New`, and `Refresh` actions fixed at the bottom, and supports selecting a workspace or deleting one after confirmation. `Back` returns to Relay Home, and the create prompt includes an input placeholder for the workspace name.
 - `Details` / `Compact`: toggle compact and detailed status views for the conversation.
 - `Refresh`: redraw the current Relay Home message.
 - `Stop`: interrupt the current workspace session and clear the conversation's workspace selection.

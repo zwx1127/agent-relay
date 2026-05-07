@@ -985,7 +985,7 @@ export class RelayController {
   }
 
   private async promptForWorkspaceName(conversationId: ConversationId): Promise<void> {
-    const result = await this.sendRendered(conversationId, textMessage("Reply with the cwd name. Existing directories under WORKSPACE_ROOT are selected; missing names are created."), {
+    const result = await this.sendRendered(conversationId, textMessage("Reply with the workspace name. Existing directories under WORKSPACE_ROOT are selected; missing names are created."), {
       forceReply: true,
       inputFieldPlaceholder: "repo name under WORKSPACE_ROOT",
       disableWebPagePreview: true,
@@ -1018,7 +1018,7 @@ export class RelayController {
     this.logger.info(existed ? "router.workspace_existing_selected" : "router.workspace_created", { conversation_id: conversationId, workspace: name, path });
     await this.ensureAgentStarted(conversationId, { name, path, createdAt: Date.now() });
     await this.sendRendered(conversationId, renderTelegramText([
-      "cwd ",
+      "workspace ",
       code(name),
       ` ${existed ? "selected" : "created and selected"}.`,
     ]), {
@@ -1108,7 +1108,7 @@ export class RelayController {
 
   private requireCurrentWorkspace(conversationId: ConversationId): WorkspaceRecord {
     const workspace = this.currentWorkspace(conversationId);
-    if (!workspace) throw new Error("No cwd selected. Open Relay Home and choose or create a cwd.");
+    if (!workspace) throw new Error("No workspace selected. Open Relay Home and choose or create a workspace.");
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
     return workspace;
   }
@@ -1120,7 +1120,7 @@ export class RelayController {
       path: resolveWorkspacePath(this.deps.config.workspaceRoot, name),
       createdAt: Date.now(),
     };
-    if (!isRealDirectory(workspace.path)) throw new Error(`cwd '${name}' does not exist. Create it from Relay Home.`);
+    if (!isRealDirectory(workspace.path)) throw new Error(`workspace '${name}' does not exist. Create it from Relay Home.`);
     this.deps.store.upsertWorkspace(workspace);
     return workspace;
   }
@@ -1136,8 +1136,8 @@ export class RelayController {
   private async workspaceNameForToken(token: string): Promise<string> {
     const matches = (await this.listAvailableWorkspaces()).filter((workspace) => workspaceCallbackToken(workspace.name) === token);
     if (matches.length === 1) return matches[0]!.name;
-    if (matches.length > 1) throw new Error("cwd selection token is ambiguous. Refresh cwd and try again.");
-    throw new Error("cwd selection expired. Refresh cwd and try again.");
+    if (matches.length > 1) throw new Error("workspace selection token is ambiguous. Refresh workspaces and try again.");
+    throw new Error("workspace selection expired. Refresh workspaces and try again.");
   }
 
   private appendSystem(conversationId: ConversationId, text: string): void {

@@ -301,7 +301,7 @@ describe("relay controller", () => {
     await router.handle(textMessage("/relay"));
 
     expect(adapter.sent.at(-1)?.text).toContain("Relay Home");
-    expect(adapter.sent.at(-1)?.text).toContain("cwd: none");
+    expect(adapter.sent.at(-1)?.text).toContain("workspace: none");
     expect(adapter.sent.at(-1)?.text).toContain("Waiting: none");
     expect(adapter.sent.at(-1)?.options?.entities?.[0]?.type).toBe("bold");
     expect(adapter.sent.at(-1)?.text).toContain("⚪ Stopped");
@@ -643,7 +643,7 @@ describe("relay controller", () => {
 
     expect(agent.sent).toEqual([]);
     expect(adapter.sent.at(-1)?.text).toContain("Relay Home");
-    expect(adapter.sent.at(-1)?.text).toContain("cwd: none");
+    expect(adapter.sent.at(-1)?.text).toContain("workspace: none");
   });
 
   test("/relay without a workspace opens Relay Home instead of forwarding", async () => {
@@ -653,7 +653,7 @@ describe("relay controller", () => {
 
     expect(agent.sent).toEqual([]);
     expect(adapter.sent.at(-1)?.text).toContain("Relay Home");
-    expect(adapter.sent.at(-1)?.text).toContain("cwd: none");
+    expect(adapter.sent.at(-1)?.text).toContain("workspace: none");
   });
 
   test("new workspace callback uses ForceReply and reply creates binding", async () => {
@@ -1032,7 +1032,7 @@ describe("relay controller", () => {
 
     expect(store.getBinding(1)?.workspaceName).toBe("second");
     expect(agent.getStatus("codex:1:second")?.running).toBe(true);
-    expect(adapter.edited.at(-1)?.text).toContain("cwd: second");
+    expect(adapter.edited.at(-1)?.text).toContain("workspace: second");
     expect(adapter.edited.at(-1)?.options.entities?.some((entity) => entity.type === "code")).toBe(true);
     expect(adapter.edited.at(-1)?.options.messageId).toBe(42);
     expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb2", text: undefined });
@@ -1123,7 +1123,7 @@ describe("relay controller", () => {
     await router.handle(callbackMessage(backButton!.callback_data, 7, "cb-back", adapter.edited.at(-1)?.options.messageId));
 
     expect(adapter.edited.at(-1)?.text).toContain("Relay Home");
-    expect(adapter.edited.at(-1)?.text).toContain("cwd: none");
+    expect(adapter.edited.at(-1)?.text).toContain("workspace: none");
     expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Workspaces", "Details", "Refresh"]);
     expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-back", text: undefined });
   });
@@ -1152,7 +1152,7 @@ describe("relay controller", () => {
     expect(store.getWorkspace("demo")).toBeUndefined();
     expect(store.getBinding(1)).toBeUndefined();
     expect(agent.stopped).toEqual(["codex:1:demo"]);
-    expect(adapter.edited.at(-1)?.text).toContain("No cwd directories found.");
+    expect(adapter.edited.at(-1)?.text).toContain("No workspace directories found.");
   });
 
   test("workspace delete confirmation back returns to Relay Home", async () => {
@@ -1174,11 +1174,11 @@ describe("relay controller", () => {
     expect(existsSync(path)).toBe(true);
     expect(store.getBinding(1)?.workspaceName).toBe("demo");
     expect(adapter.edited.at(-1)?.text).toContain("Relay Home");
-    expect(adapter.edited.at(-1)?.text).toContain("cwd: demo");
+    expect(adapter.edited.at(-1)?.text).toContain("workspace: demo");
     expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-back", text: undefined });
   });
 
-  test("/cd without a workspace opens Relay Home instead of creating cwd directly", async () => {
+  test("/cd without a workspace opens Relay Home instead of creating a workspace directly", async () => {
     const { router, store, adapter, agent, root } = fixture();
 
     await router.handle(textMessage("/cd demo"));
@@ -1186,7 +1186,7 @@ describe("relay controller", () => {
     expect(store.getBinding(1)).toBeUndefined();
     expect(agent.getStatus("codex:1:demo")).toBeUndefined();
     expect(adapter.sent.at(-1)?.text).toContain("Relay Home");
-    expect(adapter.sent.at(-1)?.text).toContain("cwd: none");
+    expect(adapter.sent.at(-1)?.text).toContain("workspace: none");
     expect(existsSync(join(root, "demo"))).toBe(false);
   });
 
@@ -1217,7 +1217,7 @@ describe("relay controller", () => {
 
     expect(agent.stopped).toEqual(["codex:1:demo"]);
     expect(store.getBinding(1)).toBeUndefined();
-    expect(adapter.edited.at(-1)?.text).toContain("cwd: none");
+    expect(adapter.edited.at(-1)?.text).toContain("workspace: none");
     expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb1", text: undefined });
   });
 
@@ -1575,6 +1575,8 @@ describe("relay controller", () => {
       params: { command: "bun test" },
     });
     const prompt = adapter.sent.at(-1)!;
+    expect(prompt.text).toContain("workspace: /tmp/demo");
+    expect(prompt.text).not.toContain("cwd: /tmp/demo");
     const approve = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
 
     await router.handle(callbackMessage(approve.callback_data, 7, "cba", prompt.messageId));

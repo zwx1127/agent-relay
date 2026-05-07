@@ -50,7 +50,7 @@ export function formatStatusMessage(status: StatusView): RenderedTelegramText {
     return renderTelegramText([
       bold("Relay Home"),
       `\n\n${statusIcon(status)} ${statusLabel(status)}`,
-      "\ncwd: none",
+      "\nworkspace: none",
       "\nWaiting: none",
     ]);
   }
@@ -60,7 +60,7 @@ export function formatStatusMessage(status: StatusView): RenderedTelegramText {
     statusIcon(status),
     " ",
     statusLabel(status),
-    "\ncwd: ",
+    "\nworkspace: ",
     code(truncateForTelegramLabel(status.workspaceName, 32)),
     "\nWaiting: ",
     formatWaiting(status),
@@ -77,7 +77,7 @@ export function formatDetailsMessage(status: StatusView): RenderedTelegramText {
     statusIcon(status),
     " ",
     statusLabel(status),
-    "\n\ncwd: ",
+    "\n\nworkspace: ",
     code(status.workspaceName),
     "\nPath: ",
     code(status.workspacePath),
