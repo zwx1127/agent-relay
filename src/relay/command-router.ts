@@ -13,6 +13,7 @@ export interface SlashCommandHandlers {
   fork(conversationId: ConversationId): Promise<void>;
   rename(conversationId: ConversationId, name: string): Promise<void>;
   plan(conversationId: ConversationId, prompt: string, userMessageId?: MessageId): Promise<void>;
+  ps(conversationId: ConversationId): Promise<void>;
   stop(conversationId: ConversationId): Promise<void>;
 }
 
@@ -49,6 +50,9 @@ export class SlashCommandRouter {
         return true;
       case "/plan":
         await this.handlers.plan(message.conversationId, commandArgs(text), message.messageId);
+        return true;
+      case "/ps":
+        await this.handlers.ps(message.conversationId);
         return true;
       case "/stop":
         await this.handlers.stop(message.conversationId);

@@ -1,4 +1,4 @@
-import type { AgentThreadSummary, AgentUserInputQuestion } from "../../ports/agent.ts";
+import type { AgentBackgroundTerminalSummary, AgentThreadSummary, AgentUserInputQuestion } from "../../ports/agent.ts";
 import { renderTelegramText, truncateForTelegramLabel, type RenderedTelegramText, type TelegramTextPart } from "../../presentation/telegram/text.ts";
 import { UI_BUTTON } from "./constants.ts";
 import { bold, code } from "./text-parts.ts";
@@ -11,6 +11,30 @@ export function formatResumeMessage(threads: AgentThreadSummary[]): RenderedTele
     if (thread.preview) parts.push(` - ${truncateForTelegramLabel(thread.preview, 80)}`);
   }
   return renderTelegramText(parts);
+}
+
+export function formatBackgroundTerminalsMessage(terminals: AgentBackgroundTerminalSummary[]): RenderedTelegramText {
+  const parts: TelegramTextPart[] = [bold("Background terminals"), "\n\n"];
+  if (terminals.length === 0) {
+    parts.push("No background terminals running.");
+    return renderTelegramText(parts);
+  }
+
+  const shown = terminals.slice(0, 16);
+  for (const [index, terminal] of shown.entries()) {
+    if (index > 0) parts.push("\n");
+    parts.push("- ", code(truncateForTelegramLabel(firstLine(terminal.commandDisplay), 120)));
+    for (const chunk of terminal.recentChunks) {
+      parts.push("\n  ", truncateForTelegramLabel(firstLine(chunk), 120));
+    }
+  }
+  const remaining = terminals.length - shown.length;
+  if (remaining > 0) parts.push(`\n... and ${remaining} more running`);
+  return renderTelegramText(parts);
+}
+
+function firstLine(value: string): string {
+  return value.split(/\r?\n/, 1)[0] ?? "";
 }
 
 export function confirmMessage(title: string, body: string): RenderedTelegramText {

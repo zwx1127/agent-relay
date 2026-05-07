@@ -1,6 +1,6 @@
 import { sessionKey } from "../../src/domain/session.ts";
 import type { ConversationId, MessageId } from "../../src/domain/ids.ts";
-import type { AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentThreadListOptions, AgentThreadSummary } from "../../src/ports/agent.ts";
+import type { AgentBackgroundTerminalSummary, AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentThreadListOptions, AgentThreadSummary } from "../../src/ports/agent.ts";
 import type { EditMessageTextOptions, SendMessageOptions } from "../../src/ports/im.ts";
 
 export class FakeImAdapter {
@@ -83,6 +83,7 @@ export class FakeAgent implements AgentDriver {
   forks: string[] = [];
   renames: Array<{ key: string; name: string }> = [];
   cleaned: string[] = [];
+  backgroundTerminals: AgentBackgroundTerminalSummary[] = [];
   threadLists: AgentThreadListOptions[] = [];
   threads: AgentThreadSummary[] = [];
   models: AgentModelSummary[] = [];
@@ -149,6 +150,11 @@ export class FakeAgent implements AgentDriver {
 
   async cleanBackgroundTerminals(key: string): Promise<void> {
     this.cleaned.push(key);
+    this.backgroundTerminals = [];
+  }
+
+  async listBackgroundTerminals(_key: string): Promise<AgentBackgroundTerminalSummary[]> {
+    return this.backgroundTerminals;
   }
 
   async listThreads(options: AgentThreadListOptions): Promise<AgentThreadSummary[]> {

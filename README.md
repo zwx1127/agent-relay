@@ -130,7 +130,8 @@ Relay-handled slash commands after a workspace is selected:
 | `/rename <name>` | Renames the current thread. Without a name, the relay asks via ForceReply. |
 | `/plan` | Toggles Plan mode for the current `conversation + workspace`. |
 | `/plan <prompt>` | Runs the prompt in Plan mode and then offers Implement or Continue buttons. Implement exits Plan mode and starts normal coding. |
-| `/stop` | Asks Codex to clean background terminals for the current thread. |
+| `/ps` | Lists background terminals started by Codex for the current thread. |
+| `/stop` | Asks Codex to clean background terminals for the current thread. It does not stop unrelated system processes. |
 
 `/relay` is the only Relay command that works without a selected workspace. Unsupported slash text, including `/help`, `/status`, `/model`, and `/start`, is forwarded to Codex when a workspace is selected.
 

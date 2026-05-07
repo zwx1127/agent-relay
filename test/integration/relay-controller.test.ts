@@ -461,6 +461,27 @@ describe("relay controller", () => {
     expect(adapter.sent.map((message) => message.text)).toEqual(["Forked chat.\n\nThread: Forked", "Renamed chat.\n\nShip it", "Background terminals stopped."]);
   });
 
+  test("/ps lists only Codex background terminals tracked by the driver", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.backgroundTerminals = [
+      { commandDisplay: "npm run dev", recentChunks: ["ready", "listening"] },
+    ];
+
+    await router.handle(textMessage("/ps"));
+    await router.handle(textMessage("/stop"));
+    await router.handle(textMessage("/ps"));
+
+    expect(adapter.sent.map((message) => message.text)).toEqual([
+      "Background terminals\n\n- npm run dev\n  ready\n  listening",
+      "Background terminals stopped.",
+      "Background terminals\n\nNo background terminals running.",
+    ]);
+  });
+
   test("/plan toggles plan mode and implementing a plan returns to default mode", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");

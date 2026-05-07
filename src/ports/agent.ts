@@ -128,6 +128,7 @@ export interface AgentDriver {
   forkThread?(sessionKey: string): Promise<AgentThreadSwitchResult>;
   renameThread?(sessionKey: string, name: string): Promise<void>;
   cleanBackgroundTerminals?(sessionKey: string): Promise<void>;
+  listBackgroundTerminals?(sessionKey: string): Promise<AgentBackgroundTerminalSummary[]>;
   listThreads?(options: AgentThreadListOptions): Promise<AgentThreadSummary[]>;
   listModels?(): Promise<AgentModelSummary[]>;
 }
@@ -140,6 +141,7 @@ export interface AgentDriverCapabilities {
   threadRename: boolean;
   threadList: boolean;
   modelList: boolean;
+  backgroundTerminals: boolean;
   localImages: boolean;
   imageOutput: boolean;
 }
@@ -184,6 +186,11 @@ export interface AgentBuiltinResult {
 export interface AgentThreadSwitchResult {
   threadId: string;
   threadName?: string;
+}
+
+export interface AgentBackgroundTerminalSummary {
+  commandDisplay: string;
+  recentChunks: string[];
 }
 
 export interface AgentThreadListOptions {

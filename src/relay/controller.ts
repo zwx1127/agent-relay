@@ -40,7 +40,7 @@ import { codexRequestKey, shortToken, workspaceCallbackToken } from "./ui/callba
 import { commandArgs, parseReviewTarget } from "./ui/commands.ts";
 import { approvalKeyboard, codexQuestionConfirmKeyboard, codexQuestionKeyboard, consoleKeyboard, deleteWorkspaceConfirmKeyboard, planReadyKeyboard, resumeKeyboard, workspaceIntroKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
 import { bestPhoto, formatBytes, pathContains, truncateTelegramCaption } from "./ui/media-format.ts";
-import { answeredMessage, confirmMessage, formatApprovalDecisionMessage, formatApprovalMessage, formatCodexAnswerNotePrompt, formatCodexQuestion, formatCodexSelectedAnswer, formatErrorMessage, formatResumeMessage, formatWorkspacesMessage } from "./ui/messages.ts";
+import { answeredMessage, confirmMessage, formatApprovalDecisionMessage, formatApprovalMessage, formatBackgroundTerminalsMessage, formatCodexAnswerNotePrompt, formatCodexQuestion, formatCodexSelectedAnswer, formatErrorMessage, formatResumeMessage, formatWorkspacesMessage } from "./ui/messages.ts";
 import { paginateWorkspaces } from "./ui/pagination.ts";
 import { approvalResponse, asPromptRecord, isExpired, parsePromptPayload } from "./ui/prompt-state.ts";
 import { formatHomeMessage, statusViewFromParts } from "./ui/status-message.ts";
@@ -93,6 +93,7 @@ export class RelayController {
       fork: (conversationId) => this.forkCurrentThread(conversationId),
       rename: (conversationId, name) => this.renameCommand(conversationId, name),
       plan: (conversationId, prompt, userMessageId) => this.planCommand(conversationId, prompt, userMessageId),
+      ps: (conversationId) => this.renderBackgroundTerminals(conversationId),
       stop: (conversationId) => this.cleanBackgroundTerminals(conversationId),
     });
     this.callbacks = new CallbackRouter({
@@ -637,6 +638,13 @@ export class RelayController {
     await this.deps.agent.cleanBackgroundTerminals(key);
     this.logger.info("router.background_terminals_cleaned", { conversation_id: conversationId, session_key: key });
     await this.sendRendered(conversationId, messageWithTitle("Background terminals stopped."));
+  }
+
+  private async renderBackgroundTerminals(conversationId: ConversationId): Promise<void> {
+    const { key } = await this.commandSession(conversationId);
+    if (!this.deps.agent.listBackgroundTerminals) throw new Error("Agent driver cannot list background terminals.");
+    const terminals = await this.deps.agent.listBackgroundTerminals(key);
+    await this.sendRendered(conversationId, formatBackgroundTerminalsMessage(terminals));
   }
 
   private async commandSession(conversationId: ConversationId): Promise<{ workspace: WorkspaceRecord; status: AgentSessionStatus; key: string }> {

@@ -14,6 +14,7 @@ describe("relay routers", () => {
       fork: async () => { calls.push("fork"); },
       rename: async (_conversationId, name) => { calls.push(`rename:${name}`); },
       plan: async (_conversationId, prompt) => { calls.push(`plan:${prompt}`); },
+      ps: async () => { calls.push("ps"); },
       stop: async () => { calls.push("stop"); },
     });
 
@@ -28,8 +29,9 @@ describe("relay routers", () => {
 
     expect(router.command(message.text)).toBe("/resume");
     expect(await router.handle(message, "/resume", message.text)).toBe(true);
+    expect(await router.handle({ ...message, text: "/ps" }, "/ps", "/ps")).toBe(true);
     expect(await router.handle(message, "/unknown", message.text)).toBe(false);
-    expect(calls).toEqual(["resume:sprint work"]);
+    expect(calls).toEqual(["resume:sprint work", "ps"]);
   });
 
   test("callback router dispatches prefixed payloads", async () => {

@@ -35,6 +35,29 @@ describe("CodexDriver app-server protocol", () => {
     await driver.stop(status.sessionKey);
   });
 
+  test("tracks only Codex unified exec background terminals", async () => {
+    const fake = fakeCodexBin();
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "background terminal");
+    await sleep(100);
+
+    expect(await driver.listBackgroundTerminals(status.sessionKey)).toEqual([{
+      commandDisplay: "npm run dev",
+      recentChunks: ["line2", "line3", "line4"],
+    }]);
+
+    await driver.send(status.sessionKey, "finish background terminal");
+    await sleep(100);
+    expect(await driver.listBackgroundTerminals(status.sessionKey)).toEqual([]);
+    await driver.stop(status.sessionKey);
+  });
+
   test("parses requestUserInput and sends response on the same request id", async () => {
     const fake = fakeCodexBin();
     const events: AgentOutputEvent[] = [];
@@ -335,6 +358,10 @@ rl.on("line", (line) => {
     } else if (inputText === "image output") {
       send({ method: "rawResponseItem/completed", params: { threadId: "thread-1", turnId, item: { type: "image_generation_call", id: "img1", status: "completed", revised_prompt: "revised", result: "aW1hZ2U=" } } });
       send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: turnId, status: "completed", items: [] } } });
+    } else if (inputText === "background terminal") {
+      send({ method: "item/started", params: { threadId: "thread-1", turnId, item: { type: "commandExecution", id: "bg1", command: "bash -lc 'npm run dev'", processId: "proc1", source: "unifiedExecStartup", commandActions: [] } } });
+      send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", turnId, itemId: "bg1", delta: "ready\\nline2\\nline3\\nline4\\n" } });
+      send({ method: "item/started", params: { threadId: "thread-1", turnId, item: { type: "commandExecution", id: "local1", command: "git status", source: "userShell", commandActions: [] } } });
     } else if (inputText !== "slow active") {
       send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId, itemId: "m1", delta: "hello " } });
       send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", turnId, itemId: "c1", delta: "raw stdout" } });
@@ -346,6 +373,10 @@ rl.on("line", (line) => {
     const inputText = msg.params.input[0].text;
     if (inputText === "second while active") {
       send({ id: msg.id, result: { turn: { id: msg.params.expectedTurnId, status: "inProgress", items: [] } } });
+    } else if (inputText === "finish background terminal") {
+      send({ id: msg.id, result: { turn: { id: msg.params.expectedTurnId, status: "inProgress", items: [] } } });
+      send({ method: "item/completed", params: { threadId: "thread-1", turnId: msg.params.expectedTurnId, item: { type: "commandExecution", id: "bg1", command: "bash -lc 'npm run dev'", processId: "proc1", source: "unifiedExecStartup", commandActions: [] } } });
+      send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: msg.params.expectedTurnId, status: "completed", items: [] } } });
     } else {
       send({ id: msg.id, error: { code: -32000, message: "no active turn to steer" } });
     }

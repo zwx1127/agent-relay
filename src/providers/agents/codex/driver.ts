@@ -3,6 +3,7 @@ import { createInterface } from "node:readline";
 import { sessionKey } from "../../../domain/session.ts";
 import { noopLogger, type Logger } from "../../../domain/logger.ts";
 import type {
+  AgentBackgroundTerminalSummary,
   AgentBuiltinCommand,
   AgentBuiltinResult,
   AgentSendOptions,
@@ -21,6 +22,14 @@ import { applySessionMetadata, applyThreadMetadata, approvalCopy, approvalKindFo
 
 interface RunningSession {
   status: AgentSessionStatus;
+  backgroundTerminals: Map<string, BackgroundTerminalRecord>;
+}
+
+interface BackgroundTerminalRecord {
+  key: string;
+  callId: string;
+  commandDisplay: string;
+  recentChunks: string[];
 }
 
 export interface CodexDriverOptions {
@@ -66,6 +75,7 @@ export class CodexDriver implements AgentDriver {
     threadRename: true,
     threadList: true,
     modelList: true,
+    backgroundTerminals: true,
     localImages: true,
     imageOutput: true,
   };
@@ -136,7 +146,7 @@ export class CodexDriver implements AgentDriver {
     status.threadId = threadId;
     applySessionMetadata(status, result);
     this.threadToSession.set(threadId, key);
-    this.sessions.set(key, { status });
+    this.sessions.set(key, { status, backgroundTerminals: new Map() });
 
     this.logger.info("codex.session_started", {
       session_key: key,
@@ -279,6 +289,7 @@ export class CodexDriver implements AgentDriver {
     if (!threadId) throw new Error("Codex app-server did not return a forked thread id.");
     if (running.status.threadId) this.threadToSession.delete(running.status.threadId);
     running.status.threadId = threadId;
+    running.backgroundTerminals.clear();
     applySessionMetadata(running.status, result);
     this.threadToSession.set(threadId, key);
     return { threadId, threadName: running.status.threadName };
@@ -293,6 +304,15 @@ export class CodexDriver implements AgentDriver {
   async cleanBackgroundTerminals(key: string): Promise<void> {
     const running = this.requireRunningSession(key);
     await this.request("thread/backgroundTerminals/clean", { threadId: running.status.threadId });
+    running.backgroundTerminals.clear();
+  }
+
+  async listBackgroundTerminals(key: string): Promise<AgentBackgroundTerminalSummary[]> {
+    const running = this.requireRunningSession(key);
+    return Array.from(running.backgroundTerminals.values()).map((terminal) => ({
+      commandDisplay: terminal.commandDisplay,
+      recentChunks: [...terminal.recentChunks],
+    }));
   }
 
   async listThreads(options: AgentThreadListOptions): Promise<AgentThreadSummary[]> {
@@ -341,7 +361,6 @@ export class CodexDriver implements AgentDriver {
         experimentalApi: true,
         optOutNotificationMethods: [
           "command/exec/outputDelta",
-          "item/commandExecution/outputDelta",
           "item/commandExecution/terminalInteraction",
         ],
       },
@@ -423,8 +442,19 @@ export class CodexDriver implements AgentDriver {
       return;
     }
 
+    if (message.method === "item/started") {
+      this.trackCommandExecutionStarted(running, params);
+      return;
+    }
+
+    if (message.method === "item/commandExecution/outputDelta") {
+      this.trackCommandExecutionOutput(running, params);
+      return;
+    }
+
     if (message.method === "item/completed") {
       const item = asRecord(params?.item);
+      if (item?.type === "commandExecution") this.trackCommandExecutionCompleted(running, item);
       if (item?.type === "exitedReviewMode" && typeof item.review === "string" && item.review) {
         await this.onOutput({ type: "message", sessionKey: key, chunk: item.review, turnId: getTurnId(params), itemId: getString(item, "id") });
       }
@@ -553,6 +583,53 @@ export class CodexDriver implements AgentDriver {
     await this.writeMessage({ id: message.id, error: { code: -32601, message: `Unsupported server request: ${message.method}` } });
   }
 
+  private trackCommandExecutionStarted(running: RunningSession, params: Record<string, unknown> | undefined): void {
+    const item = asRecord(params?.item);
+    if (item?.type !== "commandExecution") return;
+    if (getString(item, "source") !== "unifiedExecStartup") return;
+    const callId = getString(item, "id");
+    if (!callId) return;
+    const processId = getString(item, "processId") ?? getString(item, "process_id");
+    const key = processId ?? callId;
+    const command = commandExecutionDisplay(item);
+    const existing = running.backgroundTerminals.get(key);
+    if (existing) {
+      existing.callId = callId;
+      existing.commandDisplay = command;
+      existing.recentChunks = [];
+    } else {
+      running.backgroundTerminals.set(key, { key, callId, commandDisplay: command, recentChunks: [] });
+    }
+  }
+
+  private trackCommandExecutionOutput(running: RunningSession, params: Record<string, unknown> | undefined): void {
+    const callId = getString(params, "itemId") ?? getString(params, "item_id") ?? getString(params, "callId") ?? getString(params, "processId") ?? getString(params, "id");
+    if (!callId) return;
+    const terminal = Array.from(running.backgroundTerminals.values()).find((process) => process.callId === callId);
+    if (!terminal) return;
+    const delta = getString(params, "delta");
+    if (!delta) return;
+    for (const line of delta.split(/\r?\n/).map((value) => value.trimEnd()).filter(Boolean)) {
+      terminal.recentChunks.push(line);
+    }
+    const maxRecentChunks = 3;
+    if (terminal.recentChunks.length > maxRecentChunks) {
+      terminal.recentChunks.splice(0, terminal.recentChunks.length - maxRecentChunks);
+    }
+  }
+
+  private trackCommandExecutionCompleted(running: RunningSession, item: Record<string, unknown>): void {
+    const callId = getString(item, "id");
+    const processId = getString(item, "processId") ?? getString(item, "process_id");
+    const keys = [processId, callId].filter((key): key is string => Boolean(key));
+    for (const key of keys) running.backgroundTerminals.delete(key);
+    if (callId) {
+      for (const [key, terminal] of running.backgroundTerminals.entries()) {
+        if (terminal.callId === callId) running.backgroundTerminals.delete(key);
+      }
+    }
+  }
+
   private async request(method: string, params?: unknown): Promise<unknown> {
     const id = this.nextRequestId++;
     return new Promise((resolve, reject) => {
@@ -609,4 +686,20 @@ export class CodexDriver implements AgentDriver {
       void this.onExit({ sessionKey: running.status.sessionKey, exitCode, signalCode });
     }
   }
+}
+
+function commandExecutionDisplay(item: Record<string, unknown>): string {
+  const command = getString(item, "command") ?? "(command unavailable)";
+  const bashLoginShell = /^bash\s+-lc\s+(.+)$/s.exec(command.trim());
+  return unquoteShellArgument(bashLoginShell?.[1] ?? command).trim() || command;
+}
+
+function unquoteShellArgument(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length < 2) return trimmed;
+  const quote = trimmed[0];
+  if ((quote !== "'" && quote !== "\"") || trimmed.at(-1) !== quote) return trimmed;
+  const inner = trimmed.slice(1, -1);
+  if (quote === "'") return inner.replace(/'\\''/g, "'");
+  return inner.replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
 }
