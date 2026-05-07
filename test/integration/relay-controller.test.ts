@@ -1025,6 +1025,8 @@ describe("relay controller", () => {
     store.bindConversation(1, "first");
 
     await router.handle(callbackMessage("ar:w"));
+    expect(adapter.edited.at(-1)?.text).toContain("✅ first");
+    expect(adapter.edited.at(-1)?.text).toContain("⬜ second");
     const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.find((row) => row.at(0)?.text === "second")?.at(1);
     expect(button?.callback_data).toMatch(/^ar:uh:/);
 
@@ -1050,6 +1052,8 @@ describe("relay controller", () => {
     await router.handle(callbackMessage("ar:w"));
 
     expect(adapter.edited.at(-1)?.text).toContain(longName);
+    expect(adapter.edited.at(-1)?.text).toContain("⬜ demo");
+    expect(adapter.edited.at(-1)?.text).toContain(`⬜ ${longName}`);
     expect(store.getWorkspace(longName)?.path).toBe(longPath);
     const demoRow = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.find((row) => row.at(0)?.text === "demo");
     expect(demoRow?.map((button) => button.text)).toEqual(["demo", "Select", "Delete"]);

@@ -119,7 +119,7 @@ export function formatWorkspacesMessage(workspaces: Array<{ name: string; select
   }
   const parts: TelegramTextPart[] = [bold("Workspaces"), `\n\nPage ${pageIndex + 1}/${totalPages}\n`];
   for (const workspace of workspaces) {
-    parts.push("\n", workspace.selected ? `${UI_BUTTON.selected} ` : `${UI_BUTTON.unselected} `, code(workspace.name));
+    parts.push("\n", workspace.selected ? "✅ " : "⬜ ", code(workspace.name));
   }
   return renderTelegramText(parts);
 }
