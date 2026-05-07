@@ -815,7 +815,7 @@ export class RelayController {
     const workspace = this.requireWorkspace(name);
     this.deps.store.bindConversation(message.conversationId, workspace.name);
     this.logger.info("router.workspace_selected", { conversation_id: message.conversationId, workspace: workspace.name, path: workspace.path });
-    await this.ensureAgentStarted(message.conversationId, workspace);
+    await this.ensureAgentStarted(message.conversationId, workspace, undefined, { resumePrevious: false });
     const status = this.statusView(message.conversationId);
     const mode = this.deps.store.getHomeStatusMode(message.conversationId);
     await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
@@ -1041,7 +1041,7 @@ export class RelayController {
     this.deps.store.upsertWorkspace({ name, path, createdAt: Date.now() });
     this.deps.store.bindConversation(conversationId, name);
     this.logger.info(existed ? "router.workspace_existing_selected" : "router.workspace_created", { conversation_id: conversationId, workspace: name, path });
-    await this.ensureAgentStarted(conversationId, { name, path, createdAt: Date.now() });
+    await this.ensureAgentStarted(conversationId, { name, path, createdAt: Date.now() }, undefined, { resumePrevious: false });
     await this.sendRendered(conversationId, renderTelegramText([
       "workspace ",
       code(name),
@@ -1059,13 +1059,19 @@ export class RelayController {
     return await this.taskCoordinator.sendWaitingPromptNotice(conversationId, status);
   }
 
-  private async ensureAgentStarted(conversationId: ConversationId, workspace: WorkspaceRecord, threadId?: string): Promise<AgentSessionStatus> {
+  private async ensureAgentStarted(
+    conversationId: ConversationId,
+    workspace: WorkspaceRecord,
+    threadId?: string,
+    options: { resumePrevious?: boolean } = {},
+  ): Promise<AgentSessionStatus> {
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
     const key = sessionKey(conversationId, workspace.name);
     const existing = this.deps.agent.getStatus(key);
     if (existing?.running && !threadId) return existing;
 
-    const previous = threadId ? undefined : this.deps.store.getSession(key);
+    const resumePrevious = options.resumePrevious ?? true;
+    const previous = threadId || !resumePrevious ? undefined : this.deps.store.getSession(key);
     const resumeThreadId = threadId ?? previous?.thread_id ?? undefined;
     this.logger.info("router.session_starting", { conversation_id: conversationId, workspace: workspace.name, session_key: key, thread_id: resumeThreadId });
     let status: AgentSessionStatus;

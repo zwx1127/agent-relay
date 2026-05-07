@@ -1110,6 +1110,7 @@ describe("relay controller", () => {
     store.upsertWorkspace({ name: "first", path: first, createdAt: 1 });
     store.upsertWorkspace({ name: "second", path: second, createdAt: 1 });
     store.bindConversation(1, "first");
+    store.markSessionStarted("codex:1:second", 1, "second", 1, "old-second-thread");
 
     await router.handle(callbackMessage("ar:w"));
     expect(adapter.edited.at(-1)?.text).toContain("✅ first");
@@ -1121,6 +1122,8 @@ describe("relay controller", () => {
 
     expect(store.getBinding(1)?.workspaceName).toBe("second");
     expect(agent.getStatus("codex:1:second")?.running).toBe(true);
+    expect(agent.getStatus("codex:1:second")?.threadId).toBe("thread-1");
+    expect(store.getSession("codex:1:second")?.thread_id).toBe("thread-1");
     expect(adapter.edited.at(-1)?.text).toContain("workspace: second");
     expect(adapter.edited.at(-1)?.options.entities?.some((entity) => entity.type === "code")).toBe(true);
     expect(adapter.edited.at(-1)?.options.messageId).toBe(42);
