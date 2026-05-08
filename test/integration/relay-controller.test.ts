@@ -1593,7 +1593,10 @@ describe("relay controller", () => {
     await router.handle(callbackMessage(other.callback_data, 7, "cb-other", prompt.messageId));
 
     const otherPrompt = adapter.sent.at(-1)!;
+    expect(adapter.edited.at(-1)?.text).toBe("Selected: Other");
     expect(otherPrompt.options?.forceReply).toBe(true);
+    expect(otherPrompt.options?.replyToMessageId).toBe(String(prompt.messageId));
+    expect(adapter.sent.filter((message) => message.text.includes("Other answer"))).toHaveLength(1);
     await router.handle(textMessage("Use a hybrid approach", 7, otherPrompt.messageId));
 
     expect(agent.responses).toEqual([{
@@ -1602,6 +1605,38 @@ describe("relay controller", () => {
       result: { answers: { choice: { answers: ["Use a hybrid approach"] } } },
     }]);
     expect(agent.sent).toEqual([]);
+  });
+
+  test("other answer prompt is not duplicated when original question edit falls back to send", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("/plan"));
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "codex:1:demo",
+      requestId: 82,
+      questions: [{
+        id: "choice",
+        header: "Mode",
+        question: "Pick one.",
+        isOther: true,
+        options: [{ label: "Fast", description: "Low detail" }],
+      }],
+    });
+
+    const prompt = adapter.sent.at(-1)!;
+    const other = prompt.options!.replyMarkup!.inline_keyboard[1]![0]!;
+    adapter.failEditMessage = new Error("edit failed");
+    await router.handle(callbackMessage(other.callback_data, 7, "cb-other", prompt.messageId));
+
+    expect(adapter.sent.filter((message) => message.text.includes("Other answer"))).toHaveLength(1);
+    expect(adapter.sent.filter((message) => message.text === "Selected: Other")).toHaveLength(1);
+    expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
+    expect(adapter.sent.at(-1)?.options?.replyToMessageId).toBe(String(prompt.messageId));
   });
 
   test("stale codex user input callback expires without responding", async () => {

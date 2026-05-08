@@ -1514,10 +1514,11 @@ export class RelayController {
     data: Record<string, unknown>,
   ): Promise<void> {
     this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-    await this.renderCallbackPage(message, messageWithTitle("Other answer", "Reply with the answer to use."), { inline_keyboard: [] });
+    await this.renderCallbackPage(message, formatCodexSelectedAnswerSummary("Other"), { inline_keyboard: [] });
     const result = await this.sendRendered(message.conversationId, messageWithTitle("Other answer", "Reply with the answer to use."), {
       forceReply: true,
       disableWebPagePreview: true,
+      replyToMessageId: pending.promptMessageId,
     });
     if (!result.messageId) throw new Error("Telegram did not return an other-answer prompt message id.");
     this.deps.store.setPendingPrompt({
