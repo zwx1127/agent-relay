@@ -31,6 +31,7 @@ import type {
 import type {
   HomeStatusMode,
   PendingPrompt,
+  TaskStatus,
   WorkspaceRecord,
 } from "./types.ts";
 import { createWorkspace, discoverWorkspaceDirectories, isRealDirectory, resolveWorkspacePath, validateWorkspaceName, workspaceDirectoryExists } from "../domain/workspace.ts";
@@ -95,6 +96,7 @@ export class RelayController {
       rename: (conversationId, name) => this.renameCommand(conversationId, name),
       plan: (conversationId, prompt, userMessageId) => this.planCommand(conversationId, prompt, userMessageId),
       goal: (conversationId, args) => this.goalCommand(conversationId, args),
+      interrupt: (conversationId, args) => this.interruptCommand(conversationId, args),
       ps: (conversationId) => this.renderBackgroundTerminals(conversationId),
       stop: (conversationId) => this.cleanBackgroundTerminals(conversationId),
     });
@@ -698,6 +700,47 @@ export class RelayController {
     await this.sendRendered(conversationId, messageWithTitle("Background terminals stopped."));
   }
 
+  private async interruptCommand(conversationId: ConversationId, args: string): Promise<void> {
+    const mode = args.trim().toLowerCase();
+    if (mode && mode !== "all") {
+      await this.sendRendered(conversationId, messageWithTitle("Usage: /interrupt [all]"));
+      return;
+    }
+    const workspace = this.requireCurrentWorkspace(conversationId);
+    const key = sessionKey(conversationId, workspace.name);
+    const status = this.deps.agent.getStatus(key);
+    if (!status?.running || !status.activeTurnId) {
+      await this.sendRendered(conversationId, messageWithTitle("No active Codex turn to interrupt."));
+      return;
+    }
+    if (!this.deps.agent.interrupt) throw new Error("Agent driver cannot interrupt turns.");
+
+    await this.finalizeSessionOutput(key);
+    const result = await this.deps.agent.interrupt(key);
+    if (!result.interrupted) {
+      await this.sendRendered(conversationId, messageWithTitle("No active Codex turn to interrupt."));
+      return;
+    }
+
+    if (result.turnId && this.deps.store.getCollaborationMode(key) === "plan") {
+      this.interruptedPlanTurns.add(`${key}:${result.turnId}`);
+    }
+    this.clearCodexPromptsForSession(key);
+    if (mode === "all") {
+      await this.interruptTasksByStatus(key, ["waiting", "queued", "running", "blocked"]);
+    } else {
+      await this.interruptActiveTasks(key);
+    }
+    this.logger.info("router.turn_interrupted", {
+      conversation_id: conversationId,
+      workspace: workspace.name,
+      session_key: key,
+      turn_id: result.turnId,
+      mode: mode || "current",
+    });
+    await this.sendRendered(conversationId, messageWithTitle(mode === "all" ? "Interrupted current turn and queued tasks." : "Interrupted current turn."));
+  }
+
   private async renderBackgroundTerminals(conversationId: ConversationId): Promise<void> {
     const { key } = await this.commandSession(conversationId);
     if (!this.deps.agent.listBackgroundTerminals) throw new Error("Agent driver cannot list background terminals.");
@@ -1233,6 +1276,14 @@ export class RelayController {
     await this.taskCoordinator.cancelActive(sessionKeyValue);
   }
 
+  private async interruptActiveTasks(sessionKeyValue: string): Promise<void> {
+    await this.taskCoordinator.interruptActive(sessionKeyValue);
+  }
+
+  private async interruptTasksByStatus(sessionKeyValue: string, statuses: TaskStatus[]): Promise<void> {
+    await this.taskCoordinator.interruptByStatus(sessionKeyValue, statuses);
+  }
+
   private async failActiveTasks(sessionKeyValue: string): Promise<void> {
     await this.taskCoordinator.failActive(sessionKeyValue);
   }
@@ -1240,6 +1291,7 @@ export class RelayController {
   private async sendPlanReadyPrompt(sessionKeyValue: string, completedTurnId?: string): Promise<void> {
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed || this.deps.store.getCollaborationMode(sessionKeyValue) !== "plan") return;
+    if (completedTurnId && this.interruptedPlanTurns.delete(`${sessionKeyValue}:${completedTurnId}`)) return;
     const token = shortToken();
     const result = await this.sendRendered(parsed.conversationId, messageWithTitle("Plan ready.", "Choose whether to implement it now or keep refining the plan."), {
       replyMarkup: planReadyKeyboard(token),
@@ -1261,6 +1313,13 @@ export class RelayController {
       payloadJson: JSON.stringify({ command: "plan", token, completedTurnId }),
       expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
     });
+  }
+
+  private clearCodexPromptsForSession(sessionKeyValue: string): void {
+    this.deps.store.deletePendingPromptsForSession(sessionKeyValue, ["codex_user_input", "codex_approval"]);
+    for (const key of this.codexRequests.keys()) {
+      if (key.startsWith(`${sessionKeyValue}:`)) this.codexRequests.delete(key);
+    }
   }
 
   private isStaleConsoleCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): boolean {
@@ -1347,6 +1406,8 @@ export class RelayController {
     questions: AgentUserInputQuestion[];
     answers: Record<string, { answers: string[] }>;
   }>();
+
+  private readonly interruptedPlanTurns = new Set<string>();
 
   private async handleCodexUserInputRequest(event: AgentUserInputRequestEvent): Promise<void> {
     const parsed = parseSessionKey(event.sessionKey);

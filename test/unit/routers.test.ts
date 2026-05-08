@@ -15,6 +15,7 @@ describe("relay routers", () => {
       rename: async (_conversationId, name) => { calls.push(`rename:${name}`); },
       plan: async (_conversationId, prompt) => { calls.push(`plan:${prompt}`); },
       goal: async (_conversationId, args) => { calls.push(`goal:${args}`); },
+      interrupt: async (_conversationId, args) => { calls.push(`interrupt:${args}`); },
       ps: async () => { calls.push("ps"); },
       stop: async () => { calls.push("stop"); },
     });
@@ -32,8 +33,9 @@ describe("relay routers", () => {
     expect(await router.handle(message, "/resume", message.text)).toBe(true);
     expect(await router.handle({ ...message, text: "/ps" }, "/ps", "/ps")).toBe(true);
     expect(await router.handle({ ...message, text: "/goal ship it" }, "/goal", "/goal ship it")).toBe(true);
+    expect(await router.handle({ ...message, text: "/interrupt all" }, "/interrupt", "/interrupt all")).toBe(true);
     expect(await router.handle(message, "/unknown", message.text)).toBe(false);
-    expect(calls).toEqual(["resume:sprint work", "ps", "goal:ship it"]);
+    expect(calls).toEqual(["resume:sprint work", "ps", "goal:ship it", "interrupt:all"]);
   });
 
   test("callback router dispatches prefixed payloads", async () => {

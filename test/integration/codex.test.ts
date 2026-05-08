@@ -137,6 +137,27 @@ describe("CodexDriver app-server protocol", () => {
     await driver.stop(status.sessionKey);
   });
 
+  test("interrupts an active turn without stopping the session", async () => {
+    const fake = fakeCodexBin();
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "slow active");
+
+    const result = await driver.interrupt(status.sessionKey);
+
+    expect(result).toEqual({ interrupted: true, turnId: "turn-1" });
+    expect(driver.getStatus(status.sessionKey)?.running).toBe(true);
+    expect(driver.getStatus(status.sessionKey)?.activeTurnId).toBeUndefined();
+    const interrupt = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((message) => message.method === "turn/interrupt");
+    expect(interrupt.params).toEqual({ threadId: "thread-1", turnId: "turn-1" });
+    await driver.stop(status.sessionKey);
+  });
+
   test("injects developer and base instructions into thread start and resume", async () => {
     const fake = fakeCodexBin();
     const driver = new CodexDriver(

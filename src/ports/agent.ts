@@ -124,6 +124,7 @@ export interface AgentDriver {
   send(sessionKey: string, text: string, options?: AgentSendOptions): Promise<AgentSendResult>;
   stop(sessionKey: string): Promise<void>;
   getStatus(sessionKey: string): AgentSessionStatus | undefined;
+  interrupt?(sessionKey: string): Promise<AgentInterruptResult>;
   respond?(sessionKey: string, requestId: string | number, result: unknown): Promise<void>;
   runBuiltinCommand?(sessionKey: string, command: AgentBuiltinCommand): Promise<AgentBuiltinResult>;
   getThreadGoal?(sessionKey: string): Promise<AgentThreadGoal | null>;
@@ -149,6 +150,7 @@ export interface AgentDriverCapabilities {
   backgroundTerminals: boolean;
   localImages: boolean;
   imageOutput: boolean;
+  interrupt: boolean;
 }
 
 export interface AgentSendOptions {
@@ -169,6 +171,11 @@ export interface AgentTaskInput {
 }
 
 export interface AgentSendResult {
+  turnId?: string;
+}
+
+export interface AgentInterruptResult {
+  interrupted: boolean;
   turnId?: string;
 }
 

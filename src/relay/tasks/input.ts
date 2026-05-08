@@ -38,6 +38,8 @@ export function reactionForTaskStatus(status: RelayTask["status"]): string {
       return "🤔";
     case "done":
       return "😎";
+    case "interrupted":
+      return "🤨";
     case "failed":
     case "cancelled":
       return "😱";

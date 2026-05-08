@@ -71,6 +71,24 @@ describe("store", () => {
       payloadJson: "{\"ok\":true}",
       expiresAt: 5,
     });
+    store.setPendingPrompt({
+      conversationId: "123",
+      promptMessageId: "10",
+      kind: "codex_approval",
+      createdAt: 3,
+      sessionKey: "123:demo",
+    });
+    store.setPendingPrompt({
+      conversationId: "123",
+      promptMessageId: "11",
+      kind: "relay_command",
+      createdAt: 3,
+      sessionKey: "123:demo",
+    });
+    expect(store.deletePendingPromptsForSession("123:demo", ["codex_user_input", "codex_approval"])).toBe(2);
+    expect(store.getPendingPrompt(123, 9)).toBeUndefined();
+    expect(store.getPendingPrompt(123, 10)).toBeUndefined();
+    expect(store.getPendingPrompt(123, 11)?.kind).toBe("relay_command");
     store.deletePendingPrompt(123, 9);
     expect(store.getPendingPrompt(123, 9)).toBeUndefined();
     store.close();
@@ -135,6 +153,8 @@ describe("store", () => {
     expect(store.activeTask(1, "demo")?.turnId).toBe("turn-1");
     expect(store.activeTask(1, "demo")?.statusMessageId).toBe("501");
     expect(store.nextQueuedTask(1, "demo")?.id).toBe(second.id);
+    expect(store.updateTasksByStatus(1, "demo", ["queued", "running"], "cancelled").map((task) => task.id)).toEqual([first.id, second.id]);
+    expect(store.countTasks(1, "demo", ["cancelled"])).toBe(2);
     store.close();
   });
 });

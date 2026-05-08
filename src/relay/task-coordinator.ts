@@ -138,6 +138,34 @@ export class TaskCoordinator {
     }
   }
 
+  async cancelByStatus(sessionKeyValue: string, statuses: RelayTask["status"][]): Promise<void> {
+    await this.updateByStatus(sessionKeyValue, statuses, "cancelled");
+  }
+
+  async interruptActive(sessionKeyValue: string): Promise<void> {
+    const parsed = parseSessionKey(sessionKeyValue);
+    if (!parsed) return;
+    const tasks = this.deps.store.updateActiveTasks(parsed.conversationId, parsed.workspaceName, "interrupted");
+    for (const task of tasks) {
+      this.logTaskStatus(task.id, task.status, task.turnId);
+      await this.syncTaskReaction(task.id);
+    }
+  }
+
+  async interruptByStatus(sessionKeyValue: string, statuses: RelayTask["status"][]): Promise<void> {
+    await this.updateByStatus(sessionKeyValue, statuses, "interrupted");
+  }
+
+  private async updateByStatus(sessionKeyValue: string, statuses: RelayTask["status"][], status: RelayTask["status"]): Promise<void> {
+    const parsed = parseSessionKey(sessionKeyValue);
+    if (!parsed || statuses.length === 0) return;
+    const tasks = this.deps.store.updateTasksByStatus(parsed.conversationId, parsed.workspaceName, statuses, status);
+    for (const task of tasks) {
+      this.logTaskStatus(task.id, task.status, task.turnId);
+      await this.syncTaskReaction(task.id);
+    }
+  }
+
   async failActive(sessionKeyValue: string): Promise<void> {
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) return;

@@ -941,6 +941,108 @@ describe("relay controller", () => {
     ]);
   });
 
+  test("/interrupt marks the active turn task interrupted while keeping the session selected", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("long task"));
+    await router.handle(textMessage("/interrupt"));
+
+    expect(agent.interrupted).toEqual([{ key: "codex:1:demo", turnId: "turn-1" }]);
+    expect(agent.getStatus("codex:1:demo")?.running).toBe(true);
+    expect(agent.getStatus("codex:1:demo")?.activeTurnId).toBeUndefined();
+    expect(store.getBinding(1)?.workspaceName).toBe("demo");
+    expect(store.getTask(1)?.status).toBe("interrupted");
+    expect(adapter.reactions.at(-1)).toEqual({ conversationId: "1", messageId: "1", emoji: "🤨" });
+    expect(adapter.sent.at(-1)?.text).toContain("Interrupted current turn.");
+  });
+
+  test("/interrupt does not start a session when no turn is active", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/interrupt"));
+
+    expect(agent.interrupted).toEqual([]);
+    expect(agent.getStatus("codex:1:demo")).toBeUndefined();
+    expect(adapter.sent.at(-1)?.text).toContain("No active Codex turn to interrupt.");
+  });
+
+  test("/interrupt all marks active and queued tasks interrupted", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("long task"));
+    await (router as any).submitTask(1, "queued work", 88, "queue");
+    await router.handle(textMessage("/interrupt all"));
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+
+    expect(agent.interrupted).toEqual([{ key: "codex:1:demo", turnId: "turn-1" }]);
+    expect(agent.sent).toHaveLength(1);
+    expect(store.getTask(1)?.status).toBe("interrupted");
+    expect(store.getTask(2)?.status).toBe("interrupted");
+    expect(adapter.reactions).toContainEqual({ conversationId: "1", messageId: "1", emoji: "🤨" });
+    expect(adapter.reactions).toContainEqual({ conversationId: "1", messageId: "88", emoji: "🤨" });
+    expect(adapter.sent.at(-1)?.text).toContain("Interrupted current turn and queued tasks.");
+  });
+
+  test("/interrupt suppresses plan ready for the interrupted plan turn", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/plan design this"));
+    await router.handle(textMessage("/interrupt"));
+    const sentCount = adapter.sent.length;
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+
+    expect(agent.interrupted).toEqual([{ key: "codex:1:demo", turnId: "turn-1" }]);
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+    expect(store.getTask(1)?.status).toBe("interrupted");
+    expect(adapter.reactions.at(-1)).toEqual({ conversationId: "1", messageId: "1", emoji: "🤨" });
+    expect(adapter.sent).toHaveLength(sentCount);
+    expect(adapter.sent.some((message) => message.text.includes("Plan ready."))).toBe(false);
+  });
+
+  test("/interrupt expires pending Codex question callbacks for the interrupted session", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("question task"));
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "codex:1:demo",
+      requestId: 900,
+      turnId: "turn-1",
+      questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [{ label: "Fast", description: "Quick" }] }],
+    });
+    const questionMessage = adapter.sent.at(-1)!;
+    const optionButton = questionMessage.options?.replyMarkup?.inline_keyboard.flat()[0];
+    expect(store.getPendingPrompt("1", questionMessage.messageId!)).toBeDefined();
+
+    await router.handle(textMessage("/interrupt"));
+
+    expect(store.getPendingPrompt("1", questionMessage.messageId!)).toBeUndefined();
+    await router.handle(callbackMessage(optionButton!.callback_data, 7, "cb-question", questionMessage.messageId));
+
+    expect(agent.responses).toEqual([]);
+    expect(adapter.edited.at(-1)?.text).toContain("Question expired.");
+  });
+
   test("queued prompt updates the user message reaction", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");

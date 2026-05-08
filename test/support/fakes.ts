@@ -1,6 +1,6 @@
 import { sessionKey } from "../../src/domain/session.ts";
 import type { ConversationId, MessageId } from "../../src/domain/ids.ts";
-import type { AgentBackgroundTerminalSummary, AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentThreadGoal, AgentThreadGoalSetOptions, AgentThreadListOptions, AgentThreadSummary } from "../../src/ports/agent.ts";
+import type { AgentBackgroundTerminalSummary, AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentInterruptResult, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentThreadGoal, AgentThreadGoalSetOptions, AgentThreadListOptions, AgentThreadSummary } from "../../src/ports/agent.ts";
 import type { EditMessageTextOptions, SendMessageOptions } from "../../src/ports/im.ts";
 
 export class FakeImAdapter {
@@ -78,6 +78,7 @@ export class FakeAgent implements AgentDriver {
   statuses = new Map<string, AgentSessionStatus>();
   sent: Array<{ key: string; text: string; options?: AgentSendOptions }> = [];
   stopped: string[] = [];
+  interrupted: Array<{ key: string; turnId?: string }> = [];
   responses: Array<{ key: string; requestId: string | number; result: unknown }> = [];
   builtins: Array<{ key: string; command: AgentBuiltinCommand }> = [];
   forks: string[] = [];
@@ -125,6 +126,17 @@ export class FakeAgent implements AgentDriver {
   async stop(key: string): Promise<void> {
     this.stopped.push(key);
     this.statuses.delete(key);
+  }
+
+  async interrupt(key: string): Promise<AgentInterruptResult> {
+    const status = this.statuses.get(key);
+    const turnId = status?.activeTurnId;
+    this.interrupted.push({ key, ...(turnId ? { turnId } : {}) });
+    if (!status || !turnId) return { interrupted: false };
+    status.activeTurnId = undefined;
+    status.waitingForApproval = false;
+    status.waitingForUserInput = false;
+    return { interrupted: true, turnId };
   }
 
   getStatus(key: string): AgentSessionStatus | undefined {

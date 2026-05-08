@@ -133,12 +133,16 @@ Relay-handled slash commands after a workspace is selected:
 | `/goal` | Shows the current Codex thread goal. |
 | `/goal <objective>` | Sets the current Codex thread goal, asking before replacing an existing goal. |
 | `/goal pause`, `/goal resume`, `/goal clear` | Pauses, resumes, or clears the current Codex thread goal. |
+| `/interrupt` | Interrupts the active Codex turn, similar to pressing Esc in Codex CLI. The current workspace, session, and thread remain selected. |
+| `/interrupt all` | Interrupts the active Codex turn and marks queued prompts interrupted for the current workspace. |
 | `/ps` | Lists background terminals started by Codex for the current thread. |
 | `/stop` | Asks Codex to clean background terminals for the current thread. It does not stop unrelated system processes. |
 
 `/goal` uses Codex app-server thread goal APIs (`thread/goal/get`, `thread/goal/set`, and `thread/goal/clear`) and requires a Codex CLI version that supports those methods. It can run while a Codex turn is active, matching the interactive Codex CLI behavior. The reserved subcommands `pause`, `resume`, and `clear` are treated as goal actions rather than objective text.
 
 `/relay` is the only Relay command that works without a selected workspace. Unsupported slash text, including `/help`, `/status`, `/model`, and `/start`, is forwarded to Codex when a workspace is selected.
+
+When Telegram reactions are available, relay-owned prompt messages use status reactions: `🫡` for waiting or queued, `✍` for running, `🤔` for blocked on Codex input or approval, `😎` for done, `🤨` for interrupted, and `😱` for failed or cancelled.
 
 Codex questions with predefined options are shown with inline buttons. In Plan mode, selecting an option opens a confirmation step where you can submit, add a note, or change the selection; questions that support Other provide a free-text ForceReply answer. Free-text and secret questions are shown as ForceReply prompts. Multi-question requests are sent one question at a time, and answered option cards only show the selected answer. Approval requests are shown with approve/deny inline buttons. New prompts are paused while Codex is waiting for an answer or approval.
 

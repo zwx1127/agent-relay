@@ -292,6 +292,19 @@ export class SQLiteStore implements RelayStore {
     this.db.query("DELETE FROM pending_prompts WHERE conversation_id = ? AND prompt_message_id = ?").run(String(conversationId), String(promptMessageId));
   }
 
+  deletePendingPromptsForSession(sessionKey: string, kinds: PendingPrompt["kind"][] = []): number {
+    if (kinds.length > 0) {
+      const placeholders = kinds.map(() => "?").join(", ");
+      const result = this.db.query<any, any>(`
+        DELETE FROM pending_prompts
+        WHERE session_key = ? AND kind IN (${placeholders})
+      `).run(sessionKey, ...kinds);
+      return result.changes;
+    }
+    const result = this.db.query("DELETE FROM pending_prompts WHERE session_key = ?").run(sessionKey);
+    return result.changes;
+  }
+
   setPagedOutput(output: PagedOutput): void {
     this.prunePagedOutputs(Date.now());
     this.db.query(`
@@ -457,7 +470,11 @@ export class SQLiteStore implements RelayStore {
   }
 
   updateActiveTasks(conversationId: ConversationId, workspaceName: string, status: TaskStatus): RelayTask[] {
-    const tasks = this.listTasks(conversationId, workspaceName, ["waiting", "running", "blocked"], 100);
+    return this.updateTasksByStatus(conversationId, workspaceName, ["waiting", "running", "blocked"], status);
+  }
+
+  updateTasksByStatus(conversationId: ConversationId, workspaceName: string, fromStatuses: TaskStatus[], status: TaskStatus): RelayTask[] {
+    const tasks = this.listTasks(conversationId, workspaceName, fromStatuses, 100);
     for (const task of tasks) {
       this.updateTask(task.id, { status });
     }

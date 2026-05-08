@@ -6,6 +6,7 @@ import type {
   AgentBackgroundTerminalSummary,
   AgentBuiltinCommand,
   AgentBuiltinResult,
+  AgentInterruptResult,
   AgentSendOptions,
   AgentDriver,
   AgentExitHandler,
@@ -81,6 +82,7 @@ export class CodexDriver implements AgentDriver {
     backgroundTerminals: true,
     localImages: true,
     imageOutput: true,
+    interrupt: true,
   };
 
   private readonly sessions = new Map<string, RunningSession>();
@@ -249,6 +251,40 @@ export class CodexDriver implements AgentDriver {
 
   getStatus(key: string): AgentSessionStatus | undefined {
     return this.sessions.get(key)?.status;
+  }
+
+  async interrupt(key: string): Promise<AgentInterruptResult> {
+    const running = this.sessions.get(key);
+    if (!running?.status.threadId) {
+      this.logger.info("codex.interrupt_without_session", { session_key: key });
+      return { interrupted: false };
+    }
+    const turnId = running.status.activeTurnId;
+    if (!turnId) {
+      this.logger.info("codex.interrupt_without_active_turn", {
+        session_key: key,
+        thread_id: running.status.threadId,
+      });
+      running.status.waitingForApproval = false;
+      running.status.waitingForUserInput = false;
+      return { interrupted: false };
+    }
+
+    this.logger.info("codex.turn_interrupt_requested", {
+      session_key: key,
+      conversation_id: running.status.conversationId,
+      workspace: running.status.workspaceName,
+      thread_id: running.status.threadId,
+      active_turn_id: turnId,
+    });
+    await this.request("turn/interrupt", {
+      threadId: running.status.threadId,
+      turnId,
+    });
+    running.status.activeTurnId = undefined;
+    running.status.waitingForApproval = false;
+    running.status.waitingForUserInput = false;
+    return { interrupted: true, turnId };
   }
 
   async respond(_sessionKey: string, requestId: string | number, result: unknown): Promise<void> {

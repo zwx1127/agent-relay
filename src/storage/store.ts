@@ -27,6 +27,7 @@ export interface RelayStore {
   setPendingPrompt(prompt: PendingPrompt): void;
   getPendingPrompt(conversationId: ConversationId, promptMessageId: MessageId): PendingPrompt | undefined;
   deletePendingPrompt(conversationId: ConversationId, promptMessageId: MessageId): void;
+  deletePendingPromptsForSession(sessionKey: string, kinds?: PendingPrompt["kind"][]): number;
   setPagedOutput(output: PagedOutput): void;
   getPagedOutput(token: string): PagedOutput | undefined;
   deletePagedOutput(token: string): void;
@@ -51,5 +52,6 @@ export interface RelayStore {
   updateTask(id: number, updates: { status?: TaskStatus; turnId?: string | null; statusMessageId?: MessageId | null }): void;
   updateTasksByTurn(conversationId: ConversationId, workspaceName: string, turnId: string, fromStatuses: TaskStatus[], status: TaskStatus): RelayTask[];
   updateActiveTasks(conversationId: ConversationId, workspaceName: string, status: TaskStatus): RelayTask[];
+  updateTasksByStatus(conversationId: ConversationId, workspaceName: string, fromStatuses: TaskStatus[], status: TaskStatus): RelayTask[];
   countTasks(conversationId: ConversationId, workspaceName: string, statuses: TaskStatus[]): number;
 }
