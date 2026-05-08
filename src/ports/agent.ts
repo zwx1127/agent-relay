@@ -106,6 +106,7 @@ export interface AgentSessionStatus {
   contextWindow?: number;
   waitingForUserInput?: boolean;
   waitingForApproval?: boolean;
+  recentWarning?: string;
   recentError?: string;
 }
 

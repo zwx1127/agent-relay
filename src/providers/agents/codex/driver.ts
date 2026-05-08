@@ -551,7 +551,7 @@ export class CodexDriver implements AgentDriver {
 
     if (message.method === "warning") {
       const warning = typeof params?.message === "string" ? params.message : undefined;
-      if (warning) running.status.recentError = warning;
+      if (warning) running.status.recentWarning = warning;
       return;
     }
 

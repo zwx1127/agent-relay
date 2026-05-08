@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatDetailsMessage, formatTokenContextUsage } from "../../src/relay/ui/status-message.ts";
+import { formatDetailsMessage, formatStatusMessage, formatTokenContextUsage } from "../../src/relay/ui/status-message.ts";
 import type { StatusView } from "../../src/relay/ui/status-view.ts";
 
 describe("relay home status message", () => {
@@ -63,5 +63,43 @@ describe("relay home status message", () => {
     expect(rendered.text).not.toContain("Token usage:");
     expect(rendered.text).not.toContain("▰");
     expect(rendered.text).not.toContain("▱");
+  });
+
+  test("compact view does not treat warnings as errors", () => {
+    const rendered = formatStatusMessage({
+      workspaceName: "demo",
+      workspacePath: "/tmp/demo",
+      running: true,
+      recentWarning: "Under-development features enabled: goals",
+    } satisfies StatusView);
+
+    expect(rendered.text).toContain("Running");
+    expect(rendered.text).not.toContain("Error:");
+    expect(rendered.text).not.toContain("Warning:");
+  });
+
+  test("details view shows warnings without error state", () => {
+    const rendered = formatDetailsMessage({
+      workspaceName: "demo",
+      workspacePath: "/tmp/demo",
+      running: true,
+      recentWarning: "Under-development features enabled: goals",
+    } satisfies StatusView);
+
+    expect(rendered.text).toContain("Running");
+    expect(rendered.text).toContain("Warning: Under-development features enabled: goals");
+    expect(rendered.text).not.toContain("Error:");
+  });
+
+  test("details view still treats recent errors as errors", () => {
+    const rendered = formatDetailsMessage({
+      workspaceName: "demo",
+      workspacePath: "/tmp/demo",
+      running: true,
+      recentError: "Codex app-server exited",
+    } satisfies StatusView);
+
+    expect(rendered.text).toContain("Error");
+    expect(rendered.text).toContain("Error: Codex app-server exited");
   });
 });

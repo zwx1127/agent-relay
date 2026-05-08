@@ -5,6 +5,7 @@ export interface StatusView {
   workspacePath?: string;
   running?: boolean;
   recentOutputAt?: number;
+  recentWarning?: string;
   recentError?: string;
   threadId?: string;
   threadName?: string;

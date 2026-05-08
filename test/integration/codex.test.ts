@@ -343,6 +343,24 @@ describe("CodexDriver app-server protocol", () => {
     expect(updated.reasoningEffort).toBe("medium");
     await driver.stop(status.sessionKey);
   });
+
+  test("tracks app-server warnings separately from errors", async () => {
+    const fake = fakeCodexBin();
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "warn please");
+    await sleep(100);
+
+    const updated = driver.getStatus(status.sessionKey)!;
+    expect(updated.recentWarning).toBe("Under-development features enabled: goals");
+    expect(updated.recentError).toBeUndefined();
+    await driver.stop(status.sessionKey);
+  });
 });
 
 function fakeCodexBin(): string {
@@ -377,6 +395,9 @@ rl.on("line", (line) => {
       send({ method: "thread/name/updated", params: { threadId: "thread-1", threadName: "Demo thread" } });
       send({ method: "thread/status/changed", params: { threadId: "thread-1", status: { type: "active", activeFlags: ["waitingOnApproval"] } } });
       send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-1", turnId, tokenUsage: { last: { totalTokens: 7 }, total: { totalTokens: 42 }, modelContextWindow: 100 } } });
+    } else if (inputText === "warn please") {
+      send({ method: "warning", params: { threadId: "thread-1", message: "Under-development features enabled: goals" } });
+      send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: turnId, status: "completed", items: [] } } });
     } else if (inputText === "ask") {
       send({ id: 900, method: "item/tool/requestUserInput", params: { threadId: "thread-1", turnId, itemId: "item-1", questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [{ label: "Fast", description: "Quick" }] }] } });
     } else if (inputText === "plan please") {

@@ -19,6 +19,7 @@ export function statusViewFromParts(
     workspacePath: workspace.path,
     running: Boolean(status?.running),
     recentOutputAt,
+    recentWarning: status?.recentWarning,
     recentError: status?.recentError ?? recentError,
     threadId: status?.threadId,
     threadName: status?.threadName,
@@ -104,6 +105,7 @@ export function formatDetailsMessage(status: StatusView): RenderedTelegramText {
     status.sandboxPolicy ?? "unknown",
   );
   if (status.recentOutputAt) parts.push("\nLast output: ", relativeTime(status.recentOutputAt));
+  if (status.recentWarning) parts.push("\nWarning: ", truncateForTelegramLabel(status.recentWarning.trim(), 120));
   if (status.recentError) parts.push("\nError: ", truncateForTelegramLabel(status.recentError.trim(), 120));
   return renderTelegramText(parts);
 }
