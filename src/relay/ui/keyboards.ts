@@ -34,6 +34,15 @@ export function planReadyKeyboard(token: string): InlineKeyboardMarkup {
   };
 }
 
+export function goalReplaceKeyboard(token: string): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [[
+      { text: "Replace", callback_data: `ar:cmd:goal:${token}:replace` },
+      { text: "Cancel", callback_data: `ar:cmd:goal:${token}:cancel` },
+    ]],
+  };
+}
+
 export function approvalKeyboard(token: string): InlineKeyboardMarkup {
   return {
     inline_keyboard: [[

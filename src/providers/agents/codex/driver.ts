@@ -12,13 +12,15 @@ import type {
   AgentModelSummary,
   AgentOutputHandler,
   AgentSessionStatus,
+  AgentThreadGoal,
+  AgentThreadGoalSetOptions,
   AgentThreadSwitchResult,
   AgentThreadListOptions,
   AgentThreadSummary,
   AgentUserInputQuestion,
   StartAgentOptions,
 } from "../../../ports/agent.ts";
-import { applySessionMetadata, applyThreadMetadata, approvalCopy, approvalKindForMethod, asRecord, collaborationModePayload, getString, getThreadId, getTurnId, imageOutputEvent, isNoActiveTurnToSteerError, reviewTargetPayload, summarizeUnknown, toModelSummary, toQuestion, toThreadSummary, toTokenBreakdown, updateActiveTurnFromResult, userInputPayload } from "./protocol.ts";
+import { applySessionMetadata, applyThreadMetadata, approvalCopy, approvalKindForMethod, asRecord, collaborationModePayload, getString, getThreadId, getTurnId, imageOutputEvent, isNoActiveTurnToSteerError, reviewTargetPayload, summarizeUnknown, toModelSummary, toQuestion, toThreadGoal, toThreadSummary, toTokenBreakdown, updateActiveTurnFromResult, userInputPayload } from "./protocol.ts";
 
 interface RunningSession {
   status: AgentSessionStatus;
@@ -73,6 +75,7 @@ export class CodexDriver implements AgentDriver {
     builtinCommands: true,
     threadFork: true,
     threadRename: true,
+    threadGoals: true,
     threadList: true,
     modelList: true,
     backgroundTerminals: true,
@@ -271,6 +274,32 @@ export class CodexDriver implements AgentDriver {
     const result = await this.request("thread/compact/start", { threadId: running.status.threadId });
     updateActiveTurnFromResult(running, result);
     return { message: "Compaction started.", threadId: running.status.threadId, turnId: getTurnId(result) };
+  }
+
+  async getThreadGoal(key: string): Promise<AgentThreadGoal | null> {
+    const running = this.requireRunningSession(key);
+    const result = await this.request("thread/goal/get", { threadId: running.status.threadId });
+    const goal = toThreadGoal(asRecord(result)?.goal);
+    return goal ?? null;
+  }
+
+  async setThreadGoal(key: string, goal: AgentThreadGoalSetOptions): Promise<AgentThreadGoal> {
+    const running = this.requireRunningSession(key);
+    const result = await this.request("thread/goal/set", {
+      threadId: running.status.threadId,
+      ...(goal.objective !== undefined ? { objective: goal.objective } : {}),
+      ...(goal.status !== undefined ? { status: goal.status } : {}),
+      ...(goal.tokenBudget !== undefined ? { tokenBudget: goal.tokenBudget } : {}),
+    });
+    const updated = toThreadGoal(asRecord(result)?.goal);
+    if (!updated) throw new Error("Codex app-server did not return a thread goal.");
+    return updated;
+  }
+
+  async clearThreadGoal(key: string): Promise<boolean> {
+    const running = this.requireRunningSession(key);
+    const result = await this.request("thread/goal/clear", { threadId: running.status.threadId });
+    return asRecord(result)?.cleared === true;
   }
 
   async forkThread(key: string): Promise<AgentThreadSwitchResult> {

@@ -1,4 +1,4 @@
-import type { AgentApprovalKind, AgentCollaborationMode, AgentImageInput, AgentModelSummary, AgentReviewTarget, AgentSessionStatus, AgentThreadSummary, AgentTokenBreakdown, AgentUserInputQuestion } from "../../../ports/agent.ts";
+import type { AgentApprovalKind, AgentCollaborationMode, AgentImageInput, AgentModelSummary, AgentReviewTarget, AgentSessionStatus, AgentThreadGoal, AgentThreadGoalStatus, AgentThreadSummary, AgentTokenBreakdown, AgentUserInputQuestion } from "../../../ports/agent.ts";
 
 export function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
@@ -82,6 +82,37 @@ export function toModelSummary(value: unknown): AgentModelSummary | undefined {
       ? record.supportedReasoningEfforts.filter((effort): effort is string => typeof effort === "string")
       : undefined,
   };
+}
+
+export function toThreadGoal(value: unknown): AgentThreadGoal | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  const threadId = getString(record, "threadId");
+  const objective = getString(record, "objective");
+  const status = toThreadGoalStatus(getString(record, "status"));
+  if (!threadId || !objective || !status) return undefined;
+  return {
+    threadId,
+    objective,
+    status,
+    tokenBudget: typeof record?.tokenBudget === "number" ? record.tokenBudget : null,
+    tokensUsed: getNumber(record, "tokensUsed") ?? 0,
+    timeUsedSeconds: getNumber(record, "timeUsedSeconds") ?? 0,
+    createdAt: getNumber(record, "createdAt") ?? 0,
+    updatedAt: getNumber(record, "updatedAt") ?? 0,
+  };
+}
+
+export function toThreadGoalStatus(value: string | undefined): AgentThreadGoalStatus | undefined {
+  switch (value) {
+    case "active":
+    case "paused":
+    case "budgetLimited":
+    case "complete":
+      return value;
+    default:
+      return undefined;
+  }
 }
 
 export function reviewTargetPayload(target: AgentReviewTarget): unknown {

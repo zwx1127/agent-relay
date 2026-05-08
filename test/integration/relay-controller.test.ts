@@ -359,6 +359,76 @@ describe("relay controller", () => {
     expect(adapter.sent.map((message) => message.text)).toEqual(["Review started.", "Compaction started."]);
   });
 
+  test("/goal shows, sets, updates, and clears thread goals", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/goal"));
+    await router.handle(textMessage("/goal ship feature"));
+    await router.handle(textMessage("/goal pause"));
+    await router.handle(textMessage("/goal resume"));
+    await router.handle(textMessage("/goal clear"));
+
+    expect(agent.goalGets).toEqual(["codex:1:demo", "codex:1:demo"]);
+    expect(agent.goalSets).toEqual([
+      { key: "codex:1:demo", goal: { objective: "ship feature", status: "active", tokenBudget: null } },
+      { key: "codex:1:demo", goal: { status: "paused" } },
+      { key: "codex:1:demo", goal: { status: "active" } },
+    ]);
+    expect(agent.goalClears).toEqual(["codex:1:demo"]);
+    expect(adapter.sent[0]?.text).toContain("No goal is currently set.");
+    expect(adapter.sent.at(-1)?.text).toBe("Goal cleared.");
+  });
+
+  test("/goal confirms before replacing an existing goal", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.goal = {
+      threadId: "thread-1",
+      objective: "Existing goal",
+      status: "active",
+      tokenBudget: null,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+
+    await router.handle(textMessage("/goal replacement goal"));
+    const button = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().find((item) => item.text === "Replace");
+    expect(adapter.sent.at(-1)?.text).toContain("Replace goal?");
+    expect(button?.callback_data).toMatch(/^ar:cmd:goal:/);
+    expect(agent.goalSets).toEqual([]);
+
+    await router.handle(callbackMessage(button!.callback_data, 7, "cb-goal", adapter.sent.at(-1)?.messageId));
+
+    expect(agent.goalSets).toEqual([
+      { key: "codex:1:demo", goal: { objective: "replacement goal", status: "active", tokenBudget: null } },
+    ]);
+    expect(adapter.edited.at(-1)?.text).toContain("Goal updated.");
+  });
+
+  test("/goal can run while a Codex turn is active", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    const status = await agent.start({ conversationId: 1, workspaceName: "demo", workspacePath: path });
+    status.activeTurnId = "turn-active";
+
+    await router.handle(textMessage("/goal pause"));
+
+    expect(agent.goalSets).toEqual([{ key: "codex:1:demo", goal: { status: "paused" } }]);
+    expect(adapter.sent.at(-1)?.text).not.toContain("Codex is busy.");
+  });
+
   test("/init starts the AGENTS.md generation prompt", async () => {
     const { router, store, agent, root } = fixture();
     const path = join(root, "demo");

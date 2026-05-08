@@ -130,8 +130,13 @@ Relay-handled slash commands after a workspace is selected:
 | `/rename <name>` | Renames the current thread. Without a name, the relay asks via ForceReply. |
 | `/plan` | Toggles Plan mode for the current `conversation + workspace`. |
 | `/plan <prompt>` | Runs the prompt in Plan mode and then offers Implement or Continue buttons. Implement exits Plan mode and starts normal coding. |
+| `/goal` | Shows the current Codex thread goal. |
+| `/goal <objective>` | Sets the current Codex thread goal, asking before replacing an existing goal. |
+| `/goal pause`, `/goal resume`, `/goal clear` | Pauses, resumes, or clears the current Codex thread goal. |
 | `/ps` | Lists background terminals started by Codex for the current thread. |
 | `/stop` | Asks Codex to clean background terminals for the current thread. It does not stop unrelated system processes. |
+
+`/goal` uses Codex app-server thread goal APIs (`thread/goal/get`, `thread/goal/set`, and `thread/goal/clear`) and requires a Codex CLI version that supports those methods. It can run while a Codex turn is active, matching the interactive Codex CLI behavior. The reserved subcommands `pause`, `resume`, and `clear` are treated as goal actions rather than objective text.
 
 `/relay` is the only Relay command that works without a selected workspace. Unsupported slash text, including `/help`, `/status`, `/model`, and `/start`, is forwarded to Codex when a workspace is selected.
 

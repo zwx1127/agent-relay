@@ -1,6 +1,6 @@
 import { sessionKey } from "../../src/domain/session.ts";
 import type { ConversationId, MessageId } from "../../src/domain/ids.ts";
-import type { AgentBackgroundTerminalSummary, AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentThreadListOptions, AgentThreadSummary } from "../../src/ports/agent.ts";
+import type { AgentBackgroundTerminalSummary, AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentThreadGoal, AgentThreadGoalSetOptions, AgentThreadListOptions, AgentThreadSummary } from "../../src/ports/agent.ts";
 import type { EditMessageTextOptions, SendMessageOptions } from "../../src/ports/im.ts";
 
 export class FakeImAdapter {
@@ -82,6 +82,10 @@ export class FakeAgent implements AgentDriver {
   builtins: Array<{ key: string; command: AgentBuiltinCommand }> = [];
   forks: string[] = [];
   renames: Array<{ key: string; name: string }> = [];
+  goalGets: string[] = [];
+  goalSets: Array<{ key: string; goal: AgentThreadGoalSetOptions }> = [];
+  goalClears: string[] = [];
+  goal: AgentThreadGoal | null = null;
   cleaned: string[] = [];
   backgroundTerminals: AgentBackgroundTerminalSummary[] = [];
   threadLists: AgentThreadListOptions[] = [];
@@ -134,6 +138,33 @@ export class FakeAgent implements AgentDriver {
   async runBuiltinCommand(key: string, command: AgentBuiltinCommand): Promise<AgentBuiltinResult> {
     this.builtins.push({ key, command });
     return { message: command.type === "review" ? "Review started." : "Compaction started." };
+  }
+
+  async getThreadGoal(key: string): Promise<AgentThreadGoal | null> {
+    this.goalGets.push(key);
+    return this.goal;
+  }
+
+  async setThreadGoal(key: string, goal: AgentThreadGoalSetOptions): Promise<AgentThreadGoal> {
+    this.goalSets.push({ key, goal });
+    this.goal = {
+      threadId: this.statuses.get(key)?.threadId ?? "thread-1",
+      objective: goal.objective ?? this.goal?.objective ?? "Existing goal",
+      status: goal.status ?? this.goal?.status ?? "active",
+      tokenBudget: goal.tokenBudget === undefined ? this.goal?.tokenBudget ?? null : goal.tokenBudget,
+      tokensUsed: this.goal?.tokensUsed ?? 0,
+      timeUsedSeconds: this.goal?.timeUsedSeconds ?? 0,
+      createdAt: this.goal?.createdAt ?? 1,
+      updatedAt: 2,
+    };
+    return this.goal;
+  }
+
+  async clearThreadGoal(key: string): Promise<boolean> {
+    this.goalClears.push(key);
+    const cleared = Boolean(this.goal);
+    this.goal = null;
+    return cleared;
   }
 
   async forkThread(key: string): Promise<{ threadId: string; threadName?: string }> {

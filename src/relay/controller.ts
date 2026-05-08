@@ -16,6 +16,7 @@ import type {
   AgentCollaborationMode,
   AgentOutputEvent,
   AgentSessionStatus,
+  AgentThreadGoal,
   AgentUserInputOption,
   AgentUserInputQuestion,
   AgentUserInputRequestEvent,
@@ -38,9 +39,9 @@ import { noopLogger, type Logger, type LogFields } from "../domain/logger.ts";
 import { CODEX_PROMPT_TTL_MS, DEFAULT_IMAGE_PROMPT, LIST_PAGE_SIZE, MEDIA_GROUP_QUIET_MS, UI_BUTTON } from "./ui/constants.ts";
 import { codexRequestKey, shortToken, workspaceCallbackToken } from "./ui/callback-data.ts";
 import { commandArgs, parseReviewTarget } from "./ui/commands.ts";
-import { approvalKeyboard, codexQuestionConfirmKeyboard, codexQuestionKeyboard, consoleKeyboard, deleteWorkspaceConfirmKeyboard, planReadyKeyboard, resumeKeyboard, workspaceIntroKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
+import { approvalKeyboard, codexQuestionConfirmKeyboard, codexQuestionKeyboard, consoleKeyboard, deleteWorkspaceConfirmKeyboard, goalReplaceKeyboard, planReadyKeyboard, resumeKeyboard, workspaceIntroKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
 import { bestPhoto, formatBytes, pathContains, truncateTelegramCaption } from "./ui/media-format.ts";
-import { answeredMessage, confirmMessage, formatApprovalDecisionMessage, formatApprovalMessage, formatBackgroundTerminalsMessage, formatCodexAnswerNotePrompt, formatCodexQuestion, formatCodexSelectedAnswer, formatErrorMessage, formatResumeMessage, formatWorkspacesMessage } from "./ui/messages.ts";
+import { answeredMessage, confirmMessage, formatApprovalDecisionMessage, formatApprovalMessage, formatBackgroundTerminalsMessage, formatCodexAnswerNotePrompt, formatCodexQuestion, formatCodexSelectedAnswer, formatErrorMessage, formatGoalClearedMessage, formatGoalMessage, formatGoalReplaceMessage, formatGoalUpdatedMessage, formatResumeMessage, formatWorkspacesMessage } from "./ui/messages.ts";
 import { paginateWorkspaces } from "./ui/pagination.ts";
 import { approvalResponse, asPromptRecord, isExpired, parsePromptPayload } from "./ui/prompt-state.ts";
 import { formatHomeMessage, statusViewFromParts } from "./ui/status-message.ts";
@@ -93,6 +94,7 @@ export class RelayController {
       fork: (conversationId) => this.forkCurrentThread(conversationId),
       rename: (conversationId, name) => this.renameCommand(conversationId, name),
       plan: (conversationId, prompt, userMessageId) => this.planCommand(conversationId, prompt, userMessageId),
+      goal: (conversationId, args) => this.goalCommand(conversationId, args),
       ps: (conversationId) => this.renderBackgroundTerminals(conversationId),
       stop: (conversationId) => this.cleanBackgroundTerminals(conversationId),
     });
@@ -632,6 +634,62 @@ export class RelayController {
     await this.submitTask(conversationId, prompt.trim(), userMessageId, "immediate");
   }
 
+  private async goalCommand(conversationId: ConversationId, args: string): Promise<void> {
+    const { key } = await this.commandSession(conversationId);
+    const normalized = args.trim();
+    if (!this.deps.agent.getThreadGoal || !this.deps.agent.setThreadGoal || !this.deps.agent.clearThreadGoal) {
+      throw new Error("Agent driver does not support thread goals.");
+    }
+
+    if (!normalized) {
+      await this.sendRendered(conversationId, formatGoalMessage(await this.deps.agent.getThreadGoal(key)));
+      return;
+    }
+
+    switch (normalized.toLowerCase()) {
+      case "pause": {
+        const goal = await this.deps.agent.setThreadGoal(key, { status: "paused" });
+        await this.sendRendered(conversationId, formatGoalUpdatedMessage(goal));
+        return;
+      }
+      case "resume": {
+        const goal = await this.deps.agent.setThreadGoal(key, { status: "active" });
+        await this.sendRendered(conversationId, formatGoalUpdatedMessage(goal));
+        return;
+      }
+      case "clear": {
+        await this.sendRendered(conversationId, formatGoalClearedMessage(await this.deps.agent.clearThreadGoal(key)));
+        return;
+      }
+    }
+
+    const current = await this.deps.agent.getThreadGoal(key);
+    if (current) {
+      await this.promptGoalReplace(conversationId, key, current, normalized);
+      return;
+    }
+
+    const goal = await this.deps.agent.setThreadGoal(key, { objective: normalized, status: "active", tokenBudget: null });
+    await this.sendRendered(conversationId, formatGoalUpdatedMessage(goal));
+  }
+
+  private async promptGoalReplace(conversationId: ConversationId, key: string, current: AgentThreadGoal, objective: string): Promise<void> {
+    const token = shortToken();
+    const result = await this.sendRendered(conversationId, formatGoalReplaceMessage(current, objective), {
+      replyMarkup: goalReplaceKeyboard(token),
+    });
+    if (!result.messageId) return;
+    this.deps.store.setPendingPrompt({
+      conversationId,
+      promptMessageId: result.messageId,
+      kind: "relay_command",
+      createdAt: Date.now(),
+      sessionKey: key,
+      payloadJson: JSON.stringify({ command: "goal", token, objective }),
+      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
+    });
+  }
+
   private async cleanBackgroundTerminals(conversationId: ConversationId): Promise<void> {
     const { key } = await this.commandSession(conversationId);
     if (!this.deps.agent.cleanBackgroundTerminals) throw new Error("Agent driver cannot clean background terminals.");
@@ -677,6 +735,10 @@ export class RelayController {
     }
     if (command === "plan") {
       await this.planFromCallback(message, pending, data, action);
+      return;
+    }
+    if (command === "goal") {
+      await this.goalFromCallback(message, pending, data, action);
       return;
     }
     throw new Error("Unknown command callback.");
@@ -757,6 +819,32 @@ export class RelayController {
     }
     this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
     await this.dismissPlanReadyPrompt(message);
+  }
+
+  private async goalFromCallback(
+    message: Extract<InboundMessage, { kind: "callback_query" }>,
+    pending: PendingPrompt,
+    data: Record<string, unknown>,
+    action: string | undefined,
+  ): Promise<void> {
+    const workspace = this.requireCurrentWorkspace(message.conversationId);
+    const key = sessionKey(message.conversationId, workspace.name);
+    const objective = typeof data.objective === "string" ? data.objective : undefined;
+    this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+
+    if (pending.sessionKey && pending.sessionKey !== key) {
+      await this.renderCallbackPage(message, messageWithTitle("Goal action expired.", "Open the latest goal card."), { inline_keyboard: [] });
+      return;
+    }
+    if (action !== "replace") {
+      await this.renderCallbackPage(message, messageWithTitle("Goal unchanged."), { inline_keyboard: [] });
+      return;
+    }
+    if (!objective) throw new Error("Goal objective is missing.");
+    if (!this.deps.agent.setThreadGoal) throw new Error("Agent driver does not support thread goals.");
+
+    const goal = await this.deps.agent.setThreadGoal(key, { objective, status: "active", tokenBudget: null });
+    await this.renderCallbackPage(message, formatGoalUpdatedMessage(goal), { inline_keyboard: [] });
   }
 
   private async dismissPlanReadyPrompt(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {

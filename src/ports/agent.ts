@@ -125,6 +125,9 @@ export interface AgentDriver {
   getStatus(sessionKey: string): AgentSessionStatus | undefined;
   respond?(sessionKey: string, requestId: string | number, result: unknown): Promise<void>;
   runBuiltinCommand?(sessionKey: string, command: AgentBuiltinCommand): Promise<AgentBuiltinResult>;
+  getThreadGoal?(sessionKey: string): Promise<AgentThreadGoal | null>;
+  setThreadGoal?(sessionKey: string, goal: AgentThreadGoalSetOptions): Promise<AgentThreadGoal>;
+  clearThreadGoal?(sessionKey: string): Promise<boolean>;
   forkThread?(sessionKey: string): Promise<AgentThreadSwitchResult>;
   renameThread?(sessionKey: string, name: string): Promise<void>;
   cleanBackgroundTerminals?(sessionKey: string): Promise<void>;
@@ -139,6 +142,7 @@ export interface AgentDriverCapabilities {
   builtinCommands: boolean;
   threadFork: boolean;
   threadRename: boolean;
+  threadGoals: boolean;
   threadList: boolean;
   modelList: boolean;
   backgroundTerminals: boolean;
@@ -181,6 +185,25 @@ export interface AgentBuiltinResult {
   message: string;
   turnId?: string;
   threadId?: string;
+}
+
+export type AgentThreadGoalStatus = "active" | "paused" | "budgetLimited" | "complete";
+
+export interface AgentThreadGoal {
+  threadId: string;
+  objective: string;
+  status: AgentThreadGoalStatus;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AgentThreadGoalSetOptions {
+  objective?: string | null;
+  status?: AgentThreadGoalStatus | null;
+  tokenBudget?: number | null;
 }
 
 export interface AgentThreadSwitchResult {

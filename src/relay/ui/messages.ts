@@ -1,4 +1,4 @@
-import type { AgentBackgroundTerminalSummary, AgentThreadSummary, AgentUserInputQuestion } from "../../ports/agent.ts";
+import type { AgentBackgroundTerminalSummary, AgentThreadGoal, AgentThreadSummary, AgentUserInputQuestion } from "../../ports/agent.ts";
 import { renderTelegramText, truncateForTelegramLabel, type RenderedTelegramText, type TelegramTextPart } from "../../presentation/telegram/text.ts";
 import { UI_BUTTON } from "./constants.ts";
 import { bold, code } from "./text-parts.ts";
@@ -31,6 +31,102 @@ export function formatBackgroundTerminalsMessage(terminals: AgentBackgroundTermi
   const remaining = terminals.length - shown.length;
   if (remaining > 0) parts.push(`\n... and ${remaining} more running`);
   return renderTelegramText(parts);
+}
+
+export function formatGoalMessage(goal: AgentThreadGoal | null): RenderedTelegramText {
+  const parts: TelegramTextPart[] = [bold("Goal"), "\n\n"];
+  if (!goal) {
+    parts.push(
+      "Usage:\n",
+      "- /goal\n",
+      "- /goal <objective>\n",
+      "- /goal pause\n",
+      "- /goal resume\n",
+      "- /goal clear\n\n",
+      "No goal is currently set.",
+    );
+    return renderTelegramText(parts);
+  }
+
+  parts.push(
+    "Status: ",
+    formatGoalStatus(goal.status),
+    "\nObjective: ",
+    goal.objective,
+  );
+  const summary = goalUsageSummary(goal);
+  if (summary) parts.push("\n", summary);
+  return renderTelegramText(parts);
+}
+
+export function formatGoalUpdatedMessage(goal: AgentThreadGoal): RenderedTelegramText {
+  return renderTelegramText([bold("Goal updated."), "\n\n", ...goalSummaryParts(goal)]);
+}
+
+export function formatGoalReplaceMessage(current: AgentThreadGoal, objective: string): RenderedTelegramText {
+  return renderTelegramText([
+    bold("Replace goal?"),
+    "\n\nCurrent: ",
+    current.objective,
+    "\n\nNew: ",
+    objective,
+  ]);
+}
+
+export function formatGoalClearedMessage(cleared: boolean): RenderedTelegramText {
+  return renderTelegramText([bold(cleared ? "Goal cleared." : "No goal to clear.")]);
+}
+
+function goalSummaryParts(goal: AgentThreadGoal): TelegramTextPart[] {
+  const parts: TelegramTextPart[] = [
+    "Status: ",
+    formatGoalStatus(goal.status),
+    "\nObjective: ",
+    goal.objective,
+  ];
+  const summary = goalUsageSummary(goal);
+  if (summary) parts.push("\n", summary);
+  return parts;
+}
+
+function goalUsageSummary(goal: AgentThreadGoal): string {
+  const parts: string[] = [];
+  if (goal.timeUsedSeconds > 0) parts.push(`Time: ${formatGoalDuration(goal.timeUsedSeconds)}.`);
+  if (goal.tokenBudget !== null) parts.push(`Tokens: ${formatGoalCount(goal.tokensUsed)}/${formatGoalCount(goal.tokenBudget)}.`);
+  return parts.join(" ");
+}
+
+function formatGoalStatus(status: AgentThreadGoal["status"]): string {
+  switch (status) {
+    case "active":
+      return "active";
+    case "paused":
+      return "paused";
+    case "budgetLimited":
+      return "limited by budget";
+    case "complete":
+      return "complete";
+  }
+}
+
+function formatGoalDuration(secondsValue: number): string {
+  const seconds = Math.max(0, Math.floor(secondsValue));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
+}
+
+function formatGoalCount(value: number): string {
+  if (value >= 1_000_000) return `${trimFixed(value / 1_000_000)}M`;
+  if (value >= 1_000) return `${trimFixed(value / 1_000)}K`;
+  return String(value);
+}
+
+function trimFixed(value: number): string {
+  return value.toFixed(1).replace(/\.0$/, "");
 }
 
 function firstLine(value: string): string {

@@ -188,6 +188,34 @@ describe("CodexDriver app-server protocol", () => {
     await driver.stop(status.sessionKey);
   });
 
+  test("sends thread goal payloads", async () => {
+    const fake = fakeCodexBin();
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: "/tmp/demo" });
+    const existing = await driver.getThreadGoal(status.sessionKey);
+    const updated = await driver.setThreadGoal(status.sessionKey, { objective: "Ship feature", status: "active", tokenBudget: null });
+    const cleared = await driver.clearThreadGoal(status.sessionKey);
+
+    const messages = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(messages.find((message) => message.method === "thread/goal/get").params).toEqual({ threadId: "thread-1" });
+    expect(messages.find((message) => message.method === "thread/goal/set").params).toEqual({
+      threadId: "thread-1",
+      objective: "Ship feature",
+      status: "active",
+      tokenBudget: null,
+    });
+    expect(messages.find((message) => message.method === "thread/goal/clear").params).toEqual({ threadId: "thread-1" });
+    expect(existing?.status).toBe("budgetLimited");
+    expect(updated.objective).toBe("Ship feature");
+    expect(cleared).toBe(true);
+    await driver.stop(status.sessionKey);
+  });
+
   test("sends thread management command payloads", async () => {
     const fake = fakeCodexBin();
     const driver = new CodexDriver(
@@ -384,6 +412,12 @@ rl.on("line", (line) => {
     send({ id: msg.id, result: { reviewThreadId: "thread-1", turn: { id: "review-turn", status: "inProgress", items: [] } } });
   } else if (msg.method === "thread/compact/start") {
     send({ id: msg.id, result: {} });
+  } else if (msg.method === "thread/goal/get") {
+    send({ id: msg.id, result: { goal: { threadId: "thread-1", objective: "Existing goal", status: "budgetLimited", tokenBudget: 50000, tokensUsed: 63900, timeUsedSeconds: 120, createdAt: 1, updatedAt: 2 } } });
+  } else if (msg.method === "thread/goal/set") {
+    send({ id: msg.id, result: { goal: { threadId: msg.params.threadId, objective: msg.params.objective || "Existing goal", status: msg.params.status || "active", tokenBudget: msg.params.tokenBudget ?? null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 3 } } });
+  } else if (msg.method === "thread/goal/clear") {
+    send({ id: msg.id, result: { cleared: true } });
   } else if (msg.method === "thread/fork") {
     send({ id: msg.id, result: { thread: { id: "fork-thread", name: "Forked thread", status: { type: "idle" } }, model: "gpt-5.2", modelProvider: "openai", reasoningEffort: "medium", approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: { type: "workspaceWrite" } } });
   } else if (msg.method === "thread/name/set") {
