@@ -107,7 +107,7 @@ Send `/relay` to open Relay Home. Relay Home shows the selected workspace, Codex
 
 Relay Home actions:
 
-- `Workspaces`: open the workspace management view. It lists first-level directories under `WORKSPACE_ROOT`, keeps `Back`, `New`, and `Refresh` actions fixed at the bottom, and supports selecting a workspace or deleting one after confirmation. `Back` returns to Relay Home, and the create prompt includes an input placeholder for the workspace name.
+- `Workspaces`: open the workspace management view. It lists first-level directories under `WORKSPACE_ROOT`, keeps `Back`, `New`, and `Refresh` actions fixed at the bottom, and supports selecting a workspace or deleting one after confirmation. `Back` returns to Relay Home. `New` asks for a workspace name with an input placeholder, then sends a short confirmation and refreshes the workspace list in place.
 - `Details` / `Compact`: toggle compact and detailed status views for the conversation.
 - `Refresh`: redraw the current Relay Home message.
 - `Stop`: interrupt the current workspace session and clear the conversation's workspace selection.

@@ -826,6 +826,8 @@ describe("relay controller", () => {
     expect(store.getBinding(1)?.workspaceName).toBe("demo");
     expect(agent.getStatus("codex:1:demo")?.running).toBe(true);
     expect(adapter.sent.at(-1)?.text).toContain("created and selected");
+    expect(adapter.sent.at(-1)?.text).not.toContain("Relay Home");
+    expect(adapter.sent.at(-1)?.options?.replyMarkup).toBeUndefined();
     expect(existsSync(join(root, "demo", ".git"))).toBe(true);
   });
 
@@ -843,6 +845,8 @@ describe("relay controller", () => {
     expect(agent.getStatus(sessionKey(1, workspaceName))?.running).toBe(true);
     expect(adapter.sent.at(-1)?.text).toContain("selected");
     expect(adapter.sent.at(-1)?.text).not.toContain("created and selected");
+    expect(adapter.sent.at(-1)?.text).not.toContain("Relay Home");
+    expect(adapter.sent.at(-1)?.options?.replyMarkup).toBeUndefined();
     expect(existsSync(join(root, workspaceName, ".git"))).toBe(false);
   });
 
@@ -1221,7 +1225,7 @@ describe("relay controller", () => {
     expect(demoRow?.at(1)?.callback_data.startsWith("ar:uh:")).toBe(true);
     expect(demoRow?.at(2)?.callback_data.startsWith("ar:wd?:")).toBe(true);
     const callbackData = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data);
-    const createButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:n");
+    const createButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:n"));
     const backButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:home");
     const refreshButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:w");
     const footer = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.at(-1)?.map((button) => button.text);
@@ -1233,6 +1237,29 @@ describe("relay controller", () => {
     expect(callbackData?.filter((data) => data.startsWith("ar:uh:"))).toHaveLength(2);
     expect(callbackData?.filter((data) => data.startsWith("ar:wi:0:"))).toHaveLength(2);
     expect(callbackData?.every((data) => new TextEncoder().encode(data).length <= 64)).toBe(true);
+  });
+
+  test("new workspace reply refreshes source workspace list without opening Relay Home", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    mkdirSync(join(root, "existing"));
+
+    await router.handle(callbackMessage("ar:w"));
+    const workspacesMessageId = adapter.edited.at(-1)?.options.messageId;
+    const createButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "New");
+
+    await router.handle(callbackMessage(createButton!.callback_data, 7, "cb-new", workspacesMessageId));
+    const promptId = adapter.sent.at(-1)!.messageId;
+    await router.handle(textMessage("demo", 7, promptId));
+
+    expect(store.getBinding(1)?.workspaceName).toBe("demo");
+    expect(agent.getStatus("codex:1:demo")?.running).toBe(true);
+    expect(adapter.sent.at(-1)?.text).toContain("created and selected");
+    expect(adapter.sent.at(-1)?.text).not.toContain("Relay Home");
+    expect(adapter.edited.at(-1)?.options.messageId).toBe(workspacesMessageId);
+    expect(adapter.edited.at(-1)?.text).toContain("Workspaces");
+    expect(adapter.edited.at(-1)?.text).toContain("✅ demo");
+    expect(adapter.edited.at(-1)?.text).not.toContain("Stale Relay Home");
+    expect(existsSync(join(root, "demo", ".git"))).toBe(true);
   });
 
   test("workspace name button opens README intro and returns to workspace list", async () => {

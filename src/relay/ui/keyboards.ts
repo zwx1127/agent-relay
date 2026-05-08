@@ -114,7 +114,7 @@ export function workspacesKeyboard(workspaces: WorkspaceRecord[], selected: stri
       ...rows,
       [
         { text: UI_BUTTON.back, callback_data: "ar:home" },
-        { text: UI_BUTTON.create, callback_data: "ar:n" },
+        { text: UI_BUTTON.create, callback_data: `ar:n:${pageIndex}` },
         { text: UI_BUTTON.refresh, callback_data: "ar:w" },
       ],
     ],

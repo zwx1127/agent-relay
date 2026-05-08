@@ -44,7 +44,7 @@ describe("relay routers", () => {
       home: async () => { calls.push("home"); },
       status: async () => { calls.push("status"); },
       workspaces: async (_message, pageIndex) => { calls.push(`workspaces:${pageIndex}`); },
-      newWorkspace: async () => { calls.push("new"); },
+      newWorkspace: async (_message, pageIndex) => { calls.push(`new:${pageIndex}`); },
       toggleStatusMode: async () => { calls.push("toggle"); },
       approval: async (_message, payload) => { calls.push(`approval:${payload}`); },
       codexQuestion: async (_message, payload) => { calls.push(`question:${payload}`); },
@@ -95,9 +95,17 @@ describe("relay routers", () => {
       conversationId: "c1",
       userId: "u1",
       callbackQueryId: "cb4",
+      data: "ar:n:3",
+    });
+    await router.route({
+      kind: "callback_query",
+      id: "5",
+      conversationId: "c1",
+      userId: "u1",
+      callbackQueryId: "cb5",
       data: "ar:q:tok:1",
     });
 
-    expect(calls).toEqual(["home", "workspaces:2", "select:abc", "intro:2:def", "question:q:tok:1"]);
+    expect(calls).toEqual(["home", "workspaces:2", "select:abc", "intro:2:def", "new:3", "question:q:tok:1"]);
   });
 });

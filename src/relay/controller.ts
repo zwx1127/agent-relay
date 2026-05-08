@@ -104,7 +104,7 @@ export class RelayController {
       home: (message) => this.renderConsole(message.conversationId),
       status: (message) => this.renderHomeCallback(message),
       workspaces: (message, pageIndex) => this.renderWorkspacesCallback(message, pageIndex),
-      newWorkspace: (message) => this.promptForWorkspaceName(message.conversationId),
+      newWorkspace: (message, pageIndex) => this.promptForWorkspaceName(message, pageIndex),
       toggleStatusMode: (message) => this.toggleStatusModeCallback(message),
       approval: (message, payload) => this.answerCodexApproval(message, payload),
       codexQuestion: (message, payload) => this.answerCodexOptionCallback(message, payload),
@@ -1097,8 +1097,8 @@ export class RelayController {
     if (result.messageId) this.deps.store.setConsoleMessageId(conversationId, result.messageId);
   }
 
-  private async promptForWorkspaceName(conversationId: ConversationId): Promise<void> {
-    const result = await this.sendRendered(conversationId, textMessage("Reply with the workspace name. Existing directories under WORKSPACE_ROOT are selected; missing names are created."), {
+  private async promptForWorkspaceName(message: Extract<InboundMessage, { kind: "callback_query" }>, pageIndex: number): Promise<void> {
+    const result = await this.sendRendered(message.conversationId, textMessage("Reply with the workspace name. Existing directories under WORKSPACE_ROOT are selected; missing names are created."), {
       forceReply: true,
       inputFieldPlaceholder: "repo name under WORKSPACE_ROOT",
       disableWebPagePreview: true,
@@ -1107,20 +1107,32 @@ export class RelayController {
       throw new Error("Telegram did not return a prompt message id.");
     }
     this.deps.store.setPendingPrompt({
-      conversationId,
+      conversationId: message.conversationId,
       promptMessageId: result.messageId,
       kind: "workspace_name",
       createdAt: Date.now(),
+      payloadJson: JSON.stringify({
+        sourceMessageId: message.messageId,
+        pageIndex: normalizePageIndex(pageIndex),
+      }),
     });
-    this.logger.info("router.workspace_prompt_created", { conversation_id: conversationId, prompt_message_id: result.messageId });
+    this.logger.info("router.workspace_prompt_created", { conversation_id: message.conversationId, prompt_message_id: result.messageId, source_message_id: message.messageId });
   }
 
   private async createWorkspaceFromPrompt(conversationId: ConversationId, promptMessageId: MessageId, name: string): Promise<void> {
-    await this.selectOrCreateWorkspace(conversationId, name);
+    const pending = this.deps.store.getPendingPrompt(conversationId, promptMessageId);
+    const payload = parsePromptPayload(pending?.payloadJson);
+    const { existed } = await this.selectOrCreateWorkspace(conversationId, name);
     this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
+    await this.sendRendered(conversationId, renderTelegramText([
+      "workspace ",
+      code(name),
+      ` ${existed ? "selected" : "created and selected"}.`,
+    ]));
+    await this.refreshWorkspacesMessageFromPrompt(conversationId, payload);
   }
 
-  private async selectOrCreateWorkspace(conversationId: ConversationId, name: string): Promise<void> {
+  private async selectOrCreateWorkspace(conversationId: ConversationId, name: string): Promise<{ name: string; path: string; existed: boolean }> {
     validateWorkspaceName(name);
     const existed = workspaceDirectoryExists(this.deps.config.workspaceRoot, name);
     const path = existed
@@ -1130,13 +1142,31 @@ export class RelayController {
     this.deps.store.bindConversation(conversationId, name);
     this.logger.info(existed ? "router.workspace_existing_selected" : "router.workspace_created", { conversation_id: conversationId, workspace: name, path });
     await this.ensureAgentStarted(conversationId, { name, path, createdAt: Date.now() }, undefined, { resumePrevious: false });
-    await this.sendRendered(conversationId, renderTelegramText([
-      "workspace ",
-      code(name),
-      ` ${existed ? "selected" : "created and selected"}.`,
-    ]), {
-      replyMarkup: this.consoleKeyboard(conversationId),
-    });
+    return { name, path, existed };
+  }
+
+  private async refreshWorkspacesMessageFromPrompt(conversationId: ConversationId, payload: Record<string, unknown> | undefined): Promise<void> {
+    const sourceMessageId = payload?.sourceMessageId;
+    if (typeof sourceMessageId !== "string" && typeof sourceMessageId !== "number") return;
+    const pageIndex = normalizePageIndex(payload?.pageIndex);
+    try {
+      const workspaces = await this.listAvailableWorkspaces();
+      const selected = this.currentWorkspace(conversationId)?.name;
+      const page = paginateWorkspaces(workspaces, selected, pageIndex);
+      await this.editRendered(conversationId, formatWorkspacesMessage(page.items.map((workspace) => ({
+        name: workspace.name,
+        selected: workspace.name === selected,
+      })), page.pageIndex, page.totalPages), {
+        messageId: sourceMessageId,
+        replyMarkup: workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages),
+      });
+    } catch (error) {
+      this.logger.warn("router.workspace_prompt_source_refresh_failed", {
+        conversation_id: conversationId,
+        message_id: sourceMessageId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
   }
 
   private async submitTask(conversationId: ConversationId, text: string, userMessageId?: MessageId, preference: TaskSubmitPreference = "auto", input?: AgentTaskInput): Promise<void> {
@@ -1693,4 +1723,9 @@ function workspaceIntroExcerpt(text: string): string {
     }
   }
   return `${window.trimEnd()}\n\n...`;
+}
+
+function normalizePageIndex(value: unknown): number {
+  const pageIndex = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(pageIndex) && pageIndex >= 0 ? Math.floor(pageIndex) : 0;
 }

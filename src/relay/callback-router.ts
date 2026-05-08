@@ -11,7 +11,7 @@ export interface CallbackHandlers {
   home(message: CallbackMessage): Promise<CallbackResult>;
   status(message: CallbackMessage): Promise<CallbackResult>;
   workspaces(message: CallbackMessage, pageIndex: number): Promise<CallbackResult>;
-  newWorkspace(message: CallbackMessage): Promise<CallbackResult>;
+  newWorkspace(message: CallbackMessage, pageIndex: number): Promise<CallbackResult>;
   toggleStatusMode(message: CallbackMessage): Promise<CallbackResult>;
   approval(message: CallbackMessage, payload: string): Promise<CallbackResult>;
   codexQuestion(message: CallbackMessage, payload: string): Promise<CallbackResult>;
@@ -43,8 +43,9 @@ export class CallbackRouter {
     if (payload === "w") {
       return callbackText(await this.handlers.workspaces(message, 0));
     }
-    if (payload === "n") {
-      return callbackText(await this.handlers.newWorkspace(message));
+    if (payload === "n" || payload.startsWith("n:")) {
+      const pageIndex = payload.startsWith("n:") ? Number(payload.slice("n:".length)) : 0;
+      return callbackText(await this.handlers.newWorkspace(message, pageIndex));
     }
     if (payload === "status") {
       return callbackText(await this.handlers.toggleStatusMode(message));
