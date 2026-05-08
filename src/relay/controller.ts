@@ -41,7 +41,7 @@ import { codexRequestKey, shortToken, workspaceCallbackToken } from "./ui/callba
 import { commandArgs, parseReviewTarget } from "./ui/commands.ts";
 import { approvalKeyboard, codexQuestionConfirmKeyboard, codexQuestionKeyboard, consoleKeyboard, deleteWorkspaceConfirmKeyboard, goalReplaceKeyboard, planReadyKeyboard, resumeKeyboard, workspaceIntroKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
 import { bestPhoto, formatBytes, pathContains, truncateTelegramCaption } from "./ui/media-format.ts";
-import { answeredMessage, confirmMessage, formatApprovalDecisionMessage, formatApprovalMessage, formatBackgroundTerminalsMessage, formatCodexAnswerNotePrompt, formatCodexQuestion, formatCodexSelectedAnswer, formatErrorMessage, formatGoalClearedMessage, formatGoalMessage, formatGoalReplaceMessage, formatGoalUpdatedMessage, formatResumeMessage, formatWorkspacesMessage } from "./ui/messages.ts";
+import { answeredMessage, confirmMessage, formatApprovalDecisionMessage, formatApprovalMessage, formatBackgroundTerminalsMessage, formatCodexAnswerNotePrompt, formatCodexQuestion, formatCodexSelectedAnswer, formatCodexSelectedAnswerSummary, formatErrorMessage, formatGoalClearedMessage, formatGoalMessage, formatGoalReplaceMessage, formatGoalUpdatedMessage, formatResumeMessage, formatWorkspacesMessage } from "./ui/messages.ts";
 import { paginateWorkspaces } from "./ui/pagination.ts";
 import { approvalResponse, asPromptRecord, isExpired, parsePromptPayload } from "./ui/prompt-state.ts";
 import { formatHomeMessage, statusViewFromParts } from "./ui/status-message.ts";
@@ -1490,10 +1490,11 @@ export class RelayController {
     selectedAnswer: string,
   ): Promise<void> {
     this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-    await this.renderCallbackPage(message, formatCodexSelectedAnswer(selectedAnswer), { inline_keyboard: [] });
-    const result = await this.sendRendered(message.conversationId, formatCodexAnswerNotePrompt(selectedAnswer), {
+    await this.renderCallbackPage(message, formatCodexSelectedAnswerSummary(selectedAnswer), { inline_keyboard: [] });
+    const result = await this.sendRendered(message.conversationId, formatCodexAnswerNotePrompt(), {
       forceReply: true,
       disableWebPagePreview: true,
+      replyToMessageId: pending.promptMessageId,
     });
     if (!result.messageId) throw new Error("Telegram did not return a note prompt message id.");
     this.deps.store.setPendingPrompt({

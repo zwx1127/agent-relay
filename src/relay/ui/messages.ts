@@ -155,12 +155,17 @@ export function formatCodexSelectedAnswer(answer: string): RenderedTelegramText 
   ]);
 }
 
-export function formatCodexAnswerNotePrompt(answer: string): RenderedTelegramText {
+export function formatCodexSelectedAnswerSummary(answer: string): RenderedTelegramText {
+  return renderTelegramText([
+    bold("Selected:"),
+    " ",
+    answer,
+  ]);
+}
+
+export function formatCodexAnswerNotePrompt(): RenderedTelegramText {
   return renderTelegramText([
     bold("Add note"),
-    "\n\n",
-    "Selected: ",
-    answer,
     "\n\n",
     "Reply with the extra details to include.",
   ]);

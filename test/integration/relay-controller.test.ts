@@ -1511,8 +1511,13 @@ describe("relay controller", () => {
     const note = adapter.edited.at(-1)!.options.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Add note")!;
     await router.handle(callbackMessage(note.callback_data, 7, "cb-note", prompt.messageId));
 
+    expect(adapter.edited.at(-1)?.text).toBe("Selected: Fast");
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
     const notePrompt = adapter.sent.at(-1)!;
     expect(notePrompt.options?.forceReply).toBe(true);
+    expect(notePrompt.options?.replyToMessageId).toBe(String(prompt.messageId));
+    expect(notePrompt.text).toBe("Add note\n\nReply with the extra details to include.");
+    expect(notePrompt.text).not.toContain("Selected:");
     await router.handle(textMessage("Prefer minimal changes", 7, notePrompt.messageId));
 
     expect(agent.responses).toEqual([{
