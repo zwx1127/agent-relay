@@ -71,9 +71,10 @@ scripts/relay.sh status
 scripts/relay.sh stop
 scripts/relay.sh restart
 scripts/relay.sh clean-data
+scripts/relay.sh clean
 ```
 
-The script writes the process id to `.data/agent-relay.pid` and appends logs to `logs/agent-relay.log`. `restart` stops the relay, removes `.data/` and `logs/`, then starts a fresh process. `clean-data` removes `.data/` and `logs/`, and refuses to run while the relay process is still active.
+The script writes the process id to `.data/agent-relay.pid` and appends logs to `logs/agent-relay.log`. `restart` stops the relay, removes `.data/` and `logs/`, then starts a fresh process. `clean-data` removes `.data/` and `logs/`, and refuses to run while the relay process is still active. `clean` is an alias for `clean-data`.
 
 agent-relay can be used to develop itself: select this repository as the workspace, ask Codex to make changes, and use `scripts/relay.sh restart` when the running relay should restart with clean `.data/` and `logs/`.
 
@@ -157,7 +158,7 @@ Relay-handled slash commands after a workspace is selected:
 
 `/relay` is the only Relay command that works without a selected workspace. Unsupported slash text, including `/help`, `/status`, `/model`, and `/start`, is forwarded to Codex when a workspace is selected.
 
-When Telegram reactions are available, relay-owned prompt messages use status reactions: `🫡` for waiting or queued, `✍` for running, `🤔` for blocked on Codex input or approval, `😎` for done, `🤨` for interrupted, and `😱` for failed or cancelled.
+When IM reactions are available, relay-owned prompt messages use status reactions: `🫡` for waiting or queued, `✍` for running, `🤔` for blocked on Codex input or approval, `😎` for done, `🤨` for interrupted, and `😱` for failed or cancelled. Telegram sends those emoji reactions directly; Lark maps them to the closest platform emoji types.
 
 Codex questions with predefined options are shown with inline buttons. In Plan mode, selecting an option opens a confirmation step where you can submit, add a note, or change the selection; questions that support Other provide a free-text ForceReply answer. Free-text and secret questions are shown as ForceReply prompts. Multi-question requests are sent one question at a time, and answered option cards only show the selected answer. Approval requests are shown with approve/deny inline buttons. New prompts are paused while Codex is waiting for an answer or approval.
 
