@@ -162,7 +162,7 @@ describe("lark adapter", () => {
     await adapter.setMessageReaction("oc_chat", "om_1", "😎");
     await adapter.setMessageReaction("oc_chat", "om_1", "🤔");
 
-    expect(channel.sent[0]).toEqual({ to: "oc_chat", input: { text: "hello" }, options: { replyTo: "om_parent" } });
+    expect(channel.sent[0]).toEqual({ to: "oc_chat", input: { markdown: "hello" }, options: { replyTo: "om_parent" } });
     expect(channel.sent[1]?.input).toMatchObject({ card: { schema: "2.0" } });
     expect(JSON.stringify(channel.sent[1]?.input)).toContain("\"callback_data\":\"ar:s\"");
     expect(channel.updated[0]).toMatchObject({ messageId: "om_2", card: { schema: "2.0" } });
@@ -175,6 +175,53 @@ describe("lark adapter", () => {
       { messageId: "om_1", emojiType: "THINKING" },
     ]);
     expect(channel.removedReactions).toEqual([{ messageId: "om_1", emojiType: "SMILE" }]);
+  });
+
+  test("renders relay managed messages as editable Lark cards", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+
+    await expect(adapter.sendMessage("oc_chat", "Done src/app.ts", {
+      disableWebPagePreview: true,
+      entities: [
+        { type: "bold", offset: 0, length: 4 },
+        { type: "code", offset: 5, length: 10 },
+      ],
+      replyMarkup: { inline_keyboard: [[
+        { text: "Approve", callback_data: "ar:a:y" },
+        { text: "Deny", callback_data: "ar:a:n" },
+      ]] },
+    })).resolves.toEqual({ messageId: "om_1" });
+
+    const payload = JSON.stringify(channel.sent[0]?.input);
+    expect(payload).toContain("**Done**");
+    expect(payload).toContain("`src/app.ts`");
+    expect(payload).toContain("\"type\":\"primary\"");
+    expect(payload).toContain("\"type\":\"danger\"");
+    expect(payload).toContain("\"callback_data\":\"ar:a:y\"");
+
+    await adapter.editMessageText("oc_chat", "Updated", {
+      messageId: "om_1",
+      disableWebPagePreview: true,
+      replyMarkup: { inline_keyboard: [] },
+    });
+
+    expect(channel.updated.at(-1)).toMatchObject({ messageId: "om_1", card: { schema: "2.0" } });
+  });
+
+  test("renders force reply prompts as Lark cards", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+
+    await expect(adapter.sendMessage("oc_chat", "Reply with the workspace name.", {
+      forceReply: true,
+      inputFieldPlaceholder: "repo name under WORKSPACE_ROOT",
+    })).resolves.toEqual({ messageId: "om_1" });
+
+    const payload = JSON.stringify(channel.sent[0]?.input);
+    expect(payload).toContain("Reply to this message.");
+    expect(payload).toContain("repo name under WORKSPACE_ROOT");
+    expect(channel.sent[0]?.input).toMatchObject({ card: { schema: "2.0" } });
   });
 });
 

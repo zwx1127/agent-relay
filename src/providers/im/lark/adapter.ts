@@ -1,6 +1,7 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import type { ConversationId, MessageId } from "../../../domain/ids.ts";
 import { noopLogger, type Logger } from "../../../domain/logger.ts";
+import { createLarkCard, renderLarkMarkdown } from "../../../presentation/lark/text.ts";
 import type {
   CardActionEvent,
   LarkChannel as SdkLarkChannel,
@@ -14,7 +15,6 @@ import type {
   EditMessageTextOptions,
   InboundMediaFile,
   InboundMessage,
-  InlineKeyboardMarkup,
   ImAdapter,
   SendMessageOptions,
   SendMessageResult,
@@ -143,14 +143,14 @@ export class LarkAdapter implements ImAdapter {
   async sendMessage(conversationId: ConversationId, text: string, options: SendMessageOptions = {}): Promise<SendMessageResult> {
     const messageText = text.length > 0 ? text : "(empty)";
     const sendOptions = sendOptionsFor(options);
-    if (options.replyMarkup) {
-      const card = cardForMessage(messageText, options.replyMarkup);
+    if (shouldSendCard(options)) {
+      const card = createLarkCard(messageText, options);
       const result = await this.channel.send(String(conversationId), { card }, sendOptions);
       this.cardMessageIds.add(result.messageId);
       return { messageId: result.messageId };
     }
 
-    const result = await this.channel.send(String(conversationId), { text: messageText }, sendOptions);
+    const result = await this.channel.send(String(conversationId), { markdown: renderLarkMarkdown(messageText, options.entities) }, sendOptions);
     return { messageId: result.messageId };
   }
 
@@ -165,8 +165,8 @@ export class LarkAdapter implements ImAdapter {
 
   async editMessageText(_conversationId: ConversationId, text: string, options: EditMessageTextOptions): Promise<void> {
     const messageText = text.length > 0 ? text : "(empty)";
-    if (options.replyMarkup || this.cardMessageIds.has(String(options.messageId))) {
-      await this.channel.updateCard(String(options.messageId), cardForMessage(messageText, options.replyMarkup));
+    if (shouldSendCard(options) || this.cardMessageIds.has(String(options.messageId))) {
+      await this.channel.updateCard(String(options.messageId), createLarkCard(messageText, options));
       this.cardMessageIds.add(String(options.messageId));
       return;
     }
@@ -305,41 +305,8 @@ function larkDomainForSdk(domain: string | undefined): lark.Domain | string {
   return !domain || domain === "lark" ? lark.Domain.Lark : domain;
 }
 
-function cardForMessage(text: string, replyMarkup?: InlineKeyboardMarkup): object {
-  return {
-    schema: "2.0",
-    config: {
-      wide_screen_mode: true,
-    },
-    body: {
-      elements: [
-        {
-          tag: "markdown",
-          content: text,
-        },
-      ],
-    },
-    ...(replyMarkup && replyMarkup.inline_keyboard.length > 0 ? {
-      footer: {
-        elements: replyMarkup.inline_keyboard.flatMap((row) => row.map((button) => ({
-          tag: "button",
-          text: {
-            tag: "plain_text",
-            content: button.text,
-          },
-          type: "default",
-          behaviors: [
-            {
-              type: "callback",
-              value: {
-                callback_data: button.callback_data,
-              },
-            },
-          ],
-        }))),
-      },
-    } : {}),
-  };
+function shouldSendCard(options: SendMessageOptions): boolean {
+  return Boolean(options.replyMarkup || options.forceReply || options.entities?.length || options.disableWebPagePreview);
 }
 
 function callbackDataFromActionValue(value: unknown): string | undefined {
