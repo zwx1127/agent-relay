@@ -1,61 +1,41 @@
-import { existsSync } from "node:fs";
-import { lstat, readFile, rm } from "node:fs/promises";
-import { extname, isAbsolute, join, resolve } from "node:path";
 import { isAuthorized } from "../runtime/config.ts";
 import type { SendImageCapabilityRequest } from "./capabilities/send-image.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
 import { parseSessionKey, sessionKey } from "../domain/session.ts";
-import { extensionFromTelegramPath, imageBlobFromPath, saveGeneratedImage, saveRelayMedia } from "./media.ts";
 import type {
-  AgentImageInput,
-  AgentImageOutputEvent,
   AgentTaskInput,
-  AgentApprovalKind,
-  AgentApprovalRequestEvent,
-  AgentBuiltinCommand,
-  AgentCollaborationMode,
   AgentOutputEvent,
   AgentSessionStatus,
-  AgentThreadGoal,
-  AgentUserInputOption,
-  AgentUserInputQuestion,
-  AgentUserInputRequestEvent,
 } from "../ports/agent.ts";
 import type {
   EditMessageTextOptions,
   InboundMessage,
   InlineKeyboardMarkup,
-  MediaInboundMessage,
   SendMessageOptions,
 } from "../ports/im.ts";
 import type {
   HomeStatusMode,
-  PendingPrompt,
   TaskStatus,
   WorkspaceRecord,
 } from "./types.ts";
-import { createWorkspace, discoverWorkspaceDirectories, isRealDirectory, resolveWorkspacePath, validateWorkspaceName, workspaceDirectoryExists } from "../domain/workspace.ts";
-import { renderTelegramText, type RenderedTelegramText } from "../presentation/telegram/text.ts";
+import { isRealDirectory } from "../domain/workspace.ts";
+import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
 import { noopLogger, type Logger, type LogFields } from "../domain/logger.ts";
-import { CODEX_PROMPT_TTL_MS, DEFAULT_IMAGE_PROMPT, LIST_PAGE_SIZE, MEDIA_GROUP_QUIET_MS, UI_BUTTON } from "./ui/constants.ts";
-import { codexRequestKey, shortToken, workspaceCallbackToken } from "./ui/callback-data.ts";
-import { commandArgs, parseReviewTarget } from "./ui/commands.ts";
-import { approvalKeyboard, codexQuestionConfirmKeyboard, codexQuestionKeyboard, consoleKeyboard, deleteWorkspaceConfirmKeyboard, goalReplaceKeyboard, planReadyKeyboard, resumeKeyboard, workspaceIntroKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
-import { bestPhoto, formatBytes, pathContains, truncateTelegramCaption } from "./ui/media-format.ts";
-import { answeredMessage, confirmMessage, formatApprovalDecisionMessage, formatApprovalMessage, formatBackgroundTerminalsMessage, formatCodexAnswerNotePrompt, formatCodexQuestion, formatCodexSelectedAnswer, formatCodexSelectedAnswerSummary, formatErrorMessage, formatGoalClearedMessage, formatGoalMessage, formatGoalReplaceMessage, formatGoalUpdatedMessage, formatResumeMessage, formatWorkspacesMessage } from "./ui/messages.ts";
-import { paginateWorkspaces } from "./ui/pagination.ts";
-import { approvalResponse, asPromptRecord, isExpired, parsePromptPayload } from "./ui/prompt-state.ts";
+import { UI_BUTTON } from "./ui/constants.ts";
+import { consoleKeyboard } from "./ui/keyboards.ts";
+import { formatErrorMessage } from "./ui/messages.ts";
 import { formatHomeMessage, statusViewFromParts } from "./ui/status-message.ts";
-import { bold, code, ensureRendered, messageWithTitle, textMessage } from "./ui/text-parts.ts";
+import { ensureRendered, messageWithTitle, textMessage } from "./ui/text-parts.ts";
 import type { StatusView } from "./ui/status-view.ts";
-import { type MediaGroupState, type RelayControllerDeps } from "./controller-types.ts";
+import type { RelayControllerDeps } from "./controller-types.ts";
 import { SlashCommandRouter } from "./command-router.ts";
 import { CallbackRouter, isConsoleCallbackPayload } from "./callback-router.ts";
 import { OutputStreamer } from "./output-streamer.ts";
 import { TaskCoordinator, type TaskSubmitPreference } from "./task-coordinator.ts";
-
-const WORKSPACE_INTRO_FILES = ["README.md", "README", "README.markdown", "README.txt"];
-const WORKSPACE_INTRO_MAX_CHARS = 2400;
+import { MediaRelayService } from "./media-service.ts";
+import { CodexPromptFlow } from "./codex-prompt-flow.ts";
+import { ThreadCommandService } from "./thread-command-service.ts";
+import { WorkspaceFlow } from "./workspace-flow.ts";
 
 export class RelayController {
   private readonly logger: Logger;
@@ -63,6 +43,10 @@ export class RelayController {
   private readonly callbacks: CallbackRouter;
   private readonly outputStreamer: OutputStreamer;
   private readonly taskCoordinator: TaskCoordinator;
+  private readonly workspaceFlow: WorkspaceFlow;
+  private readonly mediaRelay: MediaRelayService;
+  private readonly codexPromptFlow: CodexPromptFlow;
+  private readonly threadCommands: ThreadCommandService;
 
   constructor(private readonly deps: RelayControllerDeps) {
     this.logger = deps.logger ?? noopLogger;
@@ -86,37 +70,92 @@ export class RelayController {
       setReplyToMessageId: (sessionKeyValue, messageId) => this.lastUserMessageIds.set(sessionKeyValue, messageId),
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
     });
+    this.workspaceFlow = new WorkspaceFlow({
+      config: deps.config,
+      store: deps.store,
+      agent: deps.agent,
+      logger: this.logger,
+      ensureAgentStarted: (conversationId, workspace, threadId, options) => this.ensureAgentStarted(conversationId, workspace, threadId, options),
+      finalizeSessionOutput: (sessionKeyValue) => this.finalizeSessionOutput(sessionKeyValue),
+      cancelActiveTasks: (sessionKeyValue) => this.cancelActiveTasks(sessionKeyValue),
+      statusView: (conversationId) => this.statusView(conversationId),
+      sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
+      editRendered: (conversationId, rendered, options) => this.editRendered(conversationId, rendered, options),
+      renderCallbackPage: (message, body, replyMarkup) => this.renderCallbackPage(message, body, replyMarkup),
+    });
+    this.mediaRelay = new MediaRelayService({
+      config: deps.config,
+      store: deps.store,
+      adapter: deps.adapter,
+      agent: deps.agent,
+      logger: this.logger,
+      currentWorkspace: (conversationId) => this.workspaceFlow.currentWorkspace(conversationId),
+      renderConsole: (conversationId) => this.renderConsole(conversationId),
+      ensureAgentStarted: (conversationId, workspace) => this.ensureAgentStarted(conversationId, workspace),
+      sendWaitingPromptNotice: (conversationId, status) => this.sendWaitingPromptNotice(conversationId, status),
+      submitTask: (conversationId, text, userMessageId, preference, input) => this.submitTask(conversationId, text, userMessageId, preference, input),
+      sendRendered: (conversationId, rendered) => this.sendRendered(conversationId, rendered),
+      trySendRendered: (conversationId, rendered, failureEvent, fields) => this.trySendRendered(conversationId, rendered, failureEvent, fields),
+      appendSystem: (conversationId, text) => this.appendSystem(conversationId, text),
+      lastUserMessageId: (sessionKeyValue) => this.lastUserMessageIds.get(sessionKeyValue),
+    });
+    this.codexPromptFlow = new CodexPromptFlow({
+      store: deps.store,
+      agent: deps.agent,
+      adapter: deps.adapter,
+      sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
+      renderCallbackPage: (message, body, replyMarkup) => this.renderCallbackPage(message, body, replyMarkup),
+      markActiveTask: (sessionKeyValue, status, turnId) => this.markActiveTask(sessionKeyValue, status, turnId),
+    });
+    this.threadCommands = new ThreadCommandService({
+      store: deps.store,
+      agent: deps.agent,
+      adapter: deps.adapter,
+      logger: this.logger,
+      requireCurrentWorkspace: (conversationId) => this.workspaceFlow.requireCurrentWorkspace(conversationId),
+      ensureAgentStarted: (conversationId, workspace, threadId, options) => this.ensureAgentStarted(conversationId, workspace, threadId, options),
+      finalizeSessionOutput: (sessionKeyValue) => this.finalizeSessionOutput(sessionKeyValue),
+      cancelActiveTasks: (sessionKeyValue) => this.cancelActiveTasks(sessionKeyValue),
+      interruptActiveTasks: (sessionKeyValue) => this.interruptActiveTasks(sessionKeyValue),
+      interruptTasksByStatus: (sessionKeyValue, statuses) => this.interruptTasksByStatus(sessionKeyValue, statuses),
+      submitTask: (conversationId, text, userMessageId, preference, input) => this.submitTask(conversationId, text, userMessageId, preference, input),
+      sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
+      renderCallbackPage: (message, body, replyMarkup) => this.renderCallbackPage(message, body, replyMarkup),
+      expireCallbackPrompt: (message) => this.expireCallbackPrompt(message),
+      clearCodexPromptsForSession: (sessionKeyValue) => this.clearCodexPromptsForSession(sessionKeyValue),
+      hasTaskCreatedAfter: (conversationId, workspaceName, timestamp) => this.hasTaskCreatedAfter(conversationId, workspaceName, timestamp),
+    });
     this.slashCommands = new SlashCommandRouter({
-      review: (conversationId, text) => this.runReviewCommand(conversationId, text),
-      compact: (conversationId) => this.runBuiltinCommand(conversationId, { type: "compact" }),
-      init: (conversationId, userMessageId) => this.runInitCommand(conversationId, userMessageId),
-      newThread: (conversationId) => this.startFreshThread(conversationId),
-      resume: (conversationId, searchTerm) => this.renderResumePicker(conversationId, searchTerm),
-      fork: (conversationId) => this.forkCurrentThread(conversationId),
-      rename: (conversationId, name) => this.renameCommand(conversationId, name),
-      plan: (conversationId, prompt, userMessageId) => this.planCommand(conversationId, prompt, userMessageId),
-      goal: (conversationId, args) => this.goalCommand(conversationId, args),
-      interrupt: (conversationId, args) => this.interruptCommand(conversationId, args),
-      ps: (conversationId) => this.renderBackgroundTerminals(conversationId),
-      stop: (conversationId) => this.cleanBackgroundTerminals(conversationId),
+      review: (conversationId, text) => this.threadCommands.runReviewCommand(conversationId, text),
+      compact: (conversationId) => this.threadCommands.runBuiltinCommand(conversationId, { type: "compact" }),
+      init: (conversationId, userMessageId) => this.threadCommands.runInitCommand(conversationId, userMessageId),
+      newThread: (conversationId) => this.threadCommands.startFreshThread(conversationId),
+      resume: (conversationId, searchTerm) => this.threadCommands.renderResumePicker(conversationId, searchTerm),
+      fork: (conversationId) => this.threadCommands.forkCurrentThread(conversationId),
+      rename: (conversationId, name) => this.threadCommands.renameCommand(conversationId, name),
+      plan: (conversationId, prompt, userMessageId) => this.threadCommands.planCommand(conversationId, prompt, userMessageId),
+      goal: (conversationId, args) => this.threadCommands.goalCommand(conversationId, args),
+      interrupt: (conversationId, args) => this.threadCommands.interruptCommand(conversationId, args),
+      ps: (conversationId) => this.threadCommands.renderBackgroundTerminals(conversationId),
+      stop: (conversationId) => this.threadCommands.cleanBackgroundTerminals(conversationId),
     });
     this.callbacks = new CallbackRouter({
       isStaleConsoleCallback: (message, payload) => this.isStaleConsoleCallback(message, payload),
       renderStaleConsole: (message) => this.renderCallbackPage(message, messageWithTitle("Stale Relay Home.", "Open the latest Relay Home."), { inline_keyboard: [[{ text: UI_BUTTON.refresh, callback_data: "ar:home" }]] }),
       home: (message) => this.renderConsole(message.conversationId),
       status: (message) => this.renderHomeCallback(message),
-      workspaces: (message, pageIndex) => this.renderWorkspacesCallback(message, pageIndex),
-      newWorkspace: (message, pageIndex) => this.promptForWorkspaceName(message, pageIndex),
+      workspaces: (message, pageIndex) => this.workspaceFlow.renderWorkspacesCallback(message, pageIndex),
+      newWorkspace: (message, pageIndex) => this.workspaceFlow.promptForWorkspaceName(message, pageIndex),
       toggleStatusMode: (message) => this.toggleStatusModeCallback(message),
-      approval: (message, payload) => this.answerCodexApproval(message, payload),
-      codexQuestion: (message, payload) => this.answerCodexOptionCallback(message, payload),
+      approval: (message, payload) => this.codexPromptFlow.answerApproval(message, payload),
+      codexQuestion: (message, payload) => this.codexPromptFlow.answerOptionCallback(message, payload),
       pagedOutput: (message, payload) => this.renderPagedOutputCallback(message, payload),
-      command: (message, payload) => this.handleCommandCallback(message, payload),
-      stop: (message) => this.stopFromCallback(message),
-      workspaceIntro: (message, token, pageIndex) => this.renderWorkspaceIntroCallback(message, token, pageIndex),
-      confirmDeleteWorkspace: (message, token) => this.confirmDeleteWorkspaceCallback(message, token),
-      deleteWorkspace: (message, token) => this.deleteWorkspaceCallback(message, token),
-      selectWorkspace: (message, token) => this.selectWorkspaceFromToken(message, token),
+      command: (message, payload) => this.threadCommands.handleCommandCallback(message, payload),
+      stop: (message) => this.workspaceFlow.stopFromCallback(message),
+      workspaceIntro: (message, token, pageIndex) => this.workspaceFlow.renderWorkspaceIntroCallback(message, token, pageIndex),
+      confirmDeleteWorkspace: (message, token) => this.workspaceFlow.confirmDeleteWorkspaceCallback(message, token),
+      deleteWorkspace: (message, token) => this.workspaceFlow.deleteWorkspaceCallback(message, token),
+      selectWorkspace: (message, token) => this.workspaceFlow.selectWorkspaceFromToken(message, token),
     });
   }
 
@@ -126,7 +165,7 @@ export class RelayController {
       return;
     }
     if (message.kind === "media") {
-      await this.handleMediaMessage(message);
+      await this.mediaRelay.handleMediaMessage(message);
       return;
     }
 
@@ -161,11 +200,11 @@ export class RelayController {
         ? this.deps.store.getPendingPrompt(message.conversationId, message.replyToMessageId)
         : undefined;
       if (pending?.kind === "workspace_name") {
-        await this.createWorkspaceFromPrompt(message.conversationId, message.replyToMessageId!, text);
+        await this.workspaceFlow.createWorkspaceFromPrompt(message.conversationId, message.replyToMessageId!, text);
       } else if (pending?.kind === "codex_user_input") {
-        await this.answerCodexFreeText(message.conversationId, message.replyToMessageId!, text);
+        await this.codexPromptFlow.answerFreeText(message.conversationId, message.replyToMessageId!, text);
       } else if (pending?.kind === "relay_command") {
-        await this.answerRelayCommandPrompt(message.conversationId, message.replyToMessageId!, text);
+        await this.threadCommands.answerRelayCommandPrompt(message.conversationId, message.replyToMessageId!, text);
       } else if (command === "/relay") {
         await this.renderConsole(message.conversationId, { forceNewMessage: true });
       } else if (command && await this.slashCommands.handle(message, command, text)) {
@@ -195,7 +234,7 @@ export class RelayController {
   async handleAgentOutput(session: AgentOutputEvent): Promise<void> {
     if (session.type === "image") {
       await this.finalizeSessionOutput(session.sessionKey);
-      await this.sendAgentImageOutput(session);
+      await this.mediaRelay.sendAgentImageOutput(session);
       return;
     }
     if (session.type === "turn_completed") {
@@ -204,20 +243,20 @@ export class RelayController {
         turn_id: session.turnId,
       });
       await this.finalizeSessionOutput(session.sessionKey);
-      await this.sendPlanReadyPrompt(session.sessionKey, session.turnId);
+      await this.threadCommands.sendPlanReadyPrompt(session.sessionKey, session.turnId);
       await this.completeTaskAndDispatchNext(session.sessionKey, session.turnId);
       return;
     }
     if (session.type === "user_input_request") {
       await this.finalizeSessionOutput(session.sessionKey);
       await this.markActiveTask(session.sessionKey, "blocked", session.turnId);
-      await this.handleCodexUserInputRequest(session);
+      await this.codexPromptFlow.handleUserInputRequest(session);
       return;
     }
     if (session.type === "approval_request") {
       await this.finalizeSessionOutput(session.sessionKey);
       await this.markActiveTask(session.sessionKey, "blocked", session.turnId);
-      await this.handleCodexApprovalRequest(session);
+      await this.codexPromptFlow.handleApprovalRequest(session);
       return;
     }
     const parsed = parseSessionKey(session.sessionKey);
@@ -300,611 +339,12 @@ export class RelayController {
     }
   }
 
-  private async handleMediaMessage(message: MediaInboundMessage): Promise<void> {
-    this.logger.info("router.media_received", {
-      conversation_id: message.conversationId,
-      user_id: message.userId,
-      message_id: message.id,
-      caption_len: message.caption?.length ?? 0,
-      photo_count: message.photos.length,
-      media_group_id: message.mediaGroupId,
-    });
-
-    if (!isAuthorized(this.deps.config, message.userId, message.conversationId)) {
-      this.logger.warn("router.unauthorized_media", {
-        conversation_id: message.conversationId,
-        user_id: message.userId,
-        message_id: message.id,
-      });
-      await this.sendRendered(message.conversationId, textMessage("Unauthorized."));
-      return;
-    }
-
-    if (message.mediaGroupId) {
-      this.bufferMediaGroup(message);
-      return;
-    }
-
-    try {
-      await this.submitMediaMessages(message.conversationId, [message]);
-    } catch (error) {
-      await this.handleMediaError(message.conversationId, message.id, error);
-    }
-  }
-
-  private bufferMediaGroup(message: MediaInboundMessage): void {
-    const key = `${message.conversationId}:${message.mediaGroupId}`;
-    const existing = this.mediaGroups.get(key);
-    if (existing?.timer) clearTimeout(existing.timer);
-    const state = existing ?? { conversationId: message.conversationId, messages: [] };
-    state.messages.push(message);
-    state.timer = setTimeout(() => {
-      this.mediaGroups.delete(key);
-      void this.submitMediaMessages(state.conversationId, state.messages)
-        .catch((error) => this.handleMediaError(state.conversationId, message.id, error));
-    }, MEDIA_GROUP_QUIET_MS);
-    this.mediaGroups.set(key, state);
-  }
-
-  private async submitMediaMessages(conversationId: ConversationId, messages: MediaInboundMessage[]): Promise<void> {
-    const workspace = this.currentWorkspace(conversationId);
-    if (!workspace) {
-      await this.renderConsole(conversationId);
-      return;
-    }
-    if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
-    const status = await this.ensureAgentStarted(conversationId, workspace);
-    if (await this.sendWaitingPromptNotice(conversationId, status)) return;
-
-    const sorted = [...messages].sort((a, b) => Number(a.messageId) - Number(b.messageId));
-    const prompt = sorted.map((item) => item.caption?.trim()).find(Boolean) ?? DEFAULT_IMAGE_PROMPT;
-    const images: AgentImageInput[] = [];
-    for (const media of sorted) {
-      images.push(await this.downloadAndSavePhoto(workspace, media));
-    }
-    await this.submitTask(conversationId, prompt, sorted[0]?.messageId, "auto", { text: prompt, images });
-  }
-
-  private async downloadAndSavePhoto(workspace: WorkspaceRecord, message: MediaInboundMessage): Promise<AgentImageInput> {
-    const photo = bestPhoto(message.photos);
-    if (!photo) throw new Error("IM photo is missing.");
-    if (photo.fileSize && photo.fileSize > this.deps.config.mediaMaxBytes) {
-      throw new Error(`Image is too large (${formatBytes(photo.fileSize)}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
-    }
-    if (!this.deps.adapter.downloadFile) throw new Error("IM adapter cannot download media.");
-    const downloaded = await this.deps.adapter.downloadFile(photo.fileId);
-    const size = downloaded.fileSize ?? downloaded.bytes.byteLength;
-    if (size > this.deps.config.mediaMaxBytes || downloaded.bytes.byteLength > this.deps.config.mediaMaxBytes) {
-      throw new Error(`Image is too large (${formatBytes(Math.max(size, downloaded.bytes.byteLength))}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
-    }
-    const path = await saveRelayMedia(workspace.path, "incoming", downloaded.bytes, {
-      extension: extensionFromTelegramPath(downloaded.filePath),
-      messageId: message.messageId,
-    });
-    return { path, ...(message.caption ? { caption: message.caption } : {}) };
-  }
-
-  private async handleMediaError(conversationId: ConversationId, messageId: MessageId, error: unknown): Promise<void> {
-    const detail = error instanceof Error ? error.message : String(error);
-    this.logger.error("router.media_failed", {
-      conversation_id: conversationId,
-      message_id: messageId,
-      error: error instanceof Error ? error : new Error(detail),
-    });
-    await this.trySendRendered(
-      conversationId,
-      formatErrorMessage(detail),
-      "router.media_error_notice_failed",
-      { message_id: messageId },
-    );
-    this.appendSystem(conversationId, `Error: ${detail}\n`);
-  }
-
-  private async sendAgentImageOutput(event: AgentImageOutputEvent): Promise<void> {
-    const parsed = parseSessionKey(event.sessionKey);
-    if (!parsed) return;
-    const workspace = this.currentWorkspace(parsed.conversationId);
-    if (!workspace || workspace.name !== parsed.workspaceName) return;
-    try {
-      const path = event.path ? await this.copyOutgoingImage(workspace.path, event.path) : event.data ? await saveGeneratedImage(workspace.path, event.data) : undefined;
-      if (!path) throw new Error("Codex image output did not include image data.");
-      await this.sendStoredImage(parsed.conversationId, parsed.workspaceName, path, event.caption, this.lastUserMessageIds.get(event.sessionKey));
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      this.logger.error("router.agent_image_send_failed", {
-        conversation_id: parsed.conversationId,
-        session_key: event.sessionKey,
-        error: error instanceof Error ? error : new Error(detail),
-      });
-      await this.trySendRendered(
-        parsed.conversationId,
-        formatErrorMessage(`Could not send image: ${detail}`),
-        "router.agent_image_error_notice_failed",
-        { session_key: event.sessionKey },
-      );
-      this.appendSystem(parsed.conversationId, `Error: Could not send image: ${detail}\n`);
-    }
-  }
-
   async sendDebugImage(input: SendImageCapabilityRequest): Promise<{ path: string }> {
-    const { sessionKey: sessionKeyValue, workspace } = this.resolveDebugImageSession(input);
-    await this.validateDebugImagePath(input.path, workspace.path);
-    const path = await this.copyOutgoingImage(workspace.path, input.path);
-    const parsed = parseSessionKey(sessionKeyValue);
-    if (!parsed) throw new Error("Invalid session key.");
-    await this.sendStoredImage(parsed.conversationId, parsed.workspaceName, path, input.caption, this.lastUserMessageIds.get(sessionKeyValue));
-    this.logger.info("router.debug_image_sent", {
-      conversation_id: parsed.conversationId,
-      workspace: parsed.workspaceName,
-      session_key: sessionKeyValue,
-      source_path: input.path,
-      stored_path: path,
-    });
-    return { path };
-  }
-
-  private resolveDebugImageSession(input: SendImageCapabilityRequest): { sessionKey: string; workspace: WorkspaceRecord } {
-    if (input.sessionKey) {
-      const parsed = parseSessionKey(input.sessionKey);
-      if (!parsed) throw new Error("sessionKey is invalid");
-      const workspace = this.deps.store.getWorkspace(parsed.workspaceName);
-      if (!workspace) throw new Error("session workspace was not found");
-      const status = this.deps.agent.getStatus(input.sessionKey);
-      if (!status?.running) throw new Error("session is not running");
-      return { sessionKey: input.sessionKey, workspace };
-    }
-
-    const cwd = input.cwd ? resolve(input.cwd) : undefined;
-    const matches = this.deps.store.listRunningSessions()
-      .flatMap((session) => {
-        const workspace = this.deps.store.getWorkspace(session.workspace_name);
-        const key = session.session_key;
-        const status = this.deps.agent.getStatus(key);
-        if (!workspace || !status?.running) return [];
-        if (cwd && !pathContains(workspace.path, cwd)) return [];
-        return [{ sessionKey: key, workspace }];
-      });
-    if (matches.length === 1) return matches[0]!;
-    if (matches.length === 0) throw new Error("No running relay session matches this image request.");
-    throw new Error("Multiple running relay sessions match this image request; pass --session-key.");
-  }
-
-  private async validateDebugImagePath(path: string, workspacePath: string): Promise<void> {
-    if (!isAbsolute(path)) throw new Error("Image path must be absolute.");
-    const resolvedPath = resolve(path);
-    if (!pathContains(workspacePath, resolvedPath)) throw new Error("Image path must stay inside the selected workspace.");
-    const extension = extname(resolvedPath).toLowerCase();
-    if (![".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(extension)) {
-      throw new Error("Image must be a PNG, JPG, WEBP, or GIF file.");
-    }
-    const stat = await lstat(resolvedPath);
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Image path must be a regular file.");
-    if (stat.size > this.deps.config.mediaMaxBytes) {
-      throw new Error(`Image is too large (${formatBytes(stat.size)}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
-    }
-  }
-
-  private async copyOutgoingImage(workspacePath: string, sourcePath: string): Promise<string> {
-    return await saveRelayMedia(workspacePath, "outgoing", await readFile(sourcePath), { extension: extensionFromTelegramPath(sourcePath) });
-  }
-
-  private async sendStoredImage(conversationId: ConversationId, workspaceName: string, path: string, caption?: string, replyToMessageId?: MessageId): Promise<void> {
-    if (!this.deps.adapter.sendPhoto) throw new Error("IM adapter cannot send images.");
-    const blob = await imageBlobFromPath(path);
-    await this.deps.adapter.sendPhoto(conversationId, blob, {
-      ...(caption ? { caption: truncateTelegramCaption(caption) } : {}),
-      ...(replyToMessageId ? { replyToMessageId } : {}),
-    });
-    this.deps.store.appendTranscript({
-      conversationId,
-      workspaceName,
-      role: "agent",
-      text: `[image: ${path}]\n`,
-      createdAt: Date.now(),
-    });
+    return await this.mediaRelay.sendDebugImage(input);
   }
 
   private async routeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<string | undefined> {
     return await this.callbacks.route(message);
-  }
-
-  private async runReviewCommand(conversationId: ConversationId, text: string): Promise<void> {
-    const target = parseReviewTarget(commandArgs(text));
-    await this.runBuiltinCommand(conversationId, { type: "review", target });
-  }
-
-  private async runBuiltinCommand(conversationId: ConversationId, command: AgentBuiltinCommand): Promise<void> {
-    const { workspace, status, key } = await this.commandSession(conversationId);
-    if (this.sessionBusy(status)) {
-      await this.sendBusyCommandNotice(conversationId);
-      return;
-    }
-    if (!this.deps.agent.runBuiltinCommand) throw new Error("Agent driver does not support this command.");
-    const result = await this.deps.agent.runBuiltinCommand(key, command);
-    if (result.threadId && result.threadId !== status.threadId) this.deps.store.setSessionThreadId(key, result.threadId);
-    this.logger.info("router.builtin_command_started", { conversation_id: conversationId, workspace: workspace.name, command: command.type });
-    await this.sendRendered(conversationId, messageWithTitle(result.message));
-  }
-
-  private async runInitCommand(conversationId: ConversationId, userMessageId?: MessageId): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(conversationId);
-    if (existsSync(join(workspace.path, "AGENTS.md"))) {
-      await this.sendRendered(conversationId, messageWithTitle("AGENTS.md already exists.", "Skipping /init to avoid overwriting it."));
-      return;
-    }
-    await this.submitTask(conversationId, "Generate a file named AGENTS.md that serves as a contributor guide for this repository.", userMessageId, "immediate");
-  }
-
-  private async startFreshThread(conversationId: ConversationId): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(conversationId);
-    const key = sessionKey(conversationId, workspace.name);
-    await this.finalizeSessionOutput(key);
-    await this.deps.agent.stop(key);
-    await this.cancelActiveTasks(key);
-    this.deps.store.markSessionStopped(key);
-    this.deps.store.clearSessionThreadId(key);
-    const status = await this.ensureAgentStarted(conversationId, workspace);
-    this.deps.store.setCollaborationMode(key, "default");
-    await this.sendRendered(conversationId, messageWithTitle("Started a new chat.", `Thread: ${status.threadName ?? status.threadId ?? "new"}`));
-  }
-
-  private async renderResumePicker(conversationId: ConversationId, searchTerm: string): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(conversationId);
-    if (!this.deps.agent.listThreads) throw new Error("Agent driver cannot list threads.");
-    const threads = await this.deps.agent.listThreads({
-      workspacePath: workspace.path,
-      limit: LIST_PAGE_SIZE,
-      ...(searchTerm ? { searchTerm } : {}),
-    });
-    if (threads.length === 0) {
-      await this.sendRendered(conversationId, messageWithTitle("No saved chats found."));
-      return;
-    }
-    const token = shortToken();
-    const result = await this.sendRendered(conversationId, formatResumeMessage(threads), {
-      replyMarkup: resumeKeyboard(token, threads),
-      disableWebPagePreview: true,
-    });
-    if (!result.messageId) throw new Error("IM adapter did not return a resume picker message id.");
-    this.deps.store.setPendingPrompt({
-      conversationId,
-      promptMessageId: result.messageId,
-      kind: "relay_command",
-      createdAt: Date.now(),
-      payloadJson: JSON.stringify({ command: "resume", token, threads: threads.map((thread) => ({ id: thread.id, name: thread.name })) }),
-      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
-    });
-  }
-
-  private async forkCurrentThread(conversationId: ConversationId): Promise<void> {
-    const { workspace, status, key } = await this.commandSession(conversationId);
-    if (this.sessionBusy(status)) {
-      await this.sendBusyCommandNotice(conversationId);
-      return;
-    }
-    if (!this.deps.agent.forkThread) throw new Error("Agent driver cannot fork threads.");
-    const result = await this.deps.agent.forkThread(key);
-    await this.cancelActiveTasks(key);
-    this.deps.store.setSessionThreadId(key, result.threadId);
-    await this.sendRendered(conversationId, messageWithTitle("Forked chat.", `Thread: ${result.threadName ?? result.threadId}`));
-    this.logger.info("router.thread_forked", { conversation_id: conversationId, workspace: workspace.name, thread_id: result.threadId });
-  }
-
-  private async renameCommand(conversationId: ConversationId, name: string): Promise<void> {
-    if (name.trim()) {
-      await this.renameCurrentThread(conversationId, name.trim());
-      return;
-    }
-    const result = await this.sendRendered(conversationId, textMessage("Reply with the new chat name."), {
-      forceReply: true,
-      disableWebPagePreview: true,
-    });
-    if (!result.messageId) throw new Error("IM adapter did not return a rename prompt message id.");
-    this.deps.store.setPendingPrompt({
-      conversationId,
-      promptMessageId: result.messageId,
-      kind: "relay_command",
-      createdAt: Date.now(),
-      payloadJson: JSON.stringify({ command: "rename" }),
-      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
-    });
-  }
-
-  private async renameCurrentThread(conversationId: ConversationId, name: string): Promise<void> {
-    const { key } = await this.commandSession(conversationId);
-    if (!this.deps.agent.renameThread) throw new Error("Agent driver cannot rename threads.");
-    await this.deps.agent.renameThread(key, name);
-    await this.sendRendered(conversationId, messageWithTitle("Renamed chat.", name));
-  }
-
-  private async planCommand(conversationId: ConversationId, prompt: string, userMessageId?: MessageId): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(conversationId);
-    const status = await this.ensureAgentStarted(conversationId, workspace);
-    if (this.sessionBusy(status)) {
-      await this.sendBusyCommandNotice(conversationId);
-      return;
-    }
-    const key = sessionKey(conversationId, workspace.name);
-    const current = this.deps.store.getCollaborationMode(key);
-    if (!prompt.trim()) {
-      const next: AgentCollaborationMode = current === "plan" ? "default" : "plan";
-      this.deps.store.setCollaborationMode(key, next);
-      await this.sendRendered(conversationId, messageWithTitle(next === "plan" ? "Plan mode enabled." : "Plan mode disabled."));
-      return;
-    }
-    this.deps.store.setCollaborationMode(key, "plan");
-    await this.submitTask(conversationId, prompt.trim(), userMessageId, "immediate");
-  }
-
-  private async goalCommand(conversationId: ConversationId, args: string): Promise<void> {
-    const { key } = await this.commandSession(conversationId);
-    const normalized = args.trim();
-    if (!this.deps.agent.getThreadGoal || !this.deps.agent.setThreadGoal || !this.deps.agent.clearThreadGoal) {
-      throw new Error("Agent driver does not support thread goals.");
-    }
-
-    if (!normalized) {
-      await this.sendRendered(conversationId, formatGoalMessage(await this.deps.agent.getThreadGoal(key)));
-      return;
-    }
-
-    switch (normalized.toLowerCase()) {
-      case "pause": {
-        const goal = await this.deps.agent.setThreadGoal(key, { status: "paused" });
-        await this.sendRendered(conversationId, formatGoalUpdatedMessage(goal));
-        return;
-      }
-      case "resume": {
-        const goal = await this.deps.agent.setThreadGoal(key, { status: "active" });
-        await this.sendRendered(conversationId, formatGoalUpdatedMessage(goal));
-        return;
-      }
-      case "clear": {
-        await this.sendRendered(conversationId, formatGoalClearedMessage(await this.deps.agent.clearThreadGoal(key)));
-        return;
-      }
-    }
-
-    const current = await this.deps.agent.getThreadGoal(key);
-    if (current) {
-      await this.promptGoalReplace(conversationId, key, current, normalized);
-      return;
-    }
-
-    const goal = await this.deps.agent.setThreadGoal(key, { objective: normalized, status: "active", tokenBudget: null });
-    await this.sendRendered(conversationId, formatGoalUpdatedMessage(goal));
-  }
-
-  private async promptGoalReplace(conversationId: ConversationId, key: string, current: AgentThreadGoal, objective: string): Promise<void> {
-    const token = shortToken();
-    const result = await this.sendRendered(conversationId, formatGoalReplaceMessage(current, objective), {
-      replyMarkup: goalReplaceKeyboard(token),
-    });
-    if (!result.messageId) return;
-    this.deps.store.setPendingPrompt({
-      conversationId,
-      promptMessageId: result.messageId,
-      kind: "relay_command",
-      createdAt: Date.now(),
-      sessionKey: key,
-      payloadJson: JSON.stringify({ command: "goal", token, objective }),
-      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
-    });
-  }
-
-  private async cleanBackgroundTerminals(conversationId: ConversationId): Promise<void> {
-    const { key } = await this.commandSession(conversationId);
-    if (!this.deps.agent.cleanBackgroundTerminals) throw new Error("Agent driver cannot clean background terminals.");
-    await this.deps.agent.cleanBackgroundTerminals(key);
-    this.logger.info("router.background_terminals_cleaned", { conversation_id: conversationId, session_key: key });
-    await this.sendRendered(conversationId, messageWithTitle("Background terminals stopped."));
-  }
-
-  private async interruptCommand(conversationId: ConversationId, args: string): Promise<void> {
-    const mode = args.trim().toLowerCase();
-    if (mode && mode !== "all") {
-      await this.sendRendered(conversationId, messageWithTitle("Usage: /interrupt [all]"));
-      return;
-    }
-    const workspace = this.requireCurrentWorkspace(conversationId);
-    const key = sessionKey(conversationId, workspace.name);
-    const status = this.deps.agent.getStatus(key);
-    if (!status?.running || !status.activeTurnId) {
-      await this.sendRendered(conversationId, messageWithTitle("No active Codex turn to interrupt."));
-      return;
-    }
-    if (!this.deps.agent.interrupt) throw new Error("Agent driver cannot interrupt turns.");
-
-    await this.finalizeSessionOutput(key);
-    const result = await this.deps.agent.interrupt(key);
-    if (!result.interrupted) {
-      await this.sendRendered(conversationId, messageWithTitle("No active Codex turn to interrupt."));
-      return;
-    }
-
-    if (result.turnId && this.deps.store.getCollaborationMode(key) === "plan") {
-      this.interruptedPlanTurns.add(`${key}:${result.turnId}`);
-    }
-    this.clearCodexPromptsForSession(key);
-    if (mode === "all") {
-      await this.interruptTasksByStatus(key, ["waiting", "queued", "running", "blocked"]);
-    } else {
-      await this.interruptActiveTasks(key);
-    }
-    this.logger.info("router.turn_interrupted", {
-      conversation_id: conversationId,
-      workspace: workspace.name,
-      session_key: key,
-      turn_id: result.turnId,
-      mode: mode || "current",
-    });
-    await this.sendRendered(conversationId, messageWithTitle(mode === "all" ? "Interrupted current turn and queued tasks." : "Interrupted current turn."));
-  }
-
-  private async renderBackgroundTerminals(conversationId: ConversationId): Promise<void> {
-    const { key } = await this.commandSession(conversationId);
-    if (!this.deps.agent.listBackgroundTerminals) throw new Error("Agent driver cannot list background terminals.");
-    const terminals = await this.deps.agent.listBackgroundTerminals(key);
-    await this.sendRendered(conversationId, formatBackgroundTerminalsMessage(terminals));
-  }
-
-  private async commandSession(conversationId: ConversationId): Promise<{ workspace: WorkspaceRecord; status: AgentSessionStatus; key: string }> {
-    const workspace = this.requireCurrentWorkspace(conversationId);
-    const status = await this.ensureAgentStarted(conversationId, workspace);
-    return { workspace, status, key: sessionKey(conversationId, workspace.name) };
-  }
-
-  private sessionBusy(status: AgentSessionStatus): boolean {
-    return Boolean(status.activeTurnId || status.waitingForApproval || status.waitingForUserInput);
-  }
-
-  private async sendBusyCommandNotice(conversationId: ConversationId): Promise<void> {
-    await this.sendRendered(conversationId, messageWithTitle("Codex is busy.", "Wait for the current turn, answer the pending question, or handle the approval request before running this command."));
-  }
-
-  private async handleCommandCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
-    const parts = payload.split(":");
-    const [, command, token, action] = parts;
-    const pending = message.messageId ? this.deps.store.getPendingPrompt(message.conversationId, message.messageId) : undefined;
-    const data = parsePromptPayload(pending?.payloadJson);
-    if (!pending || pending.kind !== "relay_command" || !data || data.token !== token || isExpired(pending)) {
-      await this.expireCallbackPrompt(message);
-      return;
-    }
-
-    if (command === "resume") {
-      await this.resumeFromCallback(message, pending, data, action);
-      return;
-    }
-    if (command === "plan") {
-      await this.planFromCallback(message, pending, data, action);
-      return;
-    }
-    if (command === "goal") {
-      await this.goalFromCallback(message, pending, data, action);
-      return;
-    }
-    throw new Error("Unknown command callback.");
-  }
-
-  private async resumeFromCallback(
-    message: Extract<InboundMessage, { kind: "callback_query" }>,
-    pending: PendingPrompt,
-    data: Record<string, unknown>,
-    rawIndex: string | undefined,
-  ): Promise<void> {
-    const index = Number(rawIndex);
-    if (!Number.isInteger(index) || index < 0) throw new Error("Resume thread is missing.");
-    const threads = Array.isArray(data.threads) ? data.threads : [];
-    const selected = asPromptRecord(threads[index]);
-    const threadId = typeof selected?.id === "string" ? selected.id : undefined;
-    if (!threadId) throw new Error("Resume selection expired.");
-    const workspace = this.requireCurrentWorkspace(message.conversationId);
-    const key = sessionKey(message.conversationId, workspace.name);
-    await this.finalizeSessionOutput(key);
-    await this.deps.agent.stop(key);
-    await this.cancelActiveTasks(key);
-    this.deps.store.markSessionStopped(key);
-    const status = await this.ensureAgentStarted(message.conversationId, workspace, threadId);
-    this.deps.store.setSessionThreadId(key, status.threadId ?? threadId);
-    this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-    await this.renderCallbackPage(message, messageWithTitle("Resumed chat.", status.threadName ?? status.threadId ?? threadId), { inline_keyboard: [] });
-  }
-
-  private async planFromCallback(
-    message: Extract<InboundMessage, { kind: "callback_query" }>,
-    pending: PendingPrompt,
-    _data: Record<string, unknown>,
-    action: string | undefined,
-  ): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(message.conversationId);
-    const key = sessionKey(message.conversationId, workspace.name);
-    if (pending.sessionKey && pending.sessionKey !== key) {
-      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-      this.logger.info("router.plan_callback_expired", {
-        conversation_id: message.conversationId,
-        session_key: pending.sessionKey,
-        reason: "session_mismatch",
-      });
-      await this.renderCallbackPage(message, messageWithTitle("Plan action expired.", "Open the latest Plan ready card."), { inline_keyboard: [] });
-      return;
-    }
-    if (action === "implement") {
-      const status = this.deps.agent.getStatus(key);
-      if (!status?.running) {
-        this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-        this.logger.info("router.plan_callback_expired", {
-          conversation_id: message.conversationId,
-          session_key: key,
-          reason: "session_not_running",
-        });
-        await this.renderCallbackPage(message, messageWithTitle("Plan action expired.", "The Codex session is no longer running."), { inline_keyboard: [] });
-        return;
-      }
-      if (this.sessionBusy(status) || this.hasTaskCreatedAfter(message.conversationId, workspace.name, pending.createdAt)) {
-        this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-        this.logger.info("router.plan_callback_busy", {
-          conversation_id: message.conversationId,
-          session_key: key,
-          active_turn_id: status.activeTurnId,
-          waiting_for_approval: status.waitingForApproval,
-          waiting_for_user_input: status.waitingForUserInput,
-        });
-        await this.renderCallbackPage(message, messageWithTitle("Plan action expired.", "A newer turn is already active or has been submitted."), { inline_keyboard: [] });
-        return;
-      }
-      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-      this.deps.store.setCollaborationMode(key, "default");
-      this.logger.info("router.plan_callback_implemented", { conversation_id: message.conversationId, session_key: key });
-      await this.renderCallbackPage(message, messageWithTitle("Implementing plan."), { inline_keyboard: [] });
-      await this.submitTask(message.conversationId, "Implement the approved plan.", message.messageId, "immediate");
-      return;
-    }
-    this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-    await this.dismissPlanReadyPrompt(message);
-  }
-
-  private async goalFromCallback(
-    message: Extract<InboundMessage, { kind: "callback_query" }>,
-    pending: PendingPrompt,
-    data: Record<string, unknown>,
-    action: string | undefined,
-  ): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(message.conversationId);
-    const key = sessionKey(message.conversationId, workspace.name);
-    const objective = typeof data.objective === "string" ? data.objective : undefined;
-    this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-
-    if (pending.sessionKey && pending.sessionKey !== key) {
-      await this.renderCallbackPage(message, messageWithTitle("Goal action expired.", "Open the latest goal card."), { inline_keyboard: [] });
-      return;
-    }
-    if (action !== "replace") {
-      await this.renderCallbackPage(message, messageWithTitle("Goal unchanged."), { inline_keyboard: [] });
-      return;
-    }
-    if (!objective) throw new Error("Goal objective is missing.");
-    if (!this.deps.agent.setThreadGoal) throw new Error("Agent driver does not support thread goals.");
-
-    const goal = await this.deps.agent.setThreadGoal(key, { objective, status: "active", tokenBudget: null });
-    await this.renderCallbackPage(message, formatGoalUpdatedMessage(goal), { inline_keyboard: [] });
-  }
-
-  private async dismissPlanReadyPrompt(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
-    if (!message.messageId) return;
-    if (this.deps.adapter.deleteMessage) {
-      try {
-        await this.deps.adapter.deleteMessage(message.conversationId, message.messageId);
-        return;
-      } catch (error) {
-        this.logger.warn("router.plan_ready_delete_failed", {
-          conversation_id: message.conversationId,
-          message_id: message.messageId,
-          error: error instanceof Error ? error : new Error(String(error)),
-        });
-      }
-    }
-    await this.renderCallbackPage(message, textMessage(""), { inline_keyboard: [] });
   }
 
   private async renderHomeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
@@ -920,98 +360,6 @@ export class RelayController {
     const status = this.statusView(message.conversationId);
     await this.renderCallbackPage(message, formatHomeMessage(status, nextMode), consoleKeyboard(status, nextMode));
     if (message.messageId) this.deps.store.setConsoleMessageId(message.conversationId, message.messageId);
-  }
-
-  private async renderWorkspacesCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, pageIndex: number): Promise<void> {
-    const workspaces = await this.listAvailableWorkspaces();
-    const selected = this.currentWorkspace(message.conversationId)?.name;
-    const page = paginateWorkspaces(workspaces, selected, pageIndex);
-    await this.renderCallbackPage(message, formatWorkspacesMessage(page.items.map((workspace) => ({
-      name: workspace.name,
-      selected: workspace.name === selected,
-    })), page.pageIndex, page.totalPages), workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages));
-  }
-
-  private async renderWorkspaceIntroCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string, pageIndex: number): Promise<void> {
-    const name = await this.workspaceNameForToken(token);
-    const workspace = this.requireWorkspace(name);
-    const selected = this.currentWorkspace(message.conversationId)?.name === workspace.name;
-    const safePageIndex = Number.isFinite(pageIndex) && pageIndex >= 0 ? Math.floor(pageIndex) : 0;
-    const intro = await this.readWorkspaceIntro(workspace);
-    await this.renderCallbackPage(message, formatWorkspaceIntroMessage(workspace, intro), workspaceIntroKeyboard(workspace, selected, safePageIndex));
-  }
-
-  private async selectWorkspaceFromToken(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string): Promise<void> {
-    const name = await this.workspaceNameForToken(token);
-    const workspace = this.requireWorkspace(name);
-    this.deps.store.bindConversation(message.conversationId, workspace.name);
-    this.logger.info("router.workspace_selected", { conversation_id: message.conversationId, workspace: workspace.name, path: workspace.path });
-    await this.ensureAgentStarted(message.conversationId, workspace, undefined, { resumePrevious: false });
-    const status = this.statusView(message.conversationId);
-    const mode = this.deps.store.getHomeStatusMode(message.conversationId);
-    await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
-    if (message.messageId) this.deps.store.setConsoleMessageId(message.conversationId, message.messageId);
-  }
-
-  private async confirmDeleteWorkspaceCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string): Promise<void> {
-    const name = await this.workspaceNameForToken(token);
-    const workspace = this.requireWorkspace(name);
-    await this.renderCallbackPage(
-      message,
-      confirmMessage("Delete workspace?", `This permanently deletes ${workspace.path}.`),
-      deleteWorkspaceConfirmKeyboard(workspace.name),
-    );
-  }
-
-  private async deleteWorkspaceCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, token: string): Promise<void> {
-    const name = await this.workspaceNameForToken(token);
-    const workspace = this.requireWorkspace(name);
-    const key = sessionKey(message.conversationId, workspace.name);
-    await this.finalizeSessionOutput(key);
-    await this.deps.agent.stop(key).catch((error) => {
-      this.logger.warn("router.workspace_delete_stop_failed", {
-        conversation_id: message.conversationId,
-        workspace: workspace.name,
-        error: error instanceof Error ? error : new Error(String(error)),
-      });
-    });
-    await this.cancelActiveTasks(key);
-    this.deps.store.markSessionStopped(key);
-    await rm(workspace.path, { recursive: true, force: true });
-    this.deps.store.deleteWorkspace(workspace.name);
-    this.logger.info("router.workspace_deleted", { conversation_id: message.conversationId, workspace: workspace.name, path: workspace.path });
-    await this.renderWorkspacesCallback(message, 0);
-  }
-
-  private async stopFromCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
-    const workspace = this.requireCurrentWorkspace(message.conversationId);
-    const key = sessionKey(message.conversationId, workspace.name);
-    await this.finalizeSessionOutput(key);
-    await this.deps.agent.stop(key);
-    await this.cancelActiveTasks(key);
-    this.deps.store.markSessionStopped(key);
-    this.deps.store.clearBinding(message.conversationId);
-    this.logger.info("router.session_stopped", { conversation_id: message.conversationId, workspace: workspace.name, session_key: key });
-    const status = this.statusView(message.conversationId);
-    const mode = this.deps.store.getHomeStatusMode(message.conversationId);
-    await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
-  }
-
-  private async readWorkspaceIntro(workspace: WorkspaceRecord): Promise<string> {
-    for (const fileName of WORKSPACE_INTRO_FILES) {
-      try {
-        const text = await readFile(join(workspace.path, fileName), "utf8");
-        return workspaceIntroExcerpt(text);
-      } catch (error) {
-        if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") continue;
-        this.logger.warn("router.workspace_intro_read_failed", {
-          workspace: workspace.name,
-          path: join(workspace.path, fileName),
-          error: error instanceof Error ? error : new Error(String(error)),
-        });
-      }
-    }
-    return "No README found.";
   }
 
   private async renderCallbackPage(
@@ -1140,78 +488,6 @@ export class RelayController {
     if (result.messageId) this.deps.store.setConsoleMessageId(conversationId, result.messageId);
   }
 
-  private async promptForWorkspaceName(message: Extract<InboundMessage, { kind: "callback_query" }>, pageIndex: number): Promise<void> {
-    const result = await this.sendRendered(message.conversationId, textMessage("Reply with the workspace name. Existing directories under WORKSPACE_ROOT are selected; missing names are created."), {
-      forceReply: true,
-      inputFieldPlaceholder: "repo name under WORKSPACE_ROOT",
-      disableWebPagePreview: true,
-    });
-    if (!result.messageId) {
-      throw new Error("IM adapter did not return a prompt message id.");
-    }
-    this.deps.store.setPendingPrompt({
-      conversationId: message.conversationId,
-      promptMessageId: result.messageId,
-      kind: "workspace_name",
-      createdAt: Date.now(),
-      payloadJson: JSON.stringify({
-        sourceMessageId: message.messageId,
-        pageIndex: normalizePageIndex(pageIndex),
-      }),
-    });
-    this.logger.info("router.workspace_prompt_created", { conversation_id: message.conversationId, prompt_message_id: result.messageId, source_message_id: message.messageId });
-  }
-
-  private async createWorkspaceFromPrompt(conversationId: ConversationId, promptMessageId: MessageId, name: string): Promise<void> {
-    const pending = this.deps.store.getPendingPrompt(conversationId, promptMessageId);
-    const payload = parsePromptPayload(pending?.payloadJson);
-    const { existed } = await this.selectOrCreateWorkspace(conversationId, name);
-    this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
-    await this.sendRendered(conversationId, renderTelegramText([
-      "workspace ",
-      code(name),
-      ` ${existed ? "selected" : "created and selected"}.`,
-    ]));
-    await this.refreshWorkspacesMessageFromPrompt(conversationId, payload);
-  }
-
-  private async selectOrCreateWorkspace(conversationId: ConversationId, name: string): Promise<{ name: string; path: string; existed: boolean }> {
-    validateWorkspaceName(name);
-    const existed = workspaceDirectoryExists(this.deps.config.workspaceRoot, name);
-    const path = existed
-      ? resolveWorkspacePath(this.deps.config.workspaceRoot, name)
-      : await createWorkspace(this.deps.config.workspaceRoot, name);
-    this.deps.store.upsertWorkspace({ name, path, createdAt: Date.now() });
-    this.deps.store.bindConversation(conversationId, name);
-    this.logger.info(existed ? "router.workspace_existing_selected" : "router.workspace_created", { conversation_id: conversationId, workspace: name, path });
-    await this.ensureAgentStarted(conversationId, { name, path, createdAt: Date.now() }, undefined, { resumePrevious: false });
-    return { name, path, existed };
-  }
-
-  private async refreshWorkspacesMessageFromPrompt(conversationId: ConversationId, payload: Record<string, unknown> | undefined): Promise<void> {
-    const sourceMessageId = payload?.sourceMessageId;
-    if (typeof sourceMessageId !== "string" && typeof sourceMessageId !== "number") return;
-    const pageIndex = normalizePageIndex(payload?.pageIndex);
-    try {
-      const workspaces = await this.listAvailableWorkspaces();
-      const selected = this.currentWorkspace(conversationId)?.name;
-      const page = paginateWorkspaces(workspaces, selected, pageIndex);
-      await this.editRendered(conversationId, formatWorkspacesMessage(page.items.map((workspace) => ({
-        name: workspace.name,
-        selected: workspace.name === selected,
-      })), page.pageIndex, page.totalPages), {
-        messageId: sourceMessageId,
-        replyMarkup: workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages),
-      });
-    } catch (error) {
-      this.logger.warn("router.workspace_prompt_source_refresh_failed", {
-        conversation_id: conversationId,
-        message_id: sourceMessageId,
-        error: error instanceof Error ? error : new Error(String(error)),
-      });
-    }
-  }
-
   private async submitTask(conversationId: ConversationId, text: string, userMessageId?: MessageId, preference: TaskSubmitPreference = "auto", input?: AgentTaskInput): Promise<void> {
     await this.taskCoordinator.submit(conversationId, text, userMessageId, preference, input);
   }
@@ -1288,38 +564,8 @@ export class RelayController {
     await this.taskCoordinator.failActive(sessionKeyValue);
   }
 
-  private async sendPlanReadyPrompt(sessionKeyValue: string, completedTurnId?: string): Promise<void> {
-    const parsed = parseSessionKey(sessionKeyValue);
-    if (!parsed || this.deps.store.getCollaborationMode(sessionKeyValue) !== "plan") return;
-    if (completedTurnId && this.interruptedPlanTurns.delete(`${sessionKeyValue}:${completedTurnId}`)) return;
-    const token = shortToken();
-    const result = await this.sendRendered(parsed.conversationId, messageWithTitle("Plan ready.", "Choose whether to implement it now or keep refining the plan."), {
-      replyMarkup: planReadyKeyboard(token),
-      disableWebPagePreview: true,
-    });
-    if (!result.messageId) return;
-    this.logger.info("router.plan_ready_prompt_sent", {
-      conversation_id: parsed.conversationId,
-      session_key: sessionKeyValue,
-      turn_id: completedTurnId,
-      prompt_message_id: result.messageId,
-    });
-    this.deps.store.setPendingPrompt({
-      conversationId: parsed.conversationId,
-      promptMessageId: result.messageId,
-      kind: "relay_command",
-      createdAt: Date.now(),
-      sessionKey: sessionKeyValue,
-      payloadJson: JSON.stringify({ command: "plan", token, completedTurnId }),
-      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
-    });
-  }
-
   private clearCodexPromptsForSession(sessionKeyValue: string): void {
-    this.deps.store.deletePendingPromptsForSession(sessionKeyValue, ["codex_user_input", "codex_approval"]);
-    for (const key of this.codexRequests.keys()) {
-      if (key.startsWith(`${sessionKeyValue}:`)) this.codexRequests.delete(key);
-    }
+    this.codexPromptFlow.clearForSession(sessionKeyValue);
   }
 
   private isStaleConsoleCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): boolean {
@@ -1329,42 +575,7 @@ export class RelayController {
   }
 
   private currentWorkspace(conversationId: ConversationId): WorkspaceRecord | undefined {
-    const binding = this.deps.store.getBinding(conversationId);
-    return binding ? this.deps.store.getWorkspace(binding.workspaceName) : undefined;
-  }
-
-  private requireCurrentWorkspace(conversationId: ConversationId): WorkspaceRecord {
-    const workspace = this.currentWorkspace(conversationId);
-    if (!workspace) throw new Error("No workspace selected. Open Relay Home and choose or create a workspace.");
-    if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
-    return workspace;
-  }
-
-  private requireWorkspace(name: string): WorkspaceRecord {
-    validateWorkspaceName(name);
-    const workspace = this.deps.store.getWorkspace(name) ?? {
-      name,
-      path: resolveWorkspacePath(this.deps.config.workspaceRoot, name),
-      createdAt: Date.now(),
-    };
-    if (!isRealDirectory(workspace.path)) throw new Error(`workspace '${name}' does not exist. Create it from Relay Home.`);
-    this.deps.store.upsertWorkspace(workspace);
-    return workspace;
-  }
-
-  private async listAvailableWorkspaces(): Promise<WorkspaceRecord[]> {
-    const now = Date.now();
-    for (const workspace of await discoverWorkspaceDirectories(this.deps.config.workspaceRoot)) {
-      this.deps.store.upsertWorkspace({ ...workspace, createdAt: now });
-    }
-    return this.deps.store.listWorkspaces();
-  }
-
-  private async workspaceNameForToken(token: string): Promise<string> {
-    const matches = (await this.listAvailableWorkspaces()).filter((workspace) => workspaceCallbackToken(workspace.name) === token);
-    if (matches.length === 1) return matches[0]!.name;
-    if (matches.length > 1) throw new Error("workspace selection token is ambiguous. Refresh workspaces and try again.");
-    throw new Error("workspace selection expired. Refresh workspaces and try again.");
+    return this.workspaceFlow.currentWorkspace(conversationId);
   }
 
   private appendSystem(conversationId: ConversationId, text: string): void {
@@ -1396,340 +607,7 @@ export class RelayController {
       .some((task) => task.createdAt > timestamp);
   }
 
-  private readonly mediaGroups = new Map<string, MediaGroupState>();
-
   private readonly lastUserMessageIds = new Map<string, MessageId>();
-
-  private readonly codexRequests = new Map<string, {
-    sessionKey: string;
-    requestId: string | number;
-    questions: AgentUserInputQuestion[];
-    answers: Record<string, { answers: string[] }>;
-  }>();
-
-  private readonly interruptedPlanTurns = new Set<string>();
-
-  private async handleCodexUserInputRequest(event: AgentUserInputRequestEvent): Promise<void> {
-    const parsed = parseSessionKey(event.sessionKey);
-    if (!parsed) return;
-    const token = shortToken();
-    const expiresAt = Date.now() + CODEX_PROMPT_TTL_MS;
-    const key = codexRequestKey(event.sessionKey, event.requestId);
-    this.codexRequests.set(key, { sessionKey: event.sessionKey, requestId: event.requestId, questions: event.questions, answers: {} });
-
-    const first = event.questions[0];
-    if (!first) throw new Error("Codex requested user input without questions.");
-    await this.sendCodexQuestion(parsed.conversationId, event.sessionKey, event.requestId, first, 0, token, expiresAt);
-  }
-
-  private async handleCodexApprovalRequest(event: AgentApprovalRequestEvent): Promise<void> {
-    const parsed = parseSessionKey(event.sessionKey);
-    if (!parsed) return;
-    const token = shortToken();
-    const expiresAt = Date.now() + CODEX_PROMPT_TTL_MS;
-    const result = await this.sendRendered(parsed.conversationId, formatApprovalMessage(event.title, event.body), {
-      replyMarkup: approvalKeyboard(token),
-      disableWebPagePreview: true,
-    });
-    if (!result.messageId) throw new Error("IM adapter did not return an approval prompt message id.");
-    this.deps.store.setPendingPrompt({
-      conversationId: parsed.conversationId,
-      promptMessageId: result.messageId,
-      kind: "codex_approval",
-      createdAt: Date.now(),
-      sessionKey: event.sessionKey,
-      payloadJson: JSON.stringify({
-        token,
-        requestId: event.requestId,
-        method: event.method,
-        approvalKind: event.approvalKind,
-        title: event.title,
-        body: event.body,
-        params: event.params,
-      }),
-      expiresAt,
-    });
-  }
-
-  private async sendCodexQuestion(
-    conversationId: ConversationId,
-    sessionKeyValue: string,
-    requestId: string | number,
-    question: AgentUserInputQuestion,
-    questionIndex: number,
-    token: string,
-    expiresAt: number,
-  ): Promise<void> {
-    const options = question.options ?? [];
-    const request = this.codexRequests.get(codexRequestKey(sessionKeyValue, requestId));
-    const totalQuestions = request?.questions.length ?? 1;
-    const payload = JSON.stringify({
-      token,
-      requestId,
-      questionIndex,
-      questionId: question.id,
-      header: question.header,
-      question: question.question,
-      isSecret: Boolean(question.isSecret),
-      isOther: Boolean(question.isOther),
-      options,
-      totalQuestions,
-    });
-    const useInlineOptions = !question.isSecret && options.length > 0 && this.deps.adapter.capabilities.inlineActions;
-    const result = await this.sendRendered(conversationId, formatCodexQuestion(question, questionIndex, totalQuestions), {
-      ...(useInlineOptions ? { replyMarkup: codexQuestionKeyboard(token, options, Boolean(question.isOther)) } : { forceReply: true }),
-      disableWebPagePreview: true,
-    });
-    if (!result.messageId) throw new Error("IM adapter did not return a prompt message id.");
-    this.deps.store.setPendingPrompt({
-      conversationId,
-      promptMessageId: result.messageId,
-      kind: "codex_user_input",
-      createdAt: Date.now(),
-      sessionKey: sessionKeyValue,
-      payloadJson: payload,
-      expiresAt,
-    });
-  }
-
-  private async answerCodexOptionCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
-    const parts = payload.split(":");
-    const [, token, rawAction] = parts;
-    if (!token) throw new Error("Question selection is missing.");
-    const pending = message.messageId ? this.deps.store.getPendingPrompt(message.conversationId, message.messageId) : undefined;
-    const data = parsePromptPayload(pending?.payloadJson);
-    if (!pending || pending.kind !== "codex_user_input" || !data || data.token !== token || isExpired(pending)) {
-      await this.expireCallbackPrompt(message);
-      return;
-    }
-
-    if (rawAction === "submit") {
-      const selectedAnswer = typeof data.selectedAnswer === "string" ? data.selectedAnswer : undefined;
-      if (!selectedAnswer) throw new Error("Question selection expired.");
-      const response = await this.recordCodexAnswer(pending, data, [selectedAnswer]);
-      if (response === "expired") return;
-      if (!response) await this.sendNextCodexQuestion(message.conversationId, pending, data);
-      await this.renderCallbackPage(message, answeredMessage(selectedAnswer), { inline_keyboard: [] });
-      if (response) await this.respondToCodexPrompt(response);
-      return;
-    }
-
-    if (rawAction === "note") {
-      const selectedAnswer = typeof data.selectedAnswer === "string" ? data.selectedAnswer : undefined;
-      if (!selectedAnswer) throw new Error("Question selection expired.");
-      await this.promptForCodexAnswerNote(message, pending, data, selectedAnswer);
-      return;
-    }
-
-    if (rawAction === "change") {
-      const options = Array.isArray(data.options)
-        ? data.options.map((option) => {
-          const record = asPromptRecord(option);
-          return record && typeof record.label === "string"
-            ? { label: record.label, description: typeof record.description === "string" ? record.description : "" }
-            : undefined;
-        }).filter(Boolean) as AgentUserInputOption[]
-        : [];
-      const question = {
-        id: typeof data.questionId === "string" ? data.questionId : "question",
-        header: typeof data.header === "string" ? data.header : "Question",
-        question: typeof data.question === "string" ? data.question : "Pick one.",
-        isOther: Boolean(data.isOther),
-        options,
-      };
-      const questionIndex = typeof data.questionIndex === "number" ? data.questionIndex : 0;
-      const totalQuestions = typeof data.totalQuestions === "number" ? data.totalQuestions : 1;
-      this.deps.store.setPendingPrompt({
-        ...pending,
-        payloadJson: JSON.stringify({ ...data, selectedAnswer: undefined, answerMode: undefined }),
-      });
-      await this.renderCallbackPage(message, formatCodexQuestion(question, questionIndex, totalQuestions), codexQuestionKeyboard(token, options, Boolean(data.isOther)));
-      return;
-    }
-
-    if (rawAction === "other") {
-      await this.promptForCodexOtherAnswer(message, pending, data);
-      return;
-    }
-
-    const optionIndex = Number(rawAction);
-    if (!Number.isInteger(optionIndex) || optionIndex < 0) throw new Error("Question selection is missing.");
-    const option = Array.isArray(data.options) ? asPromptRecord(data.options[optionIndex]) : undefined;
-    const answer = typeof option?.label === "string" ? option.label : undefined;
-    if (!answer) throw new Error("Question selection expired.");
-
-    if (this.deps.store.getCollaborationMode(pending.sessionKey ?? "") === "plan") {
-      this.deps.store.setPendingPrompt({
-        ...pending,
-        payloadJson: JSON.stringify({ ...data, selectedAnswer: answer }),
-      });
-      await this.renderCallbackPage(message, formatCodexSelectedAnswer(answer), codexQuestionConfirmKeyboard(token));
-      return;
-    }
-
-    const response = await this.recordCodexAnswer(pending, data, [answer]);
-    if (response === "expired") return;
-    if (!response) await this.sendNextCodexQuestion(message.conversationId, pending, data);
-    await this.renderCallbackPage(message, answeredMessage(answer), { inline_keyboard: [] });
-    if (response) await this.respondToCodexPrompt(response);
-  }
-
-  private async promptForCodexAnswerNote(
-    message: Extract<InboundMessage, { kind: "callback_query" }>,
-    pending: PendingPrompt,
-    data: Record<string, unknown>,
-    selectedAnswer: string,
-  ): Promise<void> {
-    this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-    await this.renderCallbackPage(message, formatCodexSelectedAnswerSummary(selectedAnswer), { inline_keyboard: [] });
-    const result = await this.sendRendered(message.conversationId, formatCodexAnswerNotePrompt(), {
-      forceReply: true,
-      disableWebPagePreview: true,
-      replyToMessageId: pending.promptMessageId,
-    });
-    if (!result.messageId) throw new Error("IM adapter did not return a note prompt message id.");
-    this.deps.store.setPendingPrompt({
-      conversationId: message.conversationId,
-      promptMessageId: result.messageId,
-      kind: "codex_user_input",
-      createdAt: Date.now(),
-      sessionKey: pending.sessionKey,
-      payloadJson: JSON.stringify({ ...data, selectedAnswer, answerMode: "note" }),
-      expiresAt: pending.expiresAt,
-    });
-  }
-
-  private async promptForCodexOtherAnswer(
-    message: Extract<InboundMessage, { kind: "callback_query" }>,
-    pending: PendingPrompt,
-    data: Record<string, unknown>,
-  ): Promise<void> {
-    this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-    await this.renderCallbackPage(message, formatCodexSelectedAnswerSummary("Other"), { inline_keyboard: [] });
-    const result = await this.sendRendered(message.conversationId, messageWithTitle("Other answer", "Reply with the answer to use."), {
-      forceReply: true,
-      disableWebPagePreview: true,
-      replyToMessageId: pending.promptMessageId,
-    });
-    if (!result.messageId) throw new Error("IM adapter did not return an other-answer prompt message id.");
-    this.deps.store.setPendingPrompt({
-      conversationId: message.conversationId,
-      promptMessageId: result.messageId,
-      kind: "codex_user_input",
-      createdAt: Date.now(),
-      sessionKey: pending.sessionKey,
-      payloadJson: JSON.stringify({ ...data, answerMode: "other" }),
-      expiresAt: pending.expiresAt,
-    });
-  }
-
-  private async sendNextCodexQuestion(
-    conversationId: ConversationId,
-    pending: PendingPrompt,
-    data: Record<string, unknown>,
-  ): Promise<boolean> {
-    if (!pending.sessionKey) return false;
-    const requestId = data.requestId as string | number | undefined;
-    if (requestId === undefined) return false;
-    const request = this.codexRequests.get(codexRequestKey(pending.sessionKey, requestId));
-    if (!request) return false;
-    const currentIndex = typeof data.questionIndex === "number" ? data.questionIndex : -1;
-    const nextIndex = request.questions.findIndex((question, index) => index > currentIndex && !request.answers[question.id]);
-    const next = nextIndex >= 0 ? request.questions[nextIndex] : undefined;
-    if (!next) return false;
-    const token = typeof data.token === "string" ? data.token : shortToken();
-    await this.sendCodexQuestion(conversationId, pending.sessionKey, requestId, next, nextIndex, token, pending.expiresAt ?? Date.now() + CODEX_PROMPT_TTL_MS);
-    return true;
-  }
-
-  private async answerCodexFreeText(conversationId: ConversationId, promptMessageId: MessageId, text: string): Promise<void> {
-    const pending = this.deps.store.getPendingPrompt(conversationId, promptMessageId);
-    const data = parsePromptPayload(pending?.payloadJson);
-    if (!pending || pending.kind !== "codex_user_input" || !data || isExpired(pending)) {
-      this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
-      await this.sendRendered(conversationId, textMessage("Question expired."));
-      return;
-    }
-    const selectedAnswer = typeof data.selectedAnswer === "string" ? data.selectedAnswer : undefined;
-    const answerMode = typeof data.answerMode === "string" ? data.answerMode : undefined;
-    const answers = answerMode === "note" && selectedAnswer ? [selectedAnswer, text] : [text];
-    const response = await this.recordCodexAnswer(pending, data, answers);
-    if (response === "expired") return;
-    const hasNext = !response && await this.sendNextCodexQuestion(conversationId, pending, data);
-    if (!hasNext) await this.sendRendered(conversationId, data.isSecret ? messageWithTitle("Answered.") : answeredMessage(answers.join("\n")));
-    if (response) await this.respondToCodexPrompt(response);
-  }
-
-  private async answerRelayCommandPrompt(conversationId: ConversationId, promptMessageId: MessageId, text: string): Promise<void> {
-    const pending = this.deps.store.getPendingPrompt(conversationId, promptMessageId);
-    const data = parsePromptPayload(pending?.payloadJson);
-    if (!pending || pending.kind !== "relay_command" || !data || isExpired(pending)) {
-      this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
-      await this.sendRendered(conversationId, textMessage("Command prompt expired."));
-      return;
-    }
-    this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
-    if (data.command === "rename") {
-      await this.renameCurrentThread(conversationId, text.trim());
-      return;
-    }
-    await this.sendRendered(conversationId, textMessage("Command prompt expired."));
-  }
-
-  private async recordCodexAnswer(
-    pending: PendingPrompt,
-    data: Record<string, unknown>,
-    answers: string[],
-  ): Promise<{ sessionKey: string; requestId: string | number; result: unknown } | "expired" | undefined> {
-    if (!pending.sessionKey) throw new Error("Question session is missing.");
-    const requestId = data.requestId as string | number | undefined;
-    const questionId = typeof data.questionId === "string" ? data.questionId : undefined;
-    if (requestId === undefined || !questionId) throw new Error("Question payload is invalid.");
-
-    const request = this.codexRequests.get(codexRequestKey(pending.sessionKey, requestId));
-    if (!request) {
-      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-      await this.sendRendered(pending.conversationId, textMessage("Question expired."));
-      return "expired";
-    }
-
-    request.answers[questionId] = { answers };
-    this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-    if (Object.keys(request.answers).length !== request.questions.length) return undefined;
-    this.codexRequests.delete(codexRequestKey(pending.sessionKey, requestId));
-    return { sessionKey: pending.sessionKey, requestId, result: { answers: request.answers } };
-  }
-
-  private async respondToCodexPrompt(response: { sessionKey: string; requestId: string | number; result: unknown }): Promise<void> {
-    if (!this.deps.agent.respond) throw new Error("Agent driver cannot answer Codex prompts.");
-    await this.deps.agent.respond(response.sessionKey, response.requestId, response.result);
-    await this.markActiveTask(response.sessionKey, "running");
-  }
-
-  private async answerCodexApproval(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
-    const parts = payload.split(":");
-    const [, token, decision] = parts;
-    const pending = message.messageId ? this.deps.store.getPendingPrompt(message.conversationId, message.messageId) : undefined;
-    const data = parsePromptPayload(pending?.payloadJson);
-    if (!pending || pending.kind !== "codex_approval" || !data || data.token !== token || isExpired(pending)) {
-      await this.expireCallbackPrompt(message);
-      return;
-    }
-    if (!pending.sessionKey || !this.deps.agent.respond) throw new Error("Approval session is missing.");
-    const approved = decision === "y";
-    this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-    await this.renderCallbackPage(
-      message,
-      formatApprovalDecisionMessage(
-        approved ? "Approved." : "Denied.",
-        typeof data.title === "string" ? data.title : "Approval request",
-        typeof data.body === "string" ? data.body : "",
-      ),
-      { inline_keyboard: [] },
-    );
-    await this.deps.agent.respond(pending.sessionKey, data.requestId as string | number, approvalResponse(data.approvalKind as AgentApprovalKind, approved, data.params));
-    await this.markActiveTask(pending.sessionKey, "running");
-  }
 
   private async expireCallbackPrompt(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     if (message.messageId) this.deps.store.deletePendingPrompt(message.conversationId, message.messageId);
@@ -1752,41 +630,4 @@ export class RelayController {
 function isMissingCodexThreadError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.toLowerCase().includes("no rollout found");
-}
-
-function formatWorkspaceIntroMessage(workspace: WorkspaceRecord, intro: string): RenderedTelegramText {
-  return renderTelegramText([
-    bold("Workspace"),
-    "\n\nName: ",
-    code(workspace.name),
-    "\nPath: ",
-    code(workspace.path),
-    "\n\n",
-    bold("README"),
-    "\n\n",
-    intro,
-  ]);
-}
-
-function workspaceIntroExcerpt(text: string): string {
-  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
-  if (!normalized) return "README is empty.";
-  if (normalized.length <= WORKSPACE_INTRO_MAX_CHARS) return normalized;
-  const window = normalized.slice(0, WORKSPACE_INTRO_MAX_CHARS);
-  const candidates = [
-    { index: window.lastIndexOf("\n\n"), minRatio: 0.45, width: 2 },
-    { index: window.lastIndexOf("\n"), minRatio: 0.6, width: 1 },
-    { index: window.lastIndexOf(" "), minRatio: 0.7, width: 1 },
-  ];
-  for (const candidate of candidates) {
-    if (candidate.index > Math.floor(WORKSPACE_INTRO_MAX_CHARS * candidate.minRatio)) {
-      return `${normalized.slice(0, candidate.index + candidate.width).trimEnd()}\n\n...`;
-    }
-  }
-  return `${window.trimEnd()}\n\n...`;
-}
-
-function normalizePageIndex(value: unknown): number {
-  const pageIndex = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(pageIndex) && pageIndex >= 0 ? Math.floor(pageIndex) : 0;
 }
