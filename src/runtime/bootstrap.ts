@@ -79,6 +79,7 @@ export async function main(): Promise<void> {
     telegram_request_retry_max_attempts: config.telegramRequestRetryMaxAttempts,
     telegram_retry_initial_delay_ms: config.telegramRetryInitialDelayMs,
     telegram_retry_max_delay_ms: config.telegramRetryMaxDelayMs,
+    lark_domain: config.larkDomain,
     media_max_bytes: config.mediaMaxBytes,
     relay_control_enabled: config.relayControlEnabled,
     relay_control_port: config.relayControlPort,

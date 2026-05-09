@@ -43,6 +43,22 @@ describe("config", () => {
     expect(config.imProvider).toBe("telegram");
   });
 
+  test("loads lark IM provider", () => {
+    const config = loadConfig({
+      IM_PROVIDER: "lark",
+      LARK_APP_ID: "cli_a",
+      LARK_APP_SECRET: "secret",
+      LARK_DOMAIN: "lark",
+      ALLOWED_USER_IDS: "ou_user",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+    });
+    expect(config.imProvider).toBe("lark");
+    expect(config.larkAppId).toBe("cli_a");
+    expect(config.larkAppSecret).toBe("secret");
+    expect(config.larkDomain).toBe("lark");
+    expect(config.telegramBotToken).toBeUndefined();
+  });
+
   test("rejects invalid and deprecated IM provider settings", () => {
     const baseEnv = {
       TELEGRAM_BOT_TOKEN: "token",
@@ -51,6 +67,33 @@ describe("config", () => {
     };
     expect(() => loadConfig({ ...baseEnv, IM_PROVIDER: "slack" })).toThrow("IM_PROVIDER");
     expect(() => loadConfig({ ...baseEnv, MESSAGING_PROVIDER: "telegram" })).toThrow("MESSAGING_PROVIDER has been renamed to IM_PROVIDER");
+  });
+
+  test("requires provider-specific IM credentials", () => {
+    expect(() => loadConfig({
+      IM_PROVIDER: "telegram",
+      ALLOWED_USER_IDS: "10",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+    })).toThrow("TELEGRAM_BOT_TOKEN");
+    expect(() => loadConfig({
+      IM_PROVIDER: "lark",
+      ALLOWED_USER_IDS: "10",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+    })).toThrow("LARK_APP_ID");
+    expect(() => loadConfig({
+      IM_PROVIDER: "lark",
+      LARK_APP_ID: "cli_a",
+      ALLOWED_USER_IDS: "10",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+    })).toThrow("LARK_APP_SECRET");
+    expect(() => loadConfig({
+      IM_PROVIDER: "lark",
+      LARK_APP_ID: "cli_a",
+      LARK_APP_SECRET: "secret",
+      LARK_DOMAIN: "unknown",
+      ALLOWED_USER_IDS: "10",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+    })).toThrow("LARK_DOMAIN");
   });
 
   test("loads telegram polling and retry settings", () => {

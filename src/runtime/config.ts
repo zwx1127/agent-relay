@@ -3,16 +3,19 @@ import { resolve } from "node:path";
 import { parseLogLevel, type LogLevel } from "../domain/logger.ts";
 
 export interface AppConfig {
-  imProvider: "telegram";
+  imProvider: "telegram" | "lark";
   agentProvider: "codex";
   allowedUserIds: Set<string>;
   allowedConversationIds?: Set<string>;
   mediaMaxBytes: number;
-  telegramBotToken: string;
+  telegramBotToken?: string;
   telegramPollTimeoutSeconds: number;
   telegramRequestRetryMaxAttempts: number;
   telegramRetryInitialDelayMs: number;
   telegramRetryMaxDelayMs: number;
+  larkAppId?: string;
+  larkAppSecret?: string;
+  larkDomain: string;
   workspaceRoot: string;
   sqlitePath: string;
   codexBin: string;
@@ -149,11 +152,16 @@ export function loadConfig(env?: Env): AppConfig {
     allowedUserIds: parseStringSet(requireEnv(effectiveEnv, "ALLOWED_USER_IDS"), "ALLOWED_USER_IDS"),
     allowedConversationIds: allowedConversations ? parseStringSet(allowedConversations, "ALLOWED_CONVERSATION_IDS") : undefined,
     mediaMaxBytes: parsePositiveIntegerEnv(effectiveEnv, "MEDIA_MAX_BYTES", 20 * 1024 * 1024),
-    telegramBotToken: requireEnv(effectiveEnv, "TELEGRAM_BOT_TOKEN"),
+    ...(imProvider === "telegram" ? { telegramBotToken: requireEnv(effectiveEnv, "TELEGRAM_BOT_TOKEN") } : {}),
     telegramPollTimeoutSeconds: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_POLL_TIMEOUT_SECONDS", 30),
     telegramRequestRetryMaxAttempts: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS", 3),
     telegramRetryInitialDelayMs: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_RETRY_INITIAL_DELAY_MS", 500),
     telegramRetryMaxDelayMs: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_RETRY_MAX_DELAY_MS", 10000),
+    ...(imProvider === "lark" ? {
+      larkAppId: requireEnv(effectiveEnv, "LARK_APP_ID"),
+      larkAppSecret: requireEnv(effectiveEnv, "LARK_APP_SECRET"),
+    } : {}),
+    larkDomain: parseLarkDomain(effectiveEnv.LARK_DOMAIN?.trim() || "lark"),
     workspaceRoot: requireEnv(effectiveEnv, "WORKSPACE_ROOT"),
     sqlitePath: effectiveEnv.SQLITE_PATH?.trim() || ".data/agent-relay.sqlite",
     codexBin: effectiveEnv.CODEX_BIN?.trim() || "codex",
@@ -175,7 +183,19 @@ function rejectDeprecatedEnv(env: Env, deprecatedName: string, replacementName: 
 
 function parseImProvider(value: string): AppConfig["imProvider"] {
   if (value === "telegram") return value;
+  if (value === "lark") return value;
   throw new Error(`IM_PROVIDER is not supported: ${value}`);
+}
+
+function parseLarkDomain(value: string): AppConfig["larkDomain"] {
+  if (value === "lark") return value;
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:" && url.origin === value.replace(/\/$/, "")) return url.origin;
+  } catch {
+    // Fall through to the normalized error below.
+  }
+  throw new Error("LARK_DOMAIN must be `lark` or an HTTPS origin");
 }
 
 function parseAgentProvider(value: string): AppConfig["agentProvider"] {

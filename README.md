@@ -1,15 +1,15 @@
 # agent-relay
 
-`agent-relay` connects an IM provider to a local CLI agent provider. The current implementations are Telegram for IM and Codex app-server for the agent. It lets approved users select a workspace under `WORKSPACE_ROOT`, send prompts, answer agent questions, approve requested actions, and manage agent threads remotely.
+`agent-relay` connects an IM provider to a local CLI agent provider. The current implementations are Telegram and Lark for IM and Codex app-server for the agent. It lets approved users select a workspace under `WORKSPACE_ROOT`, send prompts, answer agent questions, approve requested actions, and manage agent threads remotely.
 
 The project is built with Bun, TypeScript, SQLite, a provider-neutral router, and the `codex app-server --listen stdio://` protocol for the default agent provider.
 
 ## Features
 
-- Remote Telegram control for local Codex app-server sessions.
+- Remote Telegram or Lark control for local Codex app-server sessions.
 - Per-conversation workspace selection under a configured `WORKSPACE_ROOT`.
 - Inline handling for Codex questions, approvals, Plan mode flows, thread resume, fork, rename, and compaction.
-- Telegram photo input and Codex-generated image output support with workspace-local media storage.
+- IM image input and Codex-generated image output support with workspace-local media storage.
 - Provider-oriented architecture for adding more IM, agent, and persistence backends.
 - Optional localhost relay capability API for agent-triggered image sending.
 
@@ -17,7 +17,7 @@ The project is built with Bun, TypeScript, SQLite, a provider-neutral router, an
 
 - Bun 1.3 or newer.
 - Git, used when creating a new workspace directory.
-- A Telegram bot token from BotFather.
+- A Telegram bot token from BotFather, or a Lark self-built app with app id and app secret.
 - A local `codex` CLI binary on `PATH`, or a custom `CODEX_BIN`.
 - A Codex CLI version that supports `codex app-server --listen stdio://`.
 
@@ -38,8 +38,20 @@ cp .env.example .env
 Minimum required configuration:
 
 ```dotenv
+IM_PROVIDER=telegram
 TELEGRAM_BOT_TOKEN=123:abc
 ALLOWED_USER_IDS=123456
+WORKSPACE_ROOT=/absolute/path/to/workspaces
+```
+
+For Lark:
+
+```dotenv
+IM_PROVIDER=lark
+LARK_APP_ID=cli_xxx
+LARK_APP_SECRET=xxx
+ALLOWED_USER_IDS=ou_xxx
+ALLOWED_CONVERSATION_IDS=oc_xxx
 WORKSPACE_ROOT=/absolute/path/to/workspaces
 ```
 
@@ -77,11 +89,14 @@ The relay loads `.env` first, then overlays shell environment variables, so expo
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `IM_PROVIDER` | no | `telegram` | IM provider. Only `telegram` is implemented today. |
+| `IM_PROVIDER` | no | `telegram` | IM provider. Supported values: `telegram`, `lark`. |
 | `AGENT_PROVIDER` | no | `codex` | Agent provider. Only `codex` is implemented today. |
 | `ALLOWED_USER_IDS` | yes | | Comma-separated provider user IDs allowed to use the relay. Stored as strings. |
 | `ALLOWED_CONVERSATION_IDS` | no | any conversation | Optional comma-separated provider conversation IDs. When set, both user and conversation must be allowed. |
-| `TELEGRAM_BOT_TOKEN` | yes | | Bot token from BotFather. |
+| `TELEGRAM_BOT_TOKEN` | when `IM_PROVIDER=telegram` | | Bot token from BotFather. |
+| `LARK_APP_ID` | when `IM_PROVIDER=lark` | | Lark self-built app id. |
+| `LARK_APP_SECRET` | when `IM_PROVIDER=lark` | | Lark self-built app secret. |
+| `LARK_DOMAIN` | no | `lark` | Open platform domain for Lark provider. Use `lark` or a custom HTTPS origin. |
 | `WORKSPACE_ROOT` | yes | | Parent directory containing selectable workspace directories. |
 | `TELEGRAM_POLL_TIMEOUT_SECONDS` | no | `30` | Telegram long-poll timeout. |
 | `TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS` | no | `3` | Retry attempts for non-polling Telegram API calls. |
@@ -148,11 +163,19 @@ Codex questions with predefined options are shown with inline buttons. In Plan m
 
 Assistant output is rendered as Telegram text entities rather than HTML parse mode. Common Markdown is supported, including headings, lists, task lists, blockquotes, emphasis, inline code, code blocks, and HTTP/HTTPS links. Long output is stored and shown as paged Telegram messages.
 
+## Lark Usage
+
+Set `IM_PROVIDER=lark` and configure `LARK_APP_ID` plus `LARK_APP_SECRET` for a self-built app. The provider uses the official SDK long-connection mode, so the relay only needs outbound network access and does not need a public HTTPS callback URL.
+
+In the Lark developer console, enable bot messaging and subscribe to message receive and card action events. At minimum, the relay expects message receive events for text and images plus card button callbacks for Relay Home, approvals, Codex questions, pagination, and workspace actions. Grant the app the IM message send and media resource permissions required by your tenant.
+
+Allowlist IDs are provider-native strings. Use sender `open_id` values in `ALLOWED_USER_IDS`; use chat `chat_id` values in `ALLOWED_CONVERSATION_IDS`. Lark interactive actions are shown as message cards. Reply prompts use normal Lark message replies and the existing pending prompt flow.
+
 ## Image Support
 
-Telegram photo messages are supported after a workspace is selected. The relay downloads the largest Telegram photo variant, stores it in the selected workspace, and sends the local image path to Codex as a `localImage` input. Photo captions are used as the Codex prompt; photos without captions use `Please inspect the attached image(s).`
+IM image messages are supported after a workspace is selected. The relay downloads the best available image resource, stores it in the selected workspace, and sends the local image path to Codex as a `localImage` input. Captions are used as the Codex prompt when the provider supplies one; images without captions use `Please inspect the attached image(s).`
 
-Telegram file/document attachments are intentionally not supported, even when the document MIME type is an image. Codex image outputs are sent back with Telegram `sendPhoto`; the relay does not use `sendDocument` as a fallback.
+File/document attachments are intentionally not supported, even when the document MIME type is an image. Codex image outputs are sent back through the IM adapter's image upload path; Telegram still does not use `sendDocument` as a fallback.
 
 Stored media lives under `.agent-relay/media/incoming` and `.agent-relay/media/outgoing` inside the selected workspace. The relay automatically writes `.agent-relay/.gitignore` with `*`, so downloaded and generated images do not appear in that workspace's Git status. `MEDIA_MAX_BYTES` limits photo downloads before they are sent to Codex.
 
@@ -160,7 +183,7 @@ Stored media lives under `.agent-relay/media/incoming` and `.agent-relay/media/o
 
 When `RELAY_CONTROL_ENABLED=true`, agent-relay starts a local control API bound to `127.0.0.1` and injects a helper plus registered capability instructions into the agent. The API is protected with a random bearer token that is generated on relay startup and passed only to the agent child process.
 
-The registered capability is `send_image`, intended for remote H5/web UI debugging. Codex can render a page with Playwright, save a screenshot inside the selected workspace, and send it back to the Telegram chat:
+The registered capability is `send_image`, intended for remote H5/web UI debugging. Codex can render a page with Playwright, save a screenshot inside the selected workspace, and send it back to the active IM chat:
 
 ```bash
 "$AGENT_RELAY_HELPER" send-image /absolute/path/to/screen.png --cwd "$PWD" --caption "current home screen"
@@ -172,28 +195,28 @@ The helper calls `POST /v1/capabilities/send_image` with `{ path, cwd, sessionKe
 
 - Authorization requires `ALLOWED_USER_IDS`; if `ALLOWED_CONVERSATION_IDS` is set, both the user and conversation must match.
 - On startup, pending Telegram updates are skipped so messages sent while the relay was offline are intentionally ignored.
-- Telegram polling subscribes to `message` and `callback_query` updates.
-- Transient Telegram failures are retried with exponential backoff.
+- Telegram polling subscribes to `message` and `callback_query` updates. Lark uses long-connection event delivery through the official SDK.
+- Transient Telegram failures are retried with exponential backoff. Lark long-connection reconnect and outbound retry behavior is delegated to the SDK.
 - Workspace names cannot be empty, `.`, `..`, or contain slashes, backslashes, NUL, or control characters.
 - Workspaces are resolved under `WORKSPACE_ROOT`; path traversal and absolute workspace names are rejected.
 - Workspace discovery uses real first-level directories and ignores symlinked directories.
 - Creating a missing workspace makes the directory and runs `git init`.
 - Deleting a workspace physically removes that directory under `WORKSPACE_ROOT` and clears conversation bindings that pointed at it.
-- Telegram photos and Codex-generated images are stored under `.agent-relay/media` inside the selected workspace. The relay writes `.agent-relay/.gitignore` with `*` so media does not appear in the workspace's Git status.
+- IM photos and Codex-generated images are stored under `.agent-relay/media` inside the selected workspace. The relay writes `.agent-relay/.gitignore` with `*` so media does not appear in the workspace's Git status.
 - The relay starts one agent provider process and creates or resumes one agent thread per `conversation + workspace`.
 - SQLite stores workspaces, conversation bindings, Codex thread IDs, Plan mode state, Relay Home UI state, prompt/task state, transcript events, approval metadata, paged assistant output, and schema migration metadata.
-- Runtime logs go to stdout. `debug` logs include raw Telegram messages, Codex input text, and Codex output chunks.
+- Runtime logs go to stdout. `debug` logs include raw IM messages, Codex input text, and Codex output chunks.
 
 ## Provider Architecture
 
-The relay is organized by domain. The relay controller depends on `ImAdapter`, `AgentDriver`, and `RelayStore` ports rather than concrete Telegram, Codex, or SQLite classes. `src/providers/im/factory.ts` and `src/providers/agents/factory.ts` are the runtime provider factories.
+The relay is organized by domain. The relay controller depends on `ImAdapter`, `AgentDriver`, and `RelayStore` ports rather than concrete IM, Codex, or SQLite classes. `src/providers/im/factory.ts` and `src/providers/agents/factory.ts` are the runtime provider factories.
 
 The relay controller keeps the user-facing workflow together, while dedicated collaborators handle high-churn routing and streaming behavior:
 
 - `SlashCommandRouter` dispatches relay-owned slash commands and leaves unsupported commands available for the agent.
 - `CallbackRouter` dispatches inline keyboard callback payloads.
 - `TaskCoordinator` owns prompt queue state, task reactions, and sending work to the agent.
-- `OutputStreamer` owns live assistant output buffering, Telegram message edits, and paged output callbacks.
+- `OutputStreamer` owns live assistant output buffering, IM message edits, and paged output callbacks.
 
 Extension points:
 
@@ -204,16 +227,16 @@ Extension points:
 
 ## Known Limitations
 
-- Only the Telegram IM provider and Codex agent provider are implemented today.
+- Telegram and Lark IM providers are implemented today. Codex is the only agent provider.
 - Telegram file/document attachments are not supported, including document uploads whose MIME type is an image.
 - The repository is intended for GitHub source use. npm publication is not configured, and `package.json` remains marked as private.
 
 ## Security and Privacy
 
-- Keep `.env` private. It contains the Telegram bot token, allowlisted user IDs, workspace root, and other local runtime settings.
-- Treat `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS`, and `ALLOWED_CONVERSATION_IDS` as sensitive operational data. Rotate the bot token if it is ever committed, pasted into an issue, or exposed in logs.
+- Keep `.env` private. It contains IM credentials, allowlisted user IDs, workspace root, and other local runtime settings.
+- Treat `TELEGRAM_BOT_TOKEN`, `LARK_APP_SECRET`, `ALLOWED_USER_IDS`, and `ALLOWED_CONVERSATION_IDS` as sensitive operational data. Rotate provider credentials if they are ever committed, pasted into an issue, or exposed in logs.
 - Use `ALLOWED_USER_IDS` in every deployment. Add `ALLOWED_CONVERSATION_IDS` when the relay should only operate in specific chats or groups.
-- Keep `LOG_LEVEL=info` for normal use. `debug` logs can include raw Telegram messages, Codex input text, and Codex output chunks.
+- Keep `LOG_LEVEL=info` for normal use. `debug` logs can include raw IM messages, Codex input text, and Codex output chunks.
 - Do not publish `.data/agent-relay.sqlite`; SQLite runtime data can contain workspace names, conversation bindings, thread IDs, transcript events, prompt state, approvals, and paged assistant output.
 - Review workspace files before publishing a workspace repository. Relay media is stored inside selected workspaces under `.agent-relay/media`, and the relay writes `.agent-relay/.gitignore` with `*`.
 - The optional relay capability API binds to `127.0.0.1` and uses a startup-scoped bearer token passed to the child agent process. Do not expose it through a public network proxy.
@@ -226,10 +249,10 @@ src/
   runtime/       Runtime bootstrap plus .env loading, validation, and allowlist checks
   domain/        Provider-neutral IDs, session keys, logger, and workspace safety
   ports/         Provider-neutral AgentDriver and ImAdapter contracts
-  providers/     Codex agent provider, Telegram IM provider, and provider factories
+  providers/     Codex agent provider, IM providers, and provider factories
   relay/         Controller, command/callback routers, task coordination, output streaming, capabilities, media, and relay UI state
   storage/       RelayStore port, SQLite implementation, row types, schema migrations, and persistence mappers
-  presentation/  Telegram text entities, Markdown rendering, UI text, and splitting
+  presentation/  Text rendering, Markdown rendering, UI text, and splitting
 test/
   unit/          Focused unit tests for config, logger, workspace, routing, and rendering
   integration/   Router, adapter, store, control API, app-server protocol, and smoke tests
@@ -265,11 +288,11 @@ bun install
 bun run check
 ```
 
-Keep changes focused, include tests for behavior changes, and avoid committing local runtime files such as `.env`, `.data/`, logs, generated media, or workspace-specific artifacts. When filing issues or sharing logs, redact bot tokens, user IDs, conversation IDs, private workspace paths, and prompt/output content that should not be public.
+Keep changes focused, include tests for behavior changes, and avoid committing local runtime files such as `.env`, `.data/`, logs, generated media, or workspace-specific artifacts. When filing issues or sharing logs, redact IM credentials, user IDs, conversation IDs, private workspace paths, and prompt/output content that should not be public.
 
 ## Support
 
-When opening an issue, include the Bun version, operating system, whether `codex` is available on `PATH`, the Codex CLI version if available, the relevant configuration variable names, and redacted logs. Do not paste Telegram bot tokens, allowlisted IDs, private workspace paths, prompt text, or assistant output that should not be public.
+When opening an issue, include the Bun version, operating system, whether `codex` is available on `PATH`, the Codex CLI version if available, the relevant configuration variable names, and redacted logs. Do not paste IM credentials, allowlisted IDs, private workspace paths, prompt text, or assistant output that should not be public.
 
 ## License
 

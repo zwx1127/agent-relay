@@ -367,7 +367,7 @@ export class RelayController {
 
   private async downloadAndSavePhoto(workspace: WorkspaceRecord, message: MediaInboundMessage): Promise<AgentImageInput> {
     const photo = bestPhoto(message.photos);
-    if (!photo) throw new Error("Telegram photo is missing.");
+    if (!photo) throw new Error("IM photo is missing.");
     if (photo.fileSize && photo.fileSize > this.deps.config.mediaMaxBytes) {
       throw new Error(`Image is too large (${formatBytes(photo.fileSize)}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
     }
@@ -565,7 +565,7 @@ export class RelayController {
       replyMarkup: resumeKeyboard(token, threads),
       disableWebPagePreview: true,
     });
-    if (!result.messageId) throw new Error("Telegram did not return a resume picker message id.");
+    if (!result.messageId) throw new Error("IM adapter did not return a resume picker message id.");
     this.deps.store.setPendingPrompt({
       conversationId,
       promptMessageId: result.messageId,
@@ -599,7 +599,7 @@ export class RelayController {
       forceReply: true,
       disableWebPagePreview: true,
     });
-    if (!result.messageId) throw new Error("Telegram did not return a rename prompt message id.");
+    if (!result.messageId) throw new Error("IM adapter did not return a rename prompt message id.");
     this.deps.store.setPendingPrompt({
       conversationId,
       promptMessageId: result.messageId,
@@ -1147,7 +1147,7 @@ export class RelayController {
       disableWebPagePreview: true,
     });
     if (!result.messageId) {
-      throw new Error("Telegram did not return a prompt message id.");
+      throw new Error("IM adapter did not return a prompt message id.");
     }
     this.deps.store.setPendingPrompt({
       conversationId: message.conversationId,
@@ -1431,7 +1431,7 @@ export class RelayController {
       replyMarkup: approvalKeyboard(token),
       disableWebPagePreview: true,
     });
-    if (!result.messageId) throw new Error("Telegram did not return an approval prompt message id.");
+    if (!result.messageId) throw new Error("IM adapter did not return an approval prompt message id.");
     this.deps.store.setPendingPrompt({
       conversationId: parsed.conversationId,
       promptMessageId: result.messageId,
@@ -1480,7 +1480,7 @@ export class RelayController {
       ...(useInlineOptions ? { replyMarkup: codexQuestionKeyboard(token, options, Boolean(question.isOther)) } : { forceReply: true }),
       disableWebPagePreview: true,
     });
-    if (!result.messageId) throw new Error("Telegram did not return a prompt message id.");
+    if (!result.messageId) throw new Error("IM adapter did not return a prompt message id.");
     this.deps.store.setPendingPrompt({
       conversationId,
       promptMessageId: result.messageId,
@@ -1587,7 +1587,7 @@ export class RelayController {
       disableWebPagePreview: true,
       replyToMessageId: pending.promptMessageId,
     });
-    if (!result.messageId) throw new Error("Telegram did not return a note prompt message id.");
+    if (!result.messageId) throw new Error("IM adapter did not return a note prompt message id.");
     this.deps.store.setPendingPrompt({
       conversationId: message.conversationId,
       promptMessageId: result.messageId,
@@ -1611,7 +1611,7 @@ export class RelayController {
       disableWebPagePreview: true,
       replyToMessageId: pending.promptMessageId,
     });
-    if (!result.messageId) throw new Error("Telegram did not return an other-answer prompt message id.");
+    if (!result.messageId) throw new Error("IM adapter did not return an other-answer prompt message id.");
     this.deps.store.setPendingPrompt({
       conversationId: message.conversationId,
       promptMessageId: result.messageId,
