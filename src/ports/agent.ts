@@ -177,6 +177,7 @@ export interface AgentSendResult {
 export interface AgentInterruptResult {
   interrupted: boolean;
   turnId?: string;
+  stale?: boolean;
 }
 
 export type AgentReviewTarget =

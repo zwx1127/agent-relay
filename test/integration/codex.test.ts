@@ -158,6 +158,29 @@ describe("CodexDriver app-server protocol", () => {
     await driver.stop(status.sessionKey);
   });
 
+  test("recovers stale active turn state when interrupt reports no active turn", async () => {
+    const fake = fakeCodexBin();
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "slow active");
+    status.activeTurnId = "stale-turn";
+    status.waitingForApproval = true;
+    status.waitingForUserInput = true;
+
+    const result = await driver.interrupt(status.sessionKey);
+
+    expect(result).toEqual({ interrupted: false, turnId: "stale-turn", stale: true });
+    expect(driver.getStatus(status.sessionKey)?.activeTurnId).toBeUndefined();
+    expect(driver.getStatus(status.sessionKey)?.waitingForApproval).toBe(false);
+    expect(driver.getStatus(status.sessionKey)?.waitingForUserInput).toBe(false);
+    await driver.stop(status.sessionKey);
+  });
+
   test("injects developer and base instructions into thread start and resume", async () => {
     const fake = fakeCodexBin();
     const driver = new CodexDriver(
@@ -471,7 +494,11 @@ rl.on("line", (line) => {
   } else if (msg.method === "model/list") {
     send({ id: msg.id, result: { data: [{ id: "gpt-5.2", model: "gpt-5.2", displayName: "GPT-5.2", isDefault: true, supportedReasoningEfforts: ["low", "medium"] }] } });
   } else if (msg.method === "turn/interrupt") {
-    send({ id: msg.id, result: {} });
+    if (msg.params.turnId === "stale-turn") {
+      send({ id: msg.id, error: { code: -32000, message: "no active turn to interrupt" } });
+    } else {
+      send({ id: msg.id, result: {} });
+    }
   }
 });
 `);

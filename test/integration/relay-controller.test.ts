@@ -961,6 +961,30 @@ describe("relay controller", () => {
     expect(adapter.sent.at(-1)?.text).toContain("Interrupted current turn.");
   });
 
+  test("/interrupt recovers stale Codex active turn without recording a Relay Home error", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("long task"));
+    agent.staleInterrupt = true;
+    await router.handle(textMessage("/interrupt"));
+
+    expect(agent.interrupted).toEqual([{ key: "codex:1:demo", turnId: "turn-1" }]);
+    expect(agent.getStatus("codex:1:demo")?.activeTurnId).toBeUndefined();
+    expect(store.getTask(1)?.status).toBe("interrupted");
+    expect(store.latestTranscriptEvent("1", "demo", "system")).toBeUndefined();
+    expect(adapter.sent.at(-1)?.text).toContain("No active Codex turn remained.");
+    expect(adapter.sent.at(-1)?.text).not.toContain("Error:");
+
+    await router.handle(textMessage("/relay"));
+
+    expect(adapter.sent.at(-1)?.text).toContain("Relay Home");
+    expect(adapter.sent.at(-1)?.text).not.toContain("Error:");
+  });
+
   test("/interrupt does not start a session when no turn is active", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");

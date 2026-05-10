@@ -93,6 +93,7 @@ export class FakeAgent implements AgentDriver {
   threads: AgentThreadSummary[] = [];
   models: AgentModelSummary[] = [];
   failSend?: Error;
+  staleInterrupt = false;
   failStartForThreadIds = new Map<string, Error>();
 
   async start(options: { conversationId: ConversationId; workspaceName: string; workspacePath: string; threadId?: string }): Promise<AgentSessionStatus> {
@@ -132,6 +133,12 @@ export class FakeAgent implements AgentDriver {
     const status = this.statuses.get(key);
     const turnId = status?.activeTurnId;
     this.interrupted.push({ key, ...(turnId ? { turnId } : {}) });
+    if (this.staleInterrupt && status && turnId) {
+      status.activeTurnId = undefined;
+      status.waitingForApproval = false;
+      status.waitingForUserInput = false;
+      return { interrupted: false, turnId, stale: true };
+    }
     if (!status || !turnId) return { interrupted: false };
     status.activeTurnId = undefined;
     status.waitingForApproval = false;

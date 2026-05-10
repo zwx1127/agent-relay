@@ -21,7 +21,7 @@ import type {
   AgentUserInputQuestion,
   StartAgentOptions,
 } from "../../../ports/agent.ts";
-import { applySessionMetadata, applyThreadMetadata, approvalCopy, approvalKindForMethod, asRecord, collaborationModePayload, getString, getThreadId, getTurnId, imageOutputEvent, isNoActiveTurnToSteerError, reviewTargetPayload, summarizeUnknown, toModelSummary, toQuestion, toThreadGoal, toThreadSummary, toTokenBreakdown, updateActiveTurnFromResult, userInputPayload } from "./protocol.ts";
+import { applySessionMetadata, applyThreadMetadata, approvalCopy, approvalKindForMethod, asRecord, collaborationModePayload, getString, getThreadId, getTurnId, imageOutputEvent, isNoActiveTurnToInterruptError, isNoActiveTurnToSteerError, reviewTargetPayload, summarizeUnknown, toModelSummary, toQuestion, toThreadGoal, toThreadSummary, toTokenBreakdown, updateActiveTurnFromResult, userInputPayload } from "./protocol.ts";
 
 interface RunningSession {
   status: AgentSessionStatus;
@@ -277,10 +277,25 @@ export class CodexDriver implements AgentDriver {
       thread_id: running.status.threadId,
       active_turn_id: turnId,
     });
-    await this.request("turn/interrupt", {
-      threadId: running.status.threadId,
-      turnId,
-    });
+    try {
+      await this.request("turn/interrupt", {
+        threadId: running.status.threadId,
+        turnId,
+      });
+    } catch (error) {
+      if (!isNoActiveTurnToInterruptError(error)) throw error;
+      this.logger.warn("codex.stale_active_turn_interrupt_recovered", {
+        session_key: key,
+        conversation_id: running.status.conversationId,
+        workspace: running.status.workspaceName,
+        thread_id: running.status.threadId,
+        stale_turn_id: turnId,
+      });
+      running.status.activeTurnId = undefined;
+      running.status.waitingForApproval = false;
+      running.status.waitingForUserInput = false;
+      return { interrupted: false, turnId, stale: true };
+    }
     running.status.activeTurnId = undefined;
     running.status.waitingForApproval = false;
     running.status.waitingForUserInput = false;

@@ -213,6 +213,10 @@ export function isNoActiveTurnToSteerError(error: unknown): boolean {
   return error instanceof Error && error.message.toLowerCase().includes("no active turn to steer");
 }
 
+export function isNoActiveTurnToInterruptError(error: unknown): boolean {
+  return error instanceof Error && error.message.toLowerCase().includes("no active turn to interrupt");
+}
+
 export function toQuestion(value: unknown): AgentUserInputQuestion | undefined {
   const record = asRecord(value);
   if (!record || typeof record.id !== "string" || typeof record.header !== "string" || typeof record.question !== "string") {
