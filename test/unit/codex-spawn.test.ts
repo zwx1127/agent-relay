@@ -20,10 +20,11 @@ describe("codex app-server spawn command", () => {
 
     expect(command).toEqual({
       command: String.raw`C:\Windows\System32\cmd.exe`,
-      args: ["/d", "/s", "/c", String.raw`"C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`],
+      args: ["/d", "/s", "/c", String.raw`call "C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`],
       resolvedCodexBin: shim,
     });
     expect(command.args[3]).not.toContain(String.raw`\"`);
+    expect(command.args[3]).toStartWith("call ");
   });
 
   test("normalizes quoted Windows cmd shim paths before building the cmd command", () => {
@@ -32,7 +33,7 @@ describe("codex app-server spawn command", () => {
 
     expect(command).toEqual({
       command: "cmd.exe",
-      args: ["/d", "/s", "/c", String.raw`"C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`],
+      args: ["/d", "/s", "/c", String.raw`call "C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`],
       resolvedCodexBin: shim,
     });
     expect(command.args[3]).not.toContain(String.raw`\"`);
@@ -44,7 +45,7 @@ describe("codex app-server spawn command", () => {
 
     expect(command).toEqual({
       command: "cmd.exe",
-      args: ["/d", "/s", "/c", String.raw`"C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`],
+      args: ["/d", "/s", "/c", String.raw`call "C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`],
       resolvedCodexBin: shim,
     });
     expect(command.args[3]).not.toContain(String.raw`\"`);
@@ -68,7 +69,7 @@ describe("codex app-server spawn command", () => {
 
     expect(command.command).toBe("cmd.exe");
     expect(command.resolvedCodexBin).toBe(cmd);
-    expect(command.args[3]).toBe(String.raw`"C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`);
+    expect(command.args[3]).toBe(String.raw`call "C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`);
   });
 
   test("formats missing Codex diagnostics with Windows inspection hints", () => {

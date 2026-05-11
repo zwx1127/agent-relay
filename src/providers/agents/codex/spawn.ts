@@ -30,7 +30,7 @@ export function codexAppServerSpawnCommand(
   if (isWindowsCommandShim(resolvedCodexBin)) {
     return {
       command: windowsEnvValue(env, "ComSpec") || "cmd.exe",
-      args: ["/d", "/s", "/c", [quoteCmdCommand(resolvedCodexBin), ...args.map(quoteCmdArg)].join(" ")],
+      args: ["/d", "/s", "/c", ["call", quoteCmdCommand(resolvedCodexBin), ...args.map(quoteCmdArg)].join(" ")],
       resolvedCodexBin,
     };
   }
