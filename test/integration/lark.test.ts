@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { LarkAdapter, type LarkChannelClient } from "../../src/providers/im/lark/adapter.ts";
+import * as lark from "@larksuiteoapi/node-sdk";
+import { LarkAdapter, larkDomainForSdk, type LarkChannelClient } from "../../src/providers/im/lark/adapter.ts";
 import type { CardActionEvent, NormalizedMessage, SendInput, SendOptions } from "@larksuiteoapi/node-sdk";
 
 class FakeLarkChannel implements LarkChannelClient {
@@ -64,6 +65,13 @@ class FakeLarkChannel implements LarkChannelClient {
 }
 
 describe("lark adapter", () => {
+  test("maps configured domains to SDK domains", () => {
+    expect(larkDomainForSdk(undefined)).toBe(lark.Domain.Feishu);
+    expect(larkDomainForSdk("feishu")).toBe(lark.Domain.Feishu);
+    expect(larkDomainForSdk("lark")).toBe(lark.Domain.Lark);
+    expect(larkDomainForSdk("https://open.example.com")).toBe("https://open.example.com");
+  });
+
   test("routes long-connection text messages", async () => {
     const channel = new FakeLarkChannel();
     const adapter = adapterWith(channel);

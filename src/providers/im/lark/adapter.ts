@@ -301,8 +301,10 @@ function sendOptionsFor(options: Pick<SendMessageOptions | SendPhotoOptions, "re
   return options.replyToMessageId ? { replyTo: String(options.replyToMessageId) } : {};
 }
 
-function larkDomainForSdk(domain: string | undefined): lark.Domain | string {
-  return !domain || domain === "lark" ? lark.Domain.Lark : domain;
+export function larkDomainForSdk(domain: string | undefined): lark.Domain | string {
+  if (!domain || domain === "feishu") return lark.Domain.Feishu;
+  if (domain === "lark") return lark.Domain.Lark;
+  return domain;
 }
 
 function shouldSendCard(options: SendMessageOptions): boolean {

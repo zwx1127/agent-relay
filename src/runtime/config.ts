@@ -161,7 +161,7 @@ export function loadConfig(env?: Env): AppConfig {
       larkAppId: requireEnv(effectiveEnv, "LARK_APP_ID"),
       larkAppSecret: requireEnv(effectiveEnv, "LARK_APP_SECRET"),
     } : {}),
-    larkDomain: parseLarkDomain(effectiveEnv.LARK_DOMAIN?.trim() || "lark"),
+    larkDomain: parseLarkDomain(effectiveEnv.LARK_DOMAIN?.trim() || "feishu"),
     workspaceRoot: requireEnv(effectiveEnv, "WORKSPACE_ROOT"),
     sqlitePath: effectiveEnv.SQLITE_PATH?.trim() || ".data/agent-relay.sqlite",
     codexBin: effectiveEnv.CODEX_BIN?.trim() || "codex",
@@ -188,6 +188,7 @@ function parseImProvider(value: string): AppConfig["imProvider"] {
 }
 
 function parseLarkDomain(value: string): AppConfig["larkDomain"] {
+  if (value === "feishu") return value;
   if (value === "lark") return value;
   try {
     const url = new URL(value);
@@ -195,7 +196,7 @@ function parseLarkDomain(value: string): AppConfig["larkDomain"] {
   } catch {
     // Fall through to the normalized error below.
   }
-  throw new Error("LARK_DOMAIN must be `lark` or an HTTPS origin");
+  throw new Error("LARK_DOMAIN must be `feishu`, `lark`, or an HTTPS origin");
 }
 
 function parseAgentProvider(value: string): AppConfig["agentProvider"] {

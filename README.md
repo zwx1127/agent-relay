@@ -50,6 +50,7 @@ For Lark:
 IM_PROVIDER=lark
 LARK_APP_ID=cli_xxx
 LARK_APP_SECRET=xxx
+LARK_DOMAIN=feishu
 ALLOWED_USER_IDS=ou_xxx
 ALLOWED_CONVERSATION_IDS=oc_xxx
 WORKSPACE_ROOT=/absolute/path/to/workspaces
@@ -97,7 +98,7 @@ The relay loads `.env` first, then overlays shell environment variables, so expo
 | `TELEGRAM_BOT_TOKEN` | when `IM_PROVIDER=telegram` | | Bot token from BotFather. |
 | `LARK_APP_ID` | when `IM_PROVIDER=lark` | | Lark self-built app id. |
 | `LARK_APP_SECRET` | when `IM_PROVIDER=lark` | | Lark self-built app secret. |
-| `LARK_DOMAIN` | no | `lark` | Open platform domain for Lark provider. Use `lark` or a custom HTTPS origin. |
+| `LARK_DOMAIN` | no | `feishu` | Open platform domain for Lark provider. Use `feishu` for Feishu China, `lark` for Lark international, or a custom HTTPS origin. |
 | `WORKSPACE_ROOT` | yes | | Parent directory containing selectable workspace directories. |
 | `TELEGRAM_POLL_TIMEOUT_SECONDS` | no | `30` | Telegram long-poll timeout. |
 | `TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS` | no | `3` | Retry attempts for non-polling Telegram API calls. |
@@ -166,7 +167,7 @@ Assistant output is rendered as Telegram text entities rather than HTML parse mo
 
 ## Lark Usage
 
-Set `IM_PROVIDER=lark` and configure `LARK_APP_ID` plus `LARK_APP_SECRET` for a self-built app. The provider uses the official SDK long-connection mode, so the relay only needs outbound network access and does not need a public HTTPS callback URL.
+Set `IM_PROVIDER=lark` and configure `LARK_APP_ID` plus `LARK_APP_SECRET` for a self-built app. Use `LARK_DOMAIN=feishu` for apps created in the Feishu China developer console, or `LARK_DOMAIN=lark` for apps created in the Lark international developer console. The provider uses the official SDK long-connection mode, so the relay only needs outbound network access and does not need a public HTTPS callback URL.
 
 In the Lark developer console, enable bot messaging and subscribe to message receive and card action events. At minimum, the relay expects message receive events for text and images plus card button callbacks for Relay Home, approvals, Codex questions, pagination, and workspace actions. Grant the app the IM message send and media resource permissions required by your tenant.
 

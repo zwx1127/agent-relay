@@ -30,6 +30,7 @@ describe("config", () => {
     expect(config.relayControlPort).toBe(0);
     expect(config.imProvider).toBe("telegram");
     expect(config.agentProvider).toBe("codex");
+    expect(config.larkDomain).toBe("feishu");
     expect(config.allowedUserIds.has("10")).toBe(true);
   });
 
@@ -48,15 +49,29 @@ describe("config", () => {
       IM_PROVIDER: "lark",
       LARK_APP_ID: "cli_a",
       LARK_APP_SECRET: "secret",
-      LARK_DOMAIN: "lark",
       ALLOWED_USER_IDS: "ou_user",
       WORKSPACE_ROOT: "/tmp/workspaces",
     });
     expect(config.imProvider).toBe("lark");
     expect(config.larkAppId).toBe("cli_a");
     expect(config.larkAppSecret).toBe("secret");
-    expect(config.larkDomain).toBe("lark");
+    expect(config.larkDomain).toBe("feishu");
     expect(config.telegramBotToken).toBeUndefined();
+  });
+
+  test("loads lark domain options", () => {
+    const baseEnv = {
+      IM_PROVIDER: "lark",
+      LARK_APP_ID: "cli_a",
+      LARK_APP_SECRET: "secret",
+      ALLOWED_USER_IDS: "ou_user",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+    };
+
+    expect(loadConfig({ ...baseEnv, LARK_DOMAIN: "feishu" }).larkDomain).toBe("feishu");
+    expect(loadConfig({ ...baseEnv, LARK_DOMAIN: "lark" }).larkDomain).toBe("lark");
+    expect(loadConfig({ ...baseEnv, LARK_DOMAIN: "https://open.example.com" }).larkDomain).toBe("https://open.example.com");
+    expect(loadConfig({ ...baseEnv, LARK_DOMAIN: "https://open.example.com/" }).larkDomain).toBe("https://open.example.com");
   });
 
   test("rejects invalid and deprecated IM provider settings", () => {
