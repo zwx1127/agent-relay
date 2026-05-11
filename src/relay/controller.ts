@@ -351,6 +351,15 @@ export class RelayController {
   private async renderHomeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     const status = this.statusView(message.conversationId);
     const mode = this.deps.store.getHomeStatusMode(message.conversationId);
+    this.logger.info("router.home_callback_rendered", {
+      conversation_id: message.conversationId,
+      message_id: message.messageId,
+      workspace: status.workspaceName,
+      session_key: status.workspaceName ? sessionKey(message.conversationId, status.workspaceName) : undefined,
+      running: Boolean(status.running),
+      thread_id: status.threadId,
+      console_message_id: this.deps.store.getConsoleMessageId(message.conversationId),
+    });
     await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
     if (message.messageId) this.deps.store.setConsoleMessageId(message.conversationId, message.messageId);
   }

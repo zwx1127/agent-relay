@@ -67,6 +67,7 @@ export class LarkAdapter implements ImAdapter {
   private unsubscribe?: () => void;
   private stopped = false;
   private readonly cardMessageIds = new Set<string>();
+  private readonly cardActionQueues = new Map<string, Promise<void>>();
   private readonly reactionIds = new Map<string, string>();
 
   static create(options: Omit<LarkAdapterOptions, "channel">): LarkAdapter {
@@ -114,7 +115,7 @@ export class LarkAdapter implements ImAdapter {
         void this.handleChannelMessage(message, onMessage);
       },
       cardAction: (event) => {
-        void this.handleCardAction(event, onMessage);
+        return this.enqueueCardAction(event, onMessage);
       },
       error: (error) => {
         this.logger.error("lark.channel_error", { error });
@@ -263,6 +264,18 @@ export class LarkAdapter implements ImAdapter {
         user_id: event.operator.openId,
         error: error instanceof Error ? error : new Error(String(error)),
       });
+    }
+  }
+
+  private async enqueueCardAction(event: CardActionEvent, onMessage: (message: InboundMessage) => Promise<void>): Promise<void> {
+    const key = event.messageId;
+    const previous = this.cardActionQueues.get(key) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(() => this.handleCardAction(event, onMessage));
+    this.cardActionQueues.set(key, current);
+    try {
+      await current;
+    } finally {
+      if (this.cardActionQueues.get(key) === current) this.cardActionQueues.delete(key);
     }
   }
 

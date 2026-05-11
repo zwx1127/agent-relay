@@ -155,6 +155,34 @@ describe("lark adapter", () => {
     }]);
   });
 
+  test("serializes card button actions for the same card message", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+    const received: string[] = [];
+    const firstSeen = deferred<void>();
+    const releaseFirst = deferred<void>();
+
+    await adapter.start(async (message) => {
+      if (message.kind !== "callback_query") return;
+      received.push(message.data);
+      if (message.data === "ar:first") {
+        firstSeen.resolve();
+        await releaseFirst.promise;
+      }
+    });
+
+    const first = channel.handlers.cardAction?.(cardAction("ar:first"));
+    await firstSeen.promise;
+    const second = channel.handlers.cardAction?.(cardAction("ar:second"));
+    await Promise.resolve();
+
+    expect(received).toEqual(["ar:first"]);
+    releaseFirst.resolve();
+    await Promise.all([first, second]);
+
+    expect(received).toEqual(["ar:first", "ar:second"]);
+  });
+
   test("sends text, cards, edits, photos, deletes, and reactions", async () => {
     const channel = new FakeLarkChannel();
     const adapter = adapterWith(channel);
@@ -298,6 +326,25 @@ function adapterWith(channel: FakeLarkChannel): LarkAdapter {
     appSecret: "secret",
     channel,
   });
+}
+
+function cardAction(data: string, messageId = "om_card"): CardActionEvent {
+  return {
+    messageId,
+    chatId: "oc_chat",
+    operator: { openId: "ou_user" },
+    action: { tag: "button", value: { callback_data: data } },
+  } satisfies CardActionEvent;
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T | PromiseLike<T>) => void; reject: (error: unknown) => void } {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
 }
 
 function normalizedMessage(overrides: Partial<NormalizedMessage>): NormalizedMessage {
