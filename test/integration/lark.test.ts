@@ -173,8 +173,20 @@ describe("lark adapter", () => {
     expect(channel.sent[0]).toEqual({ to: "oc_chat", input: { markdown: "hello" }, options: { replyTo: "om_parent" } });
     const sentCard = expectLarkCard(channel.sent[1]?.input);
     expectNoLarkCardFooter(sentCard);
-    expect(JSON.stringify(sentCard)).toContain("\"tag\":\"column_set\"");
-    expect(JSON.stringify(sentCard)).toContain("\"callback_data\":\"ar:s\"");
+    expect(sentCard).toMatchObject({
+      elements: [
+        { tag: "markdown", content: "choose" },
+        {
+          tag: "action",
+          actions: [{
+            tag: "button",
+            text: { tag: "plain_text", content: "Status" },
+            type: "default",
+            value: { callback_data: "ar:s" },
+          }],
+        },
+      ],
+    });
     expect(channel.updated[0]).toMatchObject({ messageId: "om_2" });
     expectNoLarkCardFooter(channel.updated[0]!.card);
     expect(channel.edited).toEqual([{ messageId: "om_1", text: "plain edit" }]);
@@ -241,14 +253,22 @@ describe("lark adapter", () => {
 });
 
 function expectLarkCard(input: SendInput | undefined): object {
-  expect(input).toMatchObject({ card: { schema: "2.0" } });
   if (!input || !("card" in input)) throw new Error("expected Lark card input");
+  expectLarkCardShape(input.card);
   return input.card;
 }
 
 function expectNoLarkCardFooter(card: object): void {
-  expect(card).toMatchObject({ schema: "2.0" });
+  expectLarkCardShape(card);
+  expect(card).not.toHaveProperty("schema");
+  expect(card).not.toHaveProperty("body");
   expect(card).not.toHaveProperty("footer");
+}
+
+function expectLarkCardShape(card: object): void {
+  const value = card as { config?: { wide_screen_mode?: boolean }; elements?: unknown };
+  expect(value.config).toEqual({ wide_screen_mode: true });
+  expect(Array.isArray(value.elements)).toBe(true);
 }
 
 function adapterWith(channel: FakeLarkChannel): LarkAdapter {

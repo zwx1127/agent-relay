@@ -169,7 +169,7 @@ Assistant output is rendered as Telegram text entities rather than HTML parse mo
 
 Set `IM_PROVIDER=lark` and configure `LARK_APP_ID` plus `LARK_APP_SECRET` for a self-built app. Use `LARK_DOMAIN=feishu` for apps created in the Feishu China developer console, or `LARK_DOMAIN=lark` for apps created in the Lark international developer console. The provider uses the official SDK long-connection mode, so the relay only needs outbound network access and does not need a public HTTPS callback URL.
 
-In the Lark developer console, enable bot messaging and subscribe to message receive and card action events. At minimum, the relay expects message receive events for text and images plus card button callbacks for Relay Home, approvals, Codex questions, pagination, and workspace actions. Grant the app the IM message send and media resource permissions required by your tenant.
+In the Lark developer console, enable bot messaging and subscribe to message receive and card action events. At minimum, the relay expects message receive events for text and images plus `card.action.trigger` button callbacks for Relay Home, approvals, Codex questions, pagination, and workspace actions. Grant the app the IM message send and media resource permissions required by your tenant. If card clicks still show `code: 200340` and the relay logs do not show `router.callback_received`, verify that the app is subscribed to card action events and that the long-connection client is receiving them.
 
 Allowlist IDs are provider-native strings. Use sender `open_id` values in `ALLOWED_USER_IDS`; use chat `chat_id` values in `ALLOWED_CONVERSATION_IDS`. Lark interactive actions are shown as message cards. Reply prompts use normal Lark message replies and the existing pending prompt flow.
 

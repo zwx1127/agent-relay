@@ -9,7 +9,7 @@ export interface LarkCardOptions {
 }
 
 export function createLarkCard(text: string, options: LarkCardOptions = {}): object {
-  const bodyElements: object[] = [
+  const elements: object[] = [
     {
       tag: "markdown",
       content: renderLarkMarkdown(text, options.entities),
@@ -17,7 +17,7 @@ export function createLarkCard(text: string, options: LarkCardOptions = {}): obj
   ];
 
   if (options.forceReply) {
-    bodyElements.push({
+    elements.push({
       tag: "markdown",
       content: replyPromptMarkdown(options.inputFieldPlaceholder),
     });
@@ -25,22 +25,17 @@ export function createLarkCard(text: string, options: LarkCardOptions = {}): obj
 
   for (const row of options.replyMarkup?.inline_keyboard ?? []) {
     if (row.length === 0) continue;
-    bodyElements.push({
-      tag: "column_set",
-      horizontal_spacing: "8px",
-      horizontal_align: "left",
-      columns: row.map(buttonColumn),
+    elements.push({
+      tag: "action",
+      actions: row.map(buttonElement),
     });
   }
 
   return {
-    schema: "2.0",
     config: {
       wide_screen_mode: true,
     },
-    body: {
-      elements: bodyElements,
-    },
+    elements,
   };
 }
 
@@ -57,22 +52,9 @@ function buttonElement(button: InlineKeyboardButton): object {
       content: button.text,
     },
     type: buttonType(button.text),
-    behaviors: [
-      {
-        type: "callback",
-        value: {
-          callback_data: button.callback_data,
-        },
-      },
-    ],
-  };
-}
-
-function buttonColumn(button: InlineKeyboardButton): object {
-  return {
-    tag: "column",
-    width: "auto",
-    elements: [buttonElement(button)],
+    value: {
+      callback_data: button.callback_data,
+    },
   };
 }
 
