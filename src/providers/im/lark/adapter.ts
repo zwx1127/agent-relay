@@ -338,15 +338,15 @@ function reactionForEmoji(emoji: string): string {
     case "🫡":
       return "SALUTE";
     case "✍":
-      return "WRITING";
+      return "Typing";
     case "🤔":
       return "THINKING";
     case "😎":
-      return "SMILE";
+      return "DONE";
     case "🤨":
-      return "DROOL";
+      return "GLANCE";
     case "😱":
-      return "SCREAM";
+      return "ERROR";
     default:
       return "OK";
   }

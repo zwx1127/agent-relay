@@ -161,7 +161,7 @@ Relay-handled slash commands after a workspace is selected:
 
 `/relay` is the only Relay command that works without a selected workspace. Unsupported slash text, including `/help`, `/status`, `/model`, and `/start`, is forwarded to Codex when a workspace is selected.
 
-When IM reactions are available, relay-owned prompt messages use status reactions: `🫡` for waiting or queued, `✍` for running, `🤔` for blocked on Codex input or approval, `😎` for done, `🤨` for interrupted, and `😱` for failed or cancelled. Telegram sends those emoji reactions directly; Lark maps them to the closest platform emoji types.
+When IM reactions are available, relay-owned prompt messages use status reactions: `🫡` for waiting or queued, `✍` for running, `🤔` for blocked on Codex input or approval, `😎` for done, `🤨` for interrupted, and `😱` for failed or cancelled. Telegram sends those emoji reactions directly; Lark sends platform `emoji_type` values for the same statuses.
 
 Codex questions with predefined options are shown with inline buttons. In Plan mode, selecting an option opens a confirmation step where you can submit, add a note, or change the selection; questions that support Other provide a free-text ForceReply answer. Free-text and secret questions are shown as ForceReply prompts. Multi-question requests are sent one question at a time, and answered option cards only show the selected answer. Approval requests are shown with approve/deny inline buttons. New prompts are paused while Codex is waiting for an answer or approval.
 

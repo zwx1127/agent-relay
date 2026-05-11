@@ -194,10 +194,31 @@ describe("lark adapter", () => {
     expect(channel.sent[3]).toEqual({ to: "oc_chat", input: { text: "caption" }, options: { replyTo: "om_3" } });
     expect(channel.recalled).toEqual(["om_1"]);
     expect(channel.reactions).toEqual([
-      { messageId: "om_1", emojiType: "SMILE" },
+      { messageId: "om_1", emojiType: "DONE" },
       { messageId: "om_1", emojiType: "THINKING" },
     ]);
-    expect(channel.removedReactions).toEqual([{ messageId: "om_1", emojiType: "SMILE" }]);
+    expect(channel.removedReactions).toEqual([{ messageId: "om_1", emojiType: "DONE" }]);
+  });
+
+  test("maps relay status reactions to Lark emoji types", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+
+    await adapter.setMessageReaction("oc_chat", "om_waiting", "🫡");
+    await adapter.setMessageReaction("oc_chat", "om_running", "✍");
+    await adapter.setMessageReaction("oc_chat", "om_blocked", "🤔");
+    await adapter.setMessageReaction("oc_chat", "om_done", "😎");
+    await adapter.setMessageReaction("oc_chat", "om_interrupted", "🤨");
+    await adapter.setMessageReaction("oc_chat", "om_failed", "😱");
+
+    expect(channel.reactions).toEqual([
+      { messageId: "om_waiting", emojiType: "SALUTE" },
+      { messageId: "om_running", emojiType: "Typing" },
+      { messageId: "om_blocked", emojiType: "THINKING" },
+      { messageId: "om_done", emojiType: "DONE" },
+      { messageId: "om_interrupted", emojiType: "GLANCE" },
+      { messageId: "om_failed", emojiType: "ERROR" },
+    ]);
   });
 
   test("renders relay managed messages as editable Lark cards", async () => {
