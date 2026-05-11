@@ -8,6 +8,8 @@ class FakeLarkChannel implements LarkChannelClient {
   connected = false;
   disconnected = false;
   sent: Array<{ to: string; input: SendInput; options?: SendOptions }> = [];
+  updateStarted: Array<{ messageId: string; card: object }> = [];
+  updateWaits: Promise<void>[] = [];
   updated: Array<{ messageId: string; card: object }> = [];
   edited: Array<{ messageId: string; text: string }> = [];
   recalled: string[] = [];
@@ -38,6 +40,9 @@ class FakeLarkChannel implements LarkChannelClient {
   }
 
   async updateCard(messageId: string, card: object): Promise<void> {
+    this.updateStarted.push({ messageId, card });
+    const wait = this.updateWaits.shift();
+    if (wait) await wait;
     this.updated.push({ messageId, card });
   }
 
@@ -155,32 +160,29 @@ describe("lark adapter", () => {
     }]);
   });
 
-  test("serializes card button actions for the same card message", async () => {
+  test("serializes card updates for the same card message", async () => {
     const channel = new FakeLarkChannel();
     const adapter = adapterWith(channel);
-    const received: string[] = [];
-    const firstSeen = deferred<void>();
     const releaseFirst = deferred<void>();
+    channel.updateWaits.push(releaseFirst.promise);
 
-    await adapter.start(async (message) => {
-      if (message.kind !== "callback_query") return;
-      received.push(message.data);
-      if (message.data === "ar:first") {
-        firstSeen.resolve();
-        await releaseFirst.promise;
-      }
+    await adapter.sendMessage("oc_chat", "choose", {
+      replyMarkup: { inline_keyboard: [[{ text: "Refresh", callback_data: "ar:s" }]] },
     });
-
-    const first = channel.handlers.cardAction?.(cardAction("ar:first"));
-    await firstSeen.promise;
-    const second = channel.handlers.cardAction?.(cardAction("ar:second"));
+    const first = adapter.editMessageText("oc_chat", "first", { messageId: "om_1", replyMarkup: { inline_keyboard: [] } });
+    await Promise.resolve();
+    const second = adapter.editMessageText("oc_chat", "second", { messageId: "om_1", replyMarkup: { inline_keyboard: [] } });
     await Promise.resolve();
 
-    expect(received).toEqual(["ar:first"]);
+    expect(channel.updateStarted).toHaveLength(1);
     releaseFirst.resolve();
     await Promise.all([first, second]);
 
-    expect(received).toEqual(["ar:first", "ar:second"]);
+    expect(channel.updateStarted).toHaveLength(2);
+    expect(channel.updated.map((update) => JSON.stringify(update.card))).toEqual([
+      expect.stringContaining("first"),
+      expect.stringContaining("second"),
+    ]);
   });
 
   test("sends text, cards, edits, photos, deletes, and reactions", async () => {
@@ -326,15 +328,6 @@ function adapterWith(channel: FakeLarkChannel): LarkAdapter {
     appSecret: "secret",
     channel,
   });
-}
-
-function cardAction(data: string, messageId = "om_card"): CardActionEvent {
-  return {
-    messageId,
-    chatId: "oc_chat",
-    operator: { openId: "ou_user" },
-    action: { tag: "button", value: { callback_data: data } },
-  } satisfies CardActionEvent;
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T | PromiseLike<T>) => void; reject: (error: unknown) => void } {

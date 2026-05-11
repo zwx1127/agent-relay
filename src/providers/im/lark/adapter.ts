@@ -67,7 +67,7 @@ export class LarkAdapter implements ImAdapter {
   private unsubscribe?: () => void;
   private stopped = false;
   private readonly cardMessageIds = new Set<string>();
-  private readonly cardActionQueues = new Map<string, Promise<void>>();
+  private readonly cardUpdateQueues = new Map<string, Promise<void>>();
   private readonly reactionIds = new Map<string, string>();
 
   static create(options: Omit<LarkAdapterOptions, "channel">): LarkAdapter {
@@ -115,7 +115,7 @@ export class LarkAdapter implements ImAdapter {
         void this.handleChannelMessage(message, onMessage);
       },
       cardAction: (event) => {
-        return this.enqueueCardAction(event, onMessage);
+        void this.handleCardAction(event, onMessage);
       },
       error: (error) => {
         this.logger.error("lark.channel_error", { error });
@@ -167,8 +167,9 @@ export class LarkAdapter implements ImAdapter {
   async editMessageText(_conversationId: ConversationId, text: string, options: EditMessageTextOptions): Promise<void> {
     const messageText = text.length > 0 ? text : "(empty)";
     if (shouldSendCard(options) || this.cardMessageIds.has(String(options.messageId))) {
-      await this.channel.updateCard(String(options.messageId), createLarkCard(messageText, options));
-      this.cardMessageIds.add(String(options.messageId));
+      const messageId = String(options.messageId);
+      await this.updateCardMessage(messageId, createLarkCard(messageText, options));
+      this.cardMessageIds.add(messageId);
       return;
     }
     await this.channel.editMessage(String(options.messageId), messageText);
@@ -267,15 +268,14 @@ export class LarkAdapter implements ImAdapter {
     }
   }
 
-  private async enqueueCardAction(event: CardActionEvent, onMessage: (message: InboundMessage) => Promise<void>): Promise<void> {
-    const key = event.messageId;
-    const previous = this.cardActionQueues.get(key) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(() => this.handleCardAction(event, onMessage));
-    this.cardActionQueues.set(key, current);
+  private async updateCardMessage(messageId: string, card: object): Promise<void> {
+    const previous = this.cardUpdateQueues.get(messageId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(() => this.channel.updateCard(messageId, card));
+    this.cardUpdateQueues.set(messageId, current);
     try {
       await current;
     } finally {
-      if (this.cardActionQueues.get(key) === current) this.cardActionQueues.delete(key);
+      if (this.cardUpdateQueues.get(messageId) === current) this.cardUpdateQueues.delete(messageId);
     }
   }
 
