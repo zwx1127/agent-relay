@@ -35,6 +35,11 @@ export interface LiveOutputState {
   finalPageRendered?: boolean;
 }
 
+export interface RenderCallbackPageResult {
+  method: "edit" | "send";
+  messageId?: MessageId;
+}
+
 export interface MediaGroupState {
   conversationId: ConversationId;
   messages: MediaInboundMessage[];

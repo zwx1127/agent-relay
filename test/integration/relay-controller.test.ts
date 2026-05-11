@@ -1311,6 +1311,36 @@ describe("relay controller", () => {
     expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-refresh", text: undefined });
   });
 
+  test("Relay Home refresh fallback stores the new home message id", async () => {
+    const { router, adapter, store } = fixture();
+
+    await router.handle(textMessage("/relay"));
+    const currentMessageId = adapter.sent.at(-1)?.messageId;
+    adapter.failEditMessage = new Error("card update timed out");
+
+    await router.handle(callbackMessage("ar:s", 7, "cb-refresh", currentMessageId));
+
+    const fallbackMessageId = adapter.sent.at(-1)?.messageId;
+    expect(fallbackMessageId).not.toBe(currentMessageId);
+    expect(store.getConsoleMessageId(1)).toBe(String(fallbackMessageId));
+    expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-refresh", text: undefined });
+  });
+
+  test("Relay Home status mode rolls back when rendering fails", async () => {
+    const { router, adapter, store } = fixture();
+
+    await router.handle(textMessage("/relay"));
+    const currentMessageId = adapter.sent.at(-1)?.messageId;
+    adapter.failEditMessage = new Error("edit failed");
+    adapter.failSendMessage = new Error("send failed");
+
+    await router.handle(callbackMessage("ar:status", 7, "cb-details", currentMessageId));
+
+    expect(store.getHomeStatusMode(1)).toBe("compact");
+    expect(store.getConsoleMessageId(1)).toBe(String(currentMessageId));
+    expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-details", text: "send failed" });
+  });
+
   test("workspace callback switches binding, auto-starts, and edits status", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const first = join(root, "first");

@@ -185,6 +185,29 @@ describe("lark adapter", () => {
     ]);
   });
 
+  test("times out a stuck card update without blocking later updates", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel, { cardUpdateTimeoutMs: 5 });
+    channel.updateWaits.push(new Promise(() => undefined));
+
+    await adapter.sendMessage("oc_chat", "choose", {
+      replyMarkup: { inline_keyboard: [[{ text: "Refresh", callback_data: "ar:s" }]] },
+    });
+
+    await expect(adapter.editMessageText("oc_chat", "stuck", {
+      messageId: "om_1",
+      replyMarkup: { inline_keyboard: [] },
+    })).rejects.toThrow("Lark card update timed out");
+
+    await adapter.editMessageText("oc_chat", "recovered", {
+      messageId: "om_1",
+      replyMarkup: { inline_keyboard: [] },
+    });
+
+    expect(channel.updateStarted).toHaveLength(2);
+    expect(JSON.stringify(channel.updated.at(-1)?.card)).toContain("recovered");
+  });
+
   test("sends text, cards, edits, photos, deletes, and reactions", async () => {
     const channel = new FakeLarkChannel();
     const adapter = adapterWith(channel);
@@ -322,11 +345,12 @@ function expectLarkCardShape(card: object): void {
   expect(Array.isArray(value.elements)).toBe(true);
 }
 
-function adapterWith(channel: FakeLarkChannel): LarkAdapter {
+function adapterWith(channel: FakeLarkChannel, options: Partial<ConstructorParameters<typeof LarkAdapter>[0]> = {}): LarkAdapter {
   return new LarkAdapter({
     appId: "cli_a",
     appSecret: "secret",
     channel,
+    ...options,
   });
 }
 

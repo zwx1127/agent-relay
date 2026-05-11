@@ -25,6 +25,7 @@ import {
 } from "./ui/messages.ts";
 import { messageWithTitle, textMessage } from "./ui/text-parts.ts";
 import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
+import type { RenderCallbackPageResult } from "./controller-types.ts";
 
 type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
 
@@ -43,7 +44,7 @@ export interface CodexPromptFlowDeps {
   agent: Pick<AgentDriver, "respond">;
   adapter: Pick<ImAdapter, "capabilities">;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
-  renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<void>;
+  renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
   markActiveTask(sessionKey: string, status: "blocked" | "running", turnId?: string): Promise<void>;
 }
 

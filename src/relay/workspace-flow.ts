@@ -18,6 +18,7 @@ import { parsePromptPayload } from "./ui/prompt-state.ts";
 import { code, textMessage, bold } from "./ui/text-parts.ts";
 import { formatHomeMessage } from "./ui/status-message.ts";
 import { renderTelegramText, type RenderedTelegramText } from "../presentation/telegram/text.ts";
+import type { RenderCallbackPageResult } from "./controller-types.ts";
 
 const WORKSPACE_INTRO_FILES = ["README.md", "README", "README.markdown", "README.txt"];
 const WORKSPACE_INTRO_MAX_CHARS = 2400;
@@ -35,7 +36,7 @@ export interface WorkspaceFlowDeps {
   statusView(conversationId: ConversationId): StatusView;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
   editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: Omit<EditMessageTextOptions, "entities" | "parseMode">): Promise<void>;
-  renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<void>;
+  renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
 }
 
 export class WorkspaceFlow {
@@ -153,8 +154,18 @@ export class WorkspaceFlow {
   private async renderHomeOnCallback(message: CallbackMessage): Promise<void> {
     const status = this.deps.statusView(message.conversationId);
     const mode = this.deps.store.getHomeStatusMode(message.conversationId);
-    await this.deps.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
-    if (message.messageId) this.deps.store.setConsoleMessageId(message.conversationId, message.messageId);
+    const result = await this.deps.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
+    if (result.messageId) this.deps.store.setConsoleMessageId(message.conversationId, result.messageId);
+    this.deps.logger.info("router.workspace_home_rendered", {
+      conversation_id: message.conversationId,
+      message_id: message.messageId,
+      workspace: status.workspaceName,
+      running: Boolean(status.running),
+      thread_id: status.threadId,
+      render_method: result.method,
+      rendered_message_id: result.messageId,
+      console_message_id: this.deps.store.getConsoleMessageId(message.conversationId),
+    });
   }
 
   async promptForWorkspaceName(message: CallbackMessage, pageIndex: number): Promise<void> {

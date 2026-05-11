@@ -27,7 +27,7 @@ import { formatErrorMessage } from "./ui/messages.ts";
 import { formatHomeMessage, statusViewFromParts } from "./ui/status-message.ts";
 import { ensureRendered, messageWithTitle, textMessage } from "./ui/text-parts.ts";
 import type { StatusView } from "./ui/status-view.ts";
-import type { RelayControllerDeps } from "./controller-types.ts";
+import type { RelayControllerDeps, RenderCallbackPageResult } from "./controller-types.ts";
 import { SlashCommandRouter } from "./command-router.ts";
 import { CallbackRouter, isConsoleCallbackPayload } from "./callback-router.ts";
 import { OutputStreamer } from "./output-streamer.ts";
@@ -142,7 +142,9 @@ export class RelayController {
     });
     this.callbacks = new CallbackRouter({
       isStaleConsoleCallback: (message, payload) => this.isStaleConsoleCallback(message, payload),
-      renderStaleConsole: (message) => this.renderCallbackPage(message, messageWithTitle("Stale Relay Home.", "Open the latest Relay Home."), { inline_keyboard: [[{ text: UI_BUTTON.refresh, callback_data: "ar:home" }]] }),
+      renderStaleConsole: async (message) => {
+        await this.renderCallbackPage(message, messageWithTitle("Stale Relay Home.", "Open the latest Relay Home."), { inline_keyboard: [[{ text: UI_BUTTON.refresh, callback_data: "ar:home" }]] });
+      },
       home: (message) => this.renderConsole(message.conversationId),
       status: (message) => this.renderHomeCallback(message),
       workspaces: (message, pageIndex) => this.workspaceFlow.renderWorkspacesCallback(message, pageIndex),
@@ -351,6 +353,9 @@ export class RelayController {
   private async renderHomeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     const status = this.statusView(message.conversationId);
     const mode = this.deps.store.getHomeStatusMode(message.conversationId);
+    const previousConsoleMessageId = this.deps.store.getConsoleMessageId(message.conversationId);
+    const result = await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
+    if (result.messageId) this.deps.store.setConsoleMessageId(message.conversationId, result.messageId);
     this.logger.info("router.home_callback_rendered", {
       conversation_id: message.conversationId,
       message_id: message.messageId,
@@ -358,42 +363,70 @@ export class RelayController {
       session_key: status.workspaceName ? sessionKey(message.conversationId, status.workspaceName) : undefined,
       running: Boolean(status.running),
       thread_id: status.threadId,
+      previous_console_message_id: previousConsoleMessageId,
       console_message_id: this.deps.store.getConsoleMessageId(message.conversationId),
+      render_method: result.method,
+      rendered_message_id: result.messageId,
     });
-    await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
-    if (message.messageId) this.deps.store.setConsoleMessageId(message.conversationId, message.messageId);
   }
 
   private async toggleStatusModeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
-    const nextMode: HomeStatusMode = this.deps.store.getHomeStatusMode(message.conversationId) === "compact" ? "details" : "compact";
+    const previousMode = this.deps.store.getHomeStatusMode(message.conversationId);
+    const nextMode: HomeStatusMode = previousMode === "compact" ? "details" : "compact";
+    const previousConsoleMessageId = this.deps.store.getConsoleMessageId(message.conversationId);
     this.deps.store.setHomeStatusMode(message.conversationId, nextMode);
     const status = this.statusView(message.conversationId);
-    await this.renderCallbackPage(message, formatHomeMessage(status, nextMode), consoleKeyboard(status, nextMode));
-    if (message.messageId) this.deps.store.setConsoleMessageId(message.conversationId, message.messageId);
+    try {
+      const result = await this.renderCallbackPage(message, formatHomeMessage(status, nextMode), consoleKeyboard(status, nextMode));
+      if (result.messageId) this.deps.store.setConsoleMessageId(message.conversationId, result.messageId);
+      this.logger.info("router.home_status_mode_toggled", {
+        conversation_id: message.conversationId,
+        message_id: message.messageId,
+        previous_mode: previousMode,
+        next_mode: nextMode,
+        previous_console_message_id: previousConsoleMessageId,
+        console_message_id: this.deps.store.getConsoleMessageId(message.conversationId),
+        render_method: result.method,
+        rendered_message_id: result.messageId,
+      });
+    } catch (error) {
+      this.deps.store.setHomeStatusMode(message.conversationId, previousMode);
+      this.logger.warn("router.home_status_mode_toggle_failed", {
+        conversation_id: message.conversationId,
+        message_id: message.messageId,
+        previous_mode: previousMode,
+        next_mode: nextMode,
+        console_message_id: previousConsoleMessageId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+      throw error;
+    }
   }
 
   private async renderCallbackPage(
     message: Extract<InboundMessage, { kind: "callback_query" }>,
     body: string | RenderedTelegramText,
     replyMarkup: InlineKeyboardMarkup,
-  ): Promise<void> {
+  ): Promise<RenderCallbackPageResult> {
     const rendered = ensureRendered(body);
     if (!message.messageId) {
-      await this.sendRendered(message.conversationId, rendered, { replyMarkup });
-      return;
+      const result = await this.sendRendered(message.conversationId, rendered, { replyMarkup });
+      return { method: "send", messageId: result.messageId };
     }
     try {
       await this.editRendered(message.conversationId, rendered, {
         messageId: message.messageId,
         replyMarkup,
       });
+      return { method: "edit", messageId: message.messageId };
     } catch (error) {
       this.logger.warn("router.callback_edit_fallback", {
         conversation_id: message.conversationId,
         message_id: message.messageId,
         error: error instanceof Error ? error : new Error(String(error)),
       });
-      await this.sendRendered(message.conversationId, rendered, { replyMarkup });
+      const result = await this.sendRendered(message.conversationId, rendered, { replyMarkup });
+      return { method: "send", messageId: result.messageId };
     }
   }
 

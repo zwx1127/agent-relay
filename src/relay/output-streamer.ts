@@ -8,7 +8,7 @@ import { shortToken } from "./ui/callback-data.ts";
 import { pagedOutputKeyboard } from "./ui/keyboards.ts";
 import { decoratePagedOutput } from "./ui/pagination.ts";
 import { messageWithTitle } from "./ui/text-parts.ts";
-import type { LiveOutputState, StreamTiming } from "./controller-types.ts";
+import type { LiveOutputState, RenderCallbackPageResult, StreamTiming } from "./controller-types.ts";
 
 type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
 
@@ -18,7 +18,7 @@ export interface OutputStreamerDeps {
   getReplyToMessageId(sessionKey: string): MessageId | undefined;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
   editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: Omit<EditMessageTextOptions, "entities" | "parseMode">): Promise<void>;
-  renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<void>;
+  renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
   timing?: Partial<StreamTiming>;
 }
 

@@ -29,6 +29,7 @@ import {
 import { asPromptRecord, isExpired, parsePromptPayload } from "./ui/prompt-state.ts";
 import { messageWithTitle, textMessage } from "./ui/text-parts.ts";
 import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
+import type { RenderCallbackPageResult } from "./controller-types.ts";
 import type { TaskSubmitPreference } from "./task-coordinator.ts";
 
 type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
@@ -46,7 +47,7 @@ export interface ThreadCommandDeps {
   interruptTasksByStatus(sessionKey: string, statuses: TaskStatus[]): Promise<void>;
   submitTask(conversationId: ConversationId, text: string, userMessageId?: MessageId, preference?: TaskSubmitPreference, input?: AgentTaskInput): Promise<void>;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
-  renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<void>;
+  renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
   expireCallbackPrompt(message: CallbackMessage): Promise<void>;
   clearCodexPromptsForSession(sessionKey: string): void;
   hasTaskCreatedAfter(conversationId: ConversationId, workspaceName: string, timestamp: number): boolean;

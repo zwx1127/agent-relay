@@ -27,6 +27,7 @@ export interface LarkAdapterOptions {
   domain?: string;
   logger?: Logger;
   channel?: LarkChannelClient;
+  cardUpdateTimeoutMs?: number;
 }
 
 type LarkEventHandlers = {
@@ -36,6 +37,8 @@ type LarkEventHandlers = {
   reconnecting?: () => void;
   reconnected?: () => void;
 };
+
+const DEFAULT_CARD_UPDATE_TIMEOUT_MS = 10_000;
 
 export interface LarkChannelClient {
   connect(): Promise<void>;
@@ -69,6 +72,7 @@ export class LarkAdapter implements ImAdapter {
   private readonly cardMessageIds = new Set<string>();
   private readonly cardUpdateQueues = new Map<string, Promise<void>>();
   private readonly reactionIds = new Map<string, string>();
+  private readonly cardUpdateTimeoutMs: number;
 
   static create(options: Omit<LarkAdapterOptions, "channel">): LarkAdapter {
     return new LarkAdapter({
@@ -106,6 +110,7 @@ export class LarkAdapter implements ImAdapter {
       },
     });
     this.logger = options.logger ?? noopLogger;
+    this.cardUpdateTimeoutMs = options.cardUpdateTimeoutMs ?? DEFAULT_CARD_UPDATE_TIMEOUT_MS;
   }
 
   async start(onMessage: (message: InboundMessage) => Promise<void>): Promise<void> {
@@ -270,10 +275,20 @@ export class LarkAdapter implements ImAdapter {
 
   private async updateCardMessage(messageId: string, card: object): Promise<void> {
     const previous = this.cardUpdateQueues.get(messageId) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(() => this.channel.updateCard(messageId, card));
+    const current = previous.catch(() => undefined).then(() => withTimeout(
+      this.channel.updateCard(messageId, card),
+      this.cardUpdateTimeoutMs,
+      `Lark card update timed out after ${this.cardUpdateTimeoutMs}ms`,
+    ));
     this.cardUpdateQueues.set(messageId, current);
     try {
       await current;
+    } catch (error) {
+      this.logger.warn("lark.card_update_failed", {
+        message_id: messageId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+      throw error;
     } finally {
       if (this.cardUpdateQueues.get(messageId) === current) this.cardUpdateQueues.delete(messageId);
     }
@@ -322,6 +337,17 @@ export function larkDomainForSdk(domain: string | undefined): lark.Domain | stri
 
 function shouldSendCard(options: SendMessageOptions): boolean {
   return Boolean(options.replyMarkup || options.forceReply || options.entities?.length || options.disableWebPagePreview);
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
+  let timer: Timer | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 function callbackDataFromActionValue(value: unknown): string | undefined {
