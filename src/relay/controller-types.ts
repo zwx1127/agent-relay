@@ -11,6 +11,13 @@ export interface RelayControllerDeps {
   adapter: Pick<ImAdapter, "sendMessage" | "sendPhoto" | "editMessageText" | "deleteMessage" | "answerCallbackQuery" | "sendChatAction" | "setMessageReaction" | "downloadFile" | "capabilities">;
   agent: AgentDriver;
   logger?: Logger;
+  streamTiming?: Partial<StreamTiming>;
+}
+
+export interface StreamTiming {
+  quietMs: number;
+  maxMs: number;
+  flushChars: number;
 }
 
 export interface LiveOutputState {

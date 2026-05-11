@@ -8,7 +8,7 @@ import { shortToken } from "./ui/callback-data.ts";
 import { pagedOutputKeyboard } from "./ui/keyboards.ts";
 import { decoratePagedOutput } from "./ui/pagination.ts";
 import { messageWithTitle } from "./ui/text-parts.ts";
-import type { LiveOutputState } from "./controller-types.ts";
+import type { LiveOutputState, StreamTiming } from "./controller-types.ts";
 
 type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
 
@@ -19,13 +19,21 @@ export interface OutputStreamerDeps {
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
   editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: Omit<EditMessageTextOptions, "entities" | "parseMode">): Promise<void>;
   renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<void>;
+  timing?: Partial<StreamTiming>;
 }
 
 export class OutputStreamer {
   private readonly liveOutput = new Map<string, LiveOutputState>();
   private nextOutputSegmentId = 1;
+  private readonly timing: StreamTiming;
 
-  constructor(private readonly deps: OutputStreamerDeps) {}
+  constructor(private readonly deps: OutputStreamerDeps) {
+    this.timing = {
+      quietMs: deps.timing?.quietMs ?? STREAM_QUIET_MS,
+      maxMs: deps.timing?.maxMs ?? STREAM_MAX_MS,
+      flushChars: deps.timing?.flushChars ?? STREAM_FLUSH_CHARS,
+    };
+  }
 
   async buffer(sessionKeyValue: string, conversationId: ConversationId, chunk: string, turnId?: string): Promise<void> {
     let state = this.liveOutput.get(sessionKeyValue);
@@ -58,7 +66,7 @@ export class OutputStreamer {
 
     if (outputState.timer) clearTimeout(outputState.timer);
     const elapsed = Date.now() - outputState.startedAt;
-    const delay = outputState.text.length >= STREAM_FLUSH_CHARS || elapsed >= STREAM_MAX_MS ? 0 : STREAM_QUIET_MS;
+    const delay = outputState.text.length >= this.timing.flushChars || elapsed >= this.timing.maxMs ? 0 : this.timing.quietMs;
     const segmentId = outputState.segmentId;
     outputState.timer = setTimeout(() => {
       void this.flush(sessionKeyValue, segmentId).catch((error) => {
@@ -132,7 +140,7 @@ export class OutputStreamer {
       chunks: chunks.length,
     });
 
-    if (chunks.length === 1 && rendered.text.length < STREAM_FLUSH_CHARS) {
+    if (chunks.length === 1 && rendered.text.length < this.timing.flushChars) {
       const chunk = chunks[0]!;
       if (state.messageId) {
         try {

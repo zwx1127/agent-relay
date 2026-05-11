@@ -6,7 +6,10 @@ DATA_DIR="$ROOT_DIR/.data"
 LOG_DIR="$ROOT_DIR/logs"
 PID_FILE="$DATA_DIR/agent-relay.pid"
 LOG_FILE="$LOG_DIR/agent-relay.log"
-STOP_TIMEOUT_SECONDS=20
+STOP_TIMEOUT_SECONDS="${AGENT_RELAY_STOP_TIMEOUT_SECONDS:-20}"
+STOP_POLL_INTERVAL_SECONDS="${AGENT_RELAY_STOP_POLL_INTERVAL_SECONDS:-1}"
+START_CHECK_DELAY_SECONDS="${AGENT_RELAY_START_CHECK_DELAY_SECONDS:-1}"
+RESTART_WORKER_DELAY_SECONDS="${AGENT_RELAY_RESTART_WORKER_DELAY_SECONDS:-1}"
 
 usage() {
   cat <<USAGE
@@ -154,7 +157,7 @@ start() {
   )
 
   pid="$(<"$PID_FILE")"
-  sleep 1
+  sleep "$START_CHECK_DELAY_SECONDS"
   if ! pid_is_alive "$pid"; then
     rm -f "$PID_FILE"
     echo "agent-relay failed to start; see $LOG_FILE" >&2
@@ -179,15 +182,14 @@ stop() {
   echo "stopping agent-relay (pid $pid)"
   kill -TERM "$pid"
 
-  local elapsed=0
+  local deadline=$((SECONDS + STOP_TIMEOUT_SECONDS))
   while pid_is_alive "$pid"; do
-    if (( elapsed >= STOP_TIMEOUT_SECONDS )); then
+    if (( SECONDS >= deadline )); then
       echo "agent-relay did not stop after ${STOP_TIMEOUT_SECONDS}s; sending SIGKILL" >&2
       kill -KILL "$pid" >/dev/null 2>&1 || true
       break
     fi
-    sleep 1
-    elapsed=$((elapsed + 1))
+    sleep "$STOP_POLL_INTERVAL_SECONDS"
   done
 
   rm -f "$PID_FILE"
@@ -230,7 +232,7 @@ schedule_restart() {
 }
 
 restart_worker() {
-  sleep 1
+  sleep "$RESTART_WORKER_DELAY_SECONDS"
   restart_sequence
 }
 

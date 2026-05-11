@@ -7,9 +7,14 @@ import { SQLiteStore } from "../../src/storage/sqlite-store.ts";
 let dirs: string[] = [];
 
 function tempStore(): SQLiteStore {
+  return new SQLiteStore(":memory:");
+}
+
+function fileStore(): { store: SQLiteStore; path: string } {
   const dir = mkdtempSync(join(tmpdir(), "agent-relay-store-"));
   dirs.push(dir);
-  return new SQLiteStore(join(dir, "db.sqlite"));
+  const path = join(dir, "db.sqlite");
+  return { store: new SQLiteStore(path), path };
 }
 
 afterEach(() => {
@@ -18,6 +23,16 @@ afterEach(() => {
 });
 
 describe("store", () => {
+  test("persists file-backed workspaces across reopen", () => {
+    const file = fileStore();
+    file.store.upsertWorkspace({ name: "demo", path: "/tmp/demo", createdAt: 1 });
+    file.store.close();
+
+    const reopened = new SQLiteStore(file.path);
+    expect(reopened.getWorkspace("demo")).toEqual({ name: "demo", path: "/tmp/demo", createdAt: 1 });
+    reopened.close();
+  });
+
   test("migrates and stores workspaces", () => {
     const store = tempStore();
     store.upsertWorkspace({ name: "demo", path: "/tmp/demo", createdAt: 1 });

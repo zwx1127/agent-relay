@@ -12,12 +12,15 @@ import { FakeAgent, FakeImAdapter, sleep } from "../support/fakes.ts";
 
 
 let dirs: string[] = [];
+let stores: SQLiteStore[] = [];
+
+const TEST_STREAM_QUIET_MS = 5;
 
 function fixture(logLevel: LogLevel = "info"): { router: RelayController; store: SQLiteStore; adapter: FakeImAdapter; agent: FakeAgent; root: string; logLines: string[] } {
   const root = mkdtempSync(join(tmpdir(), "agent-relay-controller-root-"));
-  const data = mkdtempSync(join(tmpdir(), "agent-relay-controller-data-"));
-  dirs.push(root, data);
-  const store = new SQLiteStore(join(data, "db.sqlite"));
+  dirs.push(root);
+  const store = new SQLiteStore(":memory:");
+  stores.push(store);
   const adapter = new FakeImAdapter();
   const agent = new FakeAgent();
   const logLines: string[] = [];
@@ -34,7 +37,7 @@ function fixture(logLevel: LogLevel = "info"): { router: RelayController; store:
     telegramRetryMaxDelayMs: 10000,
     larkDomain: "lark",
     workspaceRoot: root,
-    sqlitePath: join(data, "db.sqlite"),
+    sqlitePath: ":memory:",
     codexBin: "codex",
     codexSandbox: "workspace-write",
     codexApproval: "on-request",
@@ -42,7 +45,7 @@ function fixture(logLevel: LogLevel = "info"): { router: RelayController; store:
     relayControlPort: 0,
     logLevel,
   };
-  return { router: new RelayController({ config, store, adapter, agent, logger }), store, adapter, agent, root, logLines };
+  return { router: new RelayController({ config, store, adapter, agent, logger, streamTiming: { quietMs: TEST_STREAM_QUIET_MS } }), store, adapter, agent, root, logLines };
 }
 
 function sentPrompt(text: string, collaborationMode: "default" | "plan" = "default"): { key: string; text: string; options: { collaborationMode: "default" | "plan" } } {
@@ -50,9 +53,15 @@ function sentPrompt(text: string, collaborationMode: "default" | "plan" = "defau
 }
 
 afterEach(() => {
+  for (const store of stores) store.close();
+  stores = [];
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
   dirs = [];
 });
+
+async function waitForStreamFlush(): Promise<void> {
+  await sleep(TEST_STREAM_QUIET_MS + 20);
+}
 
 describe("relay controller", () => {
   test("rejects unauthorized users", async () => {
@@ -144,7 +153,7 @@ describe("relay controller", () => {
     store.bindConversation(1, "demo");
 
     await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "**Done** `src/app.ts`\n" });
-    await sleep(850);
+    await waitForStreamFlush();
 
     expect(adapter.sent.at(-1)?.text).toBe("Done src/app.ts\n");
     expect(adapter.sent.at(-1)?.options?.entities?.map((entity) => entity.type)).toEqual(["bold", "code"]);
@@ -159,7 +168,7 @@ describe("relay controller", () => {
 
     await router.handle({ ...textMessage("hello"), messageId: 44, id: "44" });
     await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "answer", turnId: "turn-1" });
-    await sleep(850);
+    await waitForStreamFlush();
 
     expect(adapter.sent.at(-1)?.options?.replyToMessageId).toBe("44");
   });
@@ -185,10 +194,10 @@ describe("relay controller", () => {
     await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
 
     await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "before", turnId: "turn-1" });
-    await sleep(850);
+    await waitForStreamFlush();
     await router.handle(textMessage("follow up"));
     await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "after", turnId: "turn-1" });
-    await sleep(850);
+    await waitForStreamFlush();
 
     expect(adapter.sent.map((message) => message.text)).toEqual(["before", "after"]);
     expect(adapter.edited).toEqual([]);
@@ -201,7 +210,7 @@ describe("relay controller", () => {
     const longText = Array.from({ length: 900 }, (_, index) => `line ${index}`).join("\n");
 
     await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: longText, turnId: "turn-1" });
-    await sleep(50);
+    await waitForStreamFlush();
 
     const paged = adapter.sent.at(-1)!;
     expect(adapter.sent).toHaveLength(1);
@@ -228,7 +237,7 @@ describe("relay controller", () => {
     store.bindConversation(1, "demo");
 
     await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "before approval", turnId: "turn-1" });
-    await sleep(850);
+    await waitForStreamFlush();
     const firstMessageId = adapter.sent.at(-1)?.messageId;
     await router.handleAgentOutput({
       type: "approval_request",
@@ -248,7 +257,7 @@ describe("relay controller", () => {
 
     await router.handle(callbackMessage(approve.callback_data, 7, "cba", prompt.messageId));
     await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "after approval", turnId: "turn-1" });
-    await sleep(850);
+    await waitForStreamFlush();
 
     expect(agent.responses).toEqual([{ key: "codex:1:demo", requestId: 91, result: { decision: "accept" } }]);
     expect(adapter.edited.some((message) => message.options.messageId === firstMessageId && message.text.includes("after approval"))).toBe(false);
@@ -264,7 +273,7 @@ describe("relay controller", () => {
     adapter.sendMessageDelayMs = 80;
 
     await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "before approval", turnId: "turn-1" });
-    await sleep(820);
+    await waitForStreamFlush();
     await router.handleAgentOutput({
       type: "approval_request",
       sessionKey: "codex:1:demo",
@@ -289,7 +298,7 @@ describe("relay controller", () => {
     adapter.sendMessageDelayMs = 80;
 
     await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "first", turnId: "turn-1" });
-    await sleep(820);
+    await waitForStreamFlush();
     await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: " second", turnId: "turn-1" });
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
 

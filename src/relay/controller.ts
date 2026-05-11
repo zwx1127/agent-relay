@@ -57,6 +57,7 @@ export class RelayController {
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
       editRendered: (conversationId, rendered, options) => this.editRendered(conversationId, rendered, options),
       renderCallbackPage: (message, body, replyMarkup) => this.renderCallbackPage(message, body, replyMarkup),
+      timing: deps.streamTiming,
     });
     this.taskCoordinator = new TaskCoordinator({
       store: deps.store,

@@ -5,10 +5,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 let roots: string[] = [];
+const fastRelayEnv = {
+  ...process.env,
+  AGENT_RELAY_START_CHECK_DELAY_SECONDS: "0.05",
+  AGENT_RELAY_STOP_POLL_INTERVAL_SECONDS: "0.05",
+  AGENT_RELAY_RESTART_WORKER_DELAY_SECONDS: "0.05",
+  AGENT_RELAY_STOP_TIMEOUT_SECONDS: "2",
+};
 
 afterEach(() => {
   for (const root of roots) {
-    spawnSync(join(root, "scripts", "relay.sh"), ["stop"], { cwd: root, encoding: "utf8" });
+    spawnSync(join(root, "scripts", "relay.sh"), ["stop"], { cwd: root, encoding: "utf8", env: fastRelayEnv });
     rmSync(root, { recursive: true, force: true });
   }
   roots = [];
@@ -83,7 +90,7 @@ function createFixture(): string {
 }
 
 function runRelay(root: string, command: string): ReturnType<typeof spawnSync> {
-  return spawnSync(join(root, "scripts", "relay.sh"), [command], { cwd: root, encoding: "utf8" });
+  return spawnSync(join(root, "scripts", "relay.sh"), [command], { cwd: root, encoding: "utf8", env: fastRelayEnv });
 }
 
 function expectSuccess(result: ReturnType<typeof spawnSync>): void {

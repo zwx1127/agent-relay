@@ -12,10 +12,10 @@ export class SQLiteStore implements RelayStore {
   readonly db: Database;
 
   constructor(path: string, private readonly logger: Logger = noopLogger) {
-    const absolutePath = resolve(path);
-    mkdirSync(dirname(absolutePath), { recursive: true });
+    const absolutePath = path === ":memory:" ? path : resolve(path);
+    if (path !== ":memory:") mkdirSync(dirname(absolutePath), { recursive: true });
     this.db = new Database(absolutePath);
-    this.db.run("PRAGMA journal_mode = WAL");
+    if (path !== ":memory:") this.db.run("PRAGMA journal_mode = WAL");
     this.migrate();
     this.logger.info("store.opened", { path: absolutePath });
   }
