@@ -23,6 +23,31 @@ describe("codex app-server spawn command", () => {
       args: ["/d", "/s", "/c", String.raw`"C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`],
       resolvedCodexBin: shim,
     });
+    expect(command.args[3]).not.toContain(String.raw`\"`);
+  });
+
+  test("normalizes quoted Windows cmd shim paths before building the cmd command", () => {
+    const shim = String.raw`C:\Users\Admin\AppData\Roaming\npm\codex.cmd`;
+    const command = codexAppServerSpawnCommand(`"${shim}"`, {}, "win32", (path) => path === shim);
+
+    expect(command).toEqual({
+      command: "cmd.exe",
+      args: ["/d", "/s", "/c", String.raw`"C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`],
+      resolvedCodexBin: shim,
+    });
+    expect(command.args[3]).not.toContain(String.raw`\"`);
+  });
+
+  test("normalizes backslash-escaped quoted Windows cmd shim paths", () => {
+    const shim = String.raw`C:\Users\Admin\AppData\Roaming\npm\codex.cmd`;
+    const command = codexAppServerSpawnCommand(String.raw`\"C:\Users\Admin\AppData\Roaming\npm\codex.cmd\"`, {}, "win32", (path) => path === shim);
+
+    expect(command).toEqual({
+      command: "cmd.exe",
+      args: ["/d", "/s", "/c", String.raw`"C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`],
+      resolvedCodexBin: shim,
+    });
+    expect(command.args[3]).not.toContain(String.raw`\"`);
   });
 
   test("launches a Windows exe directly", () => {

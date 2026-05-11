@@ -22,8 +22,9 @@ export function codexAppServerSpawnCommand(
     return { command: codexBin, args, resolvedCodexBin: codexBin };
   }
 
+  const normalizedCodexBin = normalizeWindowsCommandValue(codexBin);
   const resolvedCodexBin = normalizeWindowsPowershellShim(
-    resolveWindowsExecutable(codexBin, env, exists),
+    resolveWindowsExecutable(normalizedCodexBin, env, exists),
     exists,
   );
   if (isWindowsCommandShim(resolvedCodexBin)) {
@@ -108,10 +109,30 @@ function isWindowsCommandShim(path: string): boolean {
 }
 
 function quoteCmdCommand(value: string): string {
-  return `"${value.replace(/"/g, "\\\"")}"`;
+  return `"${escapeCmdQuotedValue(value)}"`;
 }
 
 function quoteCmdArg(value: string): string {
   if (!/[ \t"&()<>^|]/.test(value)) return value;
-  return `"${value.replace(/"/g, "\\\"")}"`;
+  return `"${escapeCmdQuotedValue(value)}"`;
+}
+
+function normalizeWindowsCommandValue(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length < 2) return trimmed;
+  if (
+    (trimmed.startsWith(String.raw`\"`) && trimmed.endsWith(String.raw`\"`))
+    || (trimmed.startsWith(String.raw`\'`) && trimmed.endsWith(String.raw`\'`))
+  ) {
+    return trimmed.slice(2, -2);
+  }
+  const quote = trimmed[0];
+  if ((quote === `"` || quote === "'") && trimmed.endsWith(quote)) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function escapeCmdQuotedValue(value: string): string {
+  return value.replace(/(["^&()<>|])/g, "^$1");
 }

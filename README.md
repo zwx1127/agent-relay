@@ -118,7 +118,7 @@ The relay loads `.env` first, then overlays shell environment variables, so expo
 
 When both `CODEX_DEVELOPER_INSTRUCTIONS_FILE` and `CODEX_DEVELOPER_INSTRUCTIONS` are set, file contents are sent first, then a blank line, then the inline text. `CODEX_MODEL_INSTRUCTIONS_FILE` is sent as Codex base instructions. The relay does not inject `AGENTS.md`; Codex discovers it normally from the selected workspace.
 
-On Windows, `CODEX_BIN=codex` is resolved through `PATH` and `PATHEXT`, so npm-style shims such as `codex.cmd` are supported. If Codex cannot be found, inspect the command from the same terminal that starts the relay with `where.exe codex` or `Get-Command codex`; if needed, set `CODEX_BIN` to the full `codex.cmd` or `codex.exe` path.
+On Windows, `CODEX_BIN=codex` is resolved through `PATH` and `PATHEXT`, so npm-style shims such as `codex.cmd` are supported. If Codex cannot be found, inspect the command from the same terminal that starts the relay with `where.exe codex` or `Get-Command codex`; if needed, set `CODEX_BIN` to the full `codex.cmd` or `codex.exe` path, for example `CODEX_BIN=C:\Users\Admin\AppData\Roaming\npm\codex.cmd`. Do not include backslash-escaped quotes such as `\"C:\...\codex.cmd\"`. To verify Codex independently in PowerShell, run `& "C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`. If app-server exits, relay logs include the recent app-server stderr on `codex.app_server_exited`.
 
 ## Telegram Usage
 

@@ -32,6 +32,35 @@ describe("CodexDriver app-server protocol", () => {
     await driver.stop(status.sessionKey);
   });
 
+  test("includes recent app-server stderr when startup exits", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-relay-failing-codex-"));
+    dirs.push(dir);
+    const fake = join(dir, "codex-fake.js");
+    writeFileSync(fake, `#!/usr/bin/env node
+process.stderr.write("startup failed\\nmore detail\\n");
+setTimeout(() => process.exit(1), 20);
+`);
+    chmodSync(fake, 0o755);
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    let error: unknown;
+    try {
+      await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("Codex app-server exited with code 1.");
+    expect((error as Error).message).toContain("startup failed");
+    expect((error as Error).message).toContain("more detail");
+    expect((error as Error).message).toContain("CODEX_BIN=");
+  });
+
   test("emits only assistant deltas and ignores command and terminal output", async () => {
     const fake = fakeCodexBin();
     const events: AgentOutputEvent[] = [];

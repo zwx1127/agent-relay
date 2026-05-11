@@ -22,7 +22,7 @@ import type {
   StartAgentOptions,
 } from "../../../ports/agent.ts";
 import { applySessionMetadata, applyThreadMetadata, approvalCopy, approvalKindForMethod, asRecord, collaborationModePayload, getString, getThreadId, getTurnId, imageOutputEvent, isNoActiveTurnToInterruptError, isNoActiveTurnToSteerError, reviewTargetPayload, summarizeUnknown, toModelSummary, toQuestion, toThreadGoal, toThreadSummary, toTokenBreakdown, updateActiveTurnFromResult, userInputPayload } from "./protocol.ts";
-import { codexAppServerSpawnCommand, formatCodexSpawnError } from "./spawn.ts";
+import { codexAppServerSpawnCommand, formatCodexSpawnError, type CodexSpawnCommand } from "./spawn.ts";
 
 interface RunningSession {
   status: AgentSessionStatus;
@@ -69,6 +69,9 @@ type PendingRpc = {
   timer: Timer;
 };
 
+const MAX_RECENT_STDERR_LINES = 20;
+const MAX_RECENT_STDERR_CHARS = 8 * 1024;
+
 export class CodexDriver implements AgentDriver {
   readonly providerId = "codex";
   readonly capabilities = {
@@ -94,6 +97,8 @@ export class CodexDriver implements AgentDriver {
   private nextRequestId = 1;
   private ready?: Promise<void>;
   private stopping = false;
+  private appServerCommand?: CodexSpawnCommand;
+  private recentServerStderr: string[] = [];
 
   constructor(
     private readonly options: CodexDriverOptions,
@@ -430,6 +435,8 @@ export class CodexDriver implements AgentDriver {
     this.stopping = false;
     const env = { ...process.env, ...this.options.env };
     const command = codexAppServerSpawnCommand(this.options.codexBin, env);
+    this.appServerCommand = command;
+    this.recentServerStderr = [];
     try {
       this.proc = spawn(command.command, command.args, {
         env,
@@ -443,7 +450,10 @@ export class CodexDriver implements AgentDriver {
     const proc = this.proc;
     createInterface({ input: proc.stdout }).on("line", (line) => this.handleLine(line));
     createInterface({ input: proc.stderr }).on("line", (line) => {
-      if (line.trim()) this.logger.debug("codex.app_server_stderr", { line });
+      if (line.trim()) {
+        this.recordServerStderr(line);
+        this.logger.debug("codex.app_server_stderr", { line });
+      }
     });
     proc.on("error", (error) => this.handleServerError(error));
     proc.on("exit", (exitCode, signalCode) => this.handleServerExit(exitCode, signalCode));
@@ -771,8 +781,9 @@ export class CodexDriver implements AgentDriver {
 
   private handleServerExit(exitCode: number | null, signalCode: NodeJS.Signals | null): void {
     if (this.stopping) return;
-    this.logger.warn("codex.app_server_exited", { exit_code: exitCode, signal_code: signalCode });
-    this.rejectPending(new Error("Codex app-server exited."));
+    const recentStderr = this.recentServerStderrText();
+    this.logger.warn("codex.app_server_exited", { exit_code: exitCode, signal_code: signalCode, recent_stderr: recentStderr || undefined });
+    this.rejectPending(this.appServerExitError(exitCode, signalCode));
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
     this.threadToSession.clear();
@@ -794,6 +805,37 @@ export class CodexDriver implements AgentDriver {
     this.rejectPending(wrapped);
     this.proc = undefined;
     this.ready = undefined;
+  }
+
+  private recordServerStderr(line: string): void {
+    this.recentServerStderr.push(line);
+    if (this.recentServerStderr.length > MAX_RECENT_STDERR_LINES) {
+      this.recentServerStderr.splice(0, this.recentServerStderr.length - MAX_RECENT_STDERR_LINES);
+    }
+    let totalChars = this.recentServerStderr.reduce((total, value) => total + value.length + 1, 0);
+    while (totalChars > MAX_RECENT_STDERR_CHARS && this.recentServerStderr.length > 1) {
+      const removed = this.recentServerStderr.shift();
+      totalChars -= (removed?.length ?? 0) + 1;
+    }
+  }
+
+  private recentServerStderrText(): string {
+    return this.recentServerStderr.join("\n").trim();
+  }
+
+  private appServerExitError(exitCode: number | null, signalCode: NodeJS.Signals | null): Error {
+    const status = signalCode
+      ? `signal ${signalCode}`
+      : exitCode === null
+        ? "unknown status"
+        : `code ${exitCode}`;
+    const command = this.appServerCommand;
+    const details = [
+      `Codex app-server exited with ${status}.`,
+      this.recentServerStderrText() ? `Recent stderr:\n${this.recentServerStderrText()}` : undefined,
+      command ? `CODEX_BIN=${JSON.stringify(this.options.codexBin)}, resolved=${JSON.stringify(command.resolvedCodexBin)}, command=${JSON.stringify(command.command)}, args=${JSON.stringify(command.args)}` : undefined,
+    ].filter((part): part is string => Boolean(part));
+    return new Error(details.join(" "));
   }
 
   private rejectPending(error: Error): void {
