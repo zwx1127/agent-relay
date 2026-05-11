@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { InlineKeyboardButton, InlineKeyboardMarkup, TextEntity } from "../../ports/im.ts";
 import { renderLarkMarkdown } from "./markdown.ts";
 
@@ -9,6 +10,7 @@ export interface LarkCardOptions {
 }
 
 export function createLarkCard(text: string, options: LarkCardOptions = {}): object {
+  const callbackNonce = cardCallbackNonce();
   const elements: object[] = [
     {
       tag: "markdown",
@@ -27,7 +29,7 @@ export function createLarkCard(text: string, options: LarkCardOptions = {}): obj
     if (row.length === 0) continue;
     elements.push({
       tag: "action",
-      actions: row.map(buttonElement),
+      actions: row.map((button) => buttonElement(button, callbackNonce)),
     });
   }
 
@@ -44,7 +46,7 @@ function replyPromptMarkdown(placeholder: string | undefined): string {
   return `**Reply to this message.**\n${renderLarkMarkdown(placeholder)}`;
 }
 
-function buttonElement(button: InlineKeyboardButton): object {
+function buttonElement(button: InlineKeyboardButton, callbackNonce: string): object {
   return {
     tag: "button",
     text: {
@@ -53,9 +55,14 @@ function buttonElement(button: InlineKeyboardButton): object {
     },
     type: buttonType(button.text),
     value: {
+      callback_nonce: callbackNonce,
       callback_data: button.callback_data,
     },
   };
+}
+
+function cardCallbackNonce(): string {
+  return randomBytes(8).toString("hex");
 }
 
 function buttonType(text: string): "default" | "primary" | "danger" {

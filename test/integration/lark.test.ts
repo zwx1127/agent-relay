@@ -146,7 +146,7 @@ describe("lark adapter", () => {
       messageId: "om_card",
       chatId: "oc_chat",
       operator: { openId: "ou_user" },
-      action: { tag: "button", value: { callback_data: "ar:s" } },
+      action: { tag: "button", value: { callback_nonce: "nonce-1", callback_data: "ar:s" } },
     } satisfies CardActionEvent);
 
     expect(received).toEqual([{
@@ -158,6 +158,29 @@ describe("lark adapter", () => {
       messageId: "om_card",
       data: "ar:s",
     }]);
+  });
+
+  test("uses fresh callback nonces when cards are re-rendered", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+
+    await adapter.sendMessage("oc_chat", "choose", {
+      replyMarkup: { inline_keyboard: [[{ text: "Refresh", callback_data: "ar:s" }]] },
+    });
+    await adapter.editMessageText("oc_chat", "choose again", {
+      messageId: "om_1",
+      replyMarkup: { inline_keyboard: [[{ text: "Refresh", callback_data: "ar:s" }]] },
+    });
+
+    const sentValue = firstButtonValue(expectLarkCard(channel.sent[0]?.input));
+    const updatedValue = firstButtonValue(channel.updated[0]!.card);
+
+    expect(sentValue.callback_data).toBe("ar:s");
+    expect(updatedValue.callback_data).toBe("ar:s");
+    expect(typeof sentValue.callback_nonce).toBe("string");
+    expect(typeof updatedValue.callback_nonce).toBe("string");
+    expect(updatedValue.callback_nonce).not.toBe(sentValue.callback_nonce);
+    expect(JSON.stringify(sentValue).indexOf("callback_nonce")).toBeLessThan(JSON.stringify(sentValue).indexOf("callback_data"));
   });
 
   test("serializes card updates for the same card message", async () => {
@@ -343,6 +366,14 @@ function expectLarkCardShape(card: object): void {
   const value = card as { config?: { wide_screen_mode?: boolean }; elements?: unknown };
   expect(value.config).toEqual({ wide_screen_mode: true });
   expect(Array.isArray(value.elements)).toBe(true);
+}
+
+function firstButtonValue(card: object): { callback_nonce?: string; callback_data?: string } {
+  const value = card as { elements?: Array<{ tag?: string; actions?: Array<{ value?: unknown }> }> };
+  const action = value.elements?.find((element) => element.tag === "action");
+  const buttonValue = action?.actions?.[0]?.value;
+  if (!buttonValue || typeof buttonValue !== "object") throw new Error("expected button value");
+  return buttonValue as { callback_nonce?: string; callback_data?: string };
 }
 
 function adapterWith(channel: FakeLarkChannel, options: Partial<ConstructorParameters<typeof LarkAdapter>[0]> = {}): LarkAdapter {
