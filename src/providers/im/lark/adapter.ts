@@ -5,6 +5,7 @@ import { createLarkCard, renderLarkMarkdown } from "../../../presentation/lark/t
 import type {
   CardActionEvent,
   LarkChannel as SdkLarkChannel,
+  LarkChannelOptions,
   NormalizedMessage,
   ResourceDescriptor,
   SendInput,
@@ -28,6 +29,7 @@ export interface LarkAdapterOptions {
   logger?: Logger;
   channel?: LarkChannelClient;
   cardUpdateTimeoutMs?: number;
+  cardActionDedupTtlMs?: number;
 }
 
 type LarkEventHandlers = {
@@ -39,6 +41,7 @@ type LarkEventHandlers = {
 };
 
 const DEFAULT_CARD_UPDATE_TIMEOUT_MS = 10_000;
+const DEFAULT_CARD_ACTION_DEDUP_TTL_MS = 500;
 
 export interface LarkChannelClient {
   connect(): Promise<void>;
@@ -77,38 +80,12 @@ export class LarkAdapter implements ImAdapter {
   static create(options: Omit<LarkAdapterOptions, "channel">): LarkAdapter {
     return new LarkAdapter({
       ...options,
-      channel: lark.createLarkChannel({
-        appId: options.appId,
-        appSecret: options.appSecret,
-        domain: larkDomainForSdk(options.domain),
-        transport: "websocket",
-        source: "agent-relay",
-        policy: {
-          requireMention: false,
-          dmMode: "open",
-        },
-        outbound: {
-          textChunkLimit: 3500,
-        },
-      }) as SdkLarkChannel,
+      channel: lark.createLarkChannel(larkChannelOptions(options)) as SdkLarkChannel,
     });
   }
 
   constructor(options: LarkAdapterOptions) {
-    this.channel = options.channel ?? lark.createLarkChannel({
-      appId: options.appId,
-      appSecret: options.appSecret,
-      domain: larkDomainForSdk(options.domain),
-      transport: "websocket",
-      source: "agent-relay",
-      policy: {
-        requireMention: false,
-        dmMode: "open",
-      },
-      outbound: {
-        textChunkLimit: 3500,
-      },
-    });
+    this.channel = options.channel ?? lark.createLarkChannel(larkChannelOptions(options));
     this.logger = options.logger ?? noopLogger;
     this.cardUpdateTimeoutMs = options.cardUpdateTimeoutMs ?? DEFAULT_CARD_UPDATE_TIMEOUT_MS;
   }
@@ -333,6 +310,28 @@ export function larkDomainForSdk(domain: string | undefined): lark.Domain | stri
   if (!domain || domain === "feishu") return lark.Domain.Feishu;
   if (domain === "lark") return lark.Domain.Lark;
   return domain;
+}
+
+export function larkChannelOptions(options: Pick<LarkAdapterOptions, "appId" | "appSecret" | "domain" | "cardActionDedupTtlMs">): LarkChannelOptions {
+  return {
+    appId: options.appId,
+    appSecret: options.appSecret,
+    domain: larkDomainForSdk(options.domain),
+    transport: "websocket",
+    source: "agent-relay",
+    policy: {
+      requireMention: false,
+      dmMode: "open",
+    },
+    outbound: {
+      textChunkLimit: 3500,
+    },
+    safety: {
+      dedup: {
+        ttl: options.cardActionDedupTtlMs ?? DEFAULT_CARD_ACTION_DEDUP_TTL_MS,
+      },
+    },
+  };
 }
 
 function shouldSendCard(options: SendMessageOptions): boolean {

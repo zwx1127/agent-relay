@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as lark from "@larksuiteoapi/node-sdk";
-import { LarkAdapter, larkDomainForSdk, type LarkChannelClient } from "../../src/providers/im/lark/adapter.ts";
+import { LarkAdapter, larkChannelOptions, larkDomainForSdk, type LarkChannelClient } from "../../src/providers/im/lark/adapter.ts";
 import type { CardActionEvent, NormalizedMessage, SendInput, SendOptions } from "@larksuiteoapi/node-sdk";
 
 class FakeLarkChannel implements LarkChannelClient {
@@ -75,6 +75,25 @@ describe("lark adapter", () => {
     expect(larkDomainForSdk("feishu")).toBe(lark.Domain.Feishu);
     expect(larkDomainForSdk("lark")).toBe(lark.Domain.Lark);
     expect(larkDomainForSdk("https://open.example.com")).toBe("https://open.example.com");
+  });
+
+  test("uses a short Lark action dedup TTL by default", () => {
+    const options = larkChannelOptions({ appId: "cli_a", appSecret: "secret", domain: "lark" });
+
+    expect(options.safety?.dedup?.ttl).toBe(500);
+    expect(options.policy).toEqual({ requireMention: false, dmMode: "open" });
+    expect(options.outbound).toEqual({ textChunkLimit: 3500 });
+  });
+
+  test("allows overriding the Lark action dedup TTL", () => {
+    const options = larkChannelOptions({
+      appId: "cli_a",
+      appSecret: "secret",
+      domain: "lark",
+      cardActionDedupTtlMs: 250,
+    });
+
+    expect(options.safety?.dedup?.ttl).toBe(250);
   });
 
   test("routes long-connection text messages", async () => {
