@@ -22,6 +22,7 @@ import type {
   StartAgentOptions,
 } from "../../../ports/agent.ts";
 import { applySessionMetadata, applyThreadMetadata, approvalCopy, approvalKindForMethod, asRecord, collaborationModePayload, getString, getThreadId, getTurnId, imageOutputEvent, isNoActiveTurnToInterruptError, isNoActiveTurnToSteerError, reviewTargetPayload, summarizeUnknown, toModelSummary, toQuestion, toThreadGoal, toThreadSummary, toTokenBreakdown, updateActiveTurnFromResult, userInputPayload } from "./protocol.ts";
+import { codexAppServerSpawnCommand, formatCodexSpawnError } from "./spawn.ts";
 
 interface RunningSession {
   status: AgentSessionStatus;
@@ -417,34 +418,52 @@ export class CodexDriver implements AgentDriver {
 
   private async ensureServer(): Promise<void> {
     if (this.ready) return this.ready;
-    this.ready = this.startServer();
-    return this.ready;
+    const ready = this.startServer().catch((error) => {
+      if (this.ready === ready) this.ready = undefined;
+      throw error;
+    });
+    this.ready = ready;
+    return ready;
   }
 
   private async startServer(): Promise<void> {
     this.stopping = false;
-    this.proc = spawn(this.options.codexBin, ["app-server", "--listen", "stdio://"], {
-      env: { ...process.env, ...this.options.env },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const env = { ...process.env, ...this.options.env };
+    const command = codexAppServerSpawnCommand(this.options.codexBin, env);
+    try {
+      this.proc = spawn(command.command, command.args, {
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      this.proc = undefined;
+      throw formatCodexSpawnError(error, this.options.codexBin);
+    }
 
     const proc = this.proc;
     createInterface({ input: proc.stdout }).on("line", (line) => this.handleLine(line));
     createInterface({ input: proc.stderr }).on("line", (line) => {
       if (line.trim()) this.logger.debug("codex.app_server_stderr", { line });
     });
+    proc.on("error", (error) => this.handleServerError(error));
     proc.on("exit", (exitCode, signalCode) => this.handleServerExit(exitCode, signalCode));
 
-    await this.request("initialize", {
-      clientInfo: { name: "agent-relay", title: "Agent Relay", version: "0.0.0" },
-      capabilities: {
-        experimentalApi: true,
-        optOutNotificationMethods: [
-          "command/exec/outputDelta",
-          "item/commandExecution/terminalInteraction",
-        ],
-      },
-    });
+    try {
+      await this.request("initialize", {
+        clientInfo: { name: "agent-relay", title: "Agent Relay", version: "0.0.0" },
+        capabilities: {
+          experimentalApi: true,
+          optOutNotificationMethods: [
+            "command/exec/outputDelta",
+            "item/commandExecution/terminalInteraction",
+          ],
+        },
+      }, { ensureWritable: false });
+    } catch (error) {
+      if (this.proc === proc && !proc.killed) proc.kill();
+      this.proc = undefined;
+      throw error;
+    }
     this.logger.info("codex.app_server_started");
   }
 
@@ -710,7 +729,7 @@ export class CodexDriver implements AgentDriver {
     }
   }
 
-  private async request(method: string, params?: unknown): Promise<unknown> {
+  private async request(method: string, params?: unknown, options: { ensureWritable?: boolean } = {}): Promise<unknown> {
     const id = this.nextRequestId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -719,7 +738,7 @@ export class CodexDriver implements AgentDriver {
         reject(new Error(`Codex ${method} timed out.`));
       }, 120_000);
       this.pending.set(id, { resolve, reject, method, timer });
-      void this.writeMessage({ id, method, params }).catch((error) => {
+      void this.writeMessage({ id, method, params }, { ensureWritable: options.ensureWritable }).catch((error) => {
         const pending = this.pending.get(id);
         if (pending) clearTimeout(pending.timer);
         this.pending.delete(id);
@@ -737,8 +756,9 @@ export class CodexDriver implements AgentDriver {
     return running;
   }
 
-  private async writeMessage(message: JsonRpcRequest | JsonRpcResponse | { id: string | number; result?: unknown; error?: unknown }): Promise<void> {
-    await this.ensureWritable();
+  private async writeMessage(message: JsonRpcRequest | JsonRpcResponse | { id: string | number; result?: unknown; error?: unknown }, options: { ensureWritable?: boolean } = {}): Promise<void> {
+    if (options.ensureWritable !== false) await this.ensureWritable();
+    if (!this.proc) throw new Error("Codex app-server is not running.");
     this.proc!.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
@@ -752,19 +772,36 @@ export class CodexDriver implements AgentDriver {
   private handleServerExit(exitCode: number | null, signalCode: NodeJS.Signals | null): void {
     if (this.stopping) return;
     this.logger.warn("codex.app_server_exited", { exit_code: exitCode, signal_code: signalCode });
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error("Codex app-server exited."));
-    }
-    this.pending.clear();
+    this.rejectPending(new Error("Codex app-server exited."));
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
     this.threadToSession.clear();
+    this.proc = undefined;
     this.ready = undefined;
     for (const running of sessions) {
       running.status.running = false;
       void this.onExit({ sessionKey: running.status.sessionKey, exitCode, signalCode });
     }
+  }
+
+  private handleServerError(error: Error): void {
+    if (this.stopping) return;
+    const wrapped = formatCodexSpawnError(error, this.options.codexBin);
+    this.logger.error("codex.app_server_spawn_failed", {
+      codex_bin: this.options.codexBin,
+      error: wrapped,
+    });
+    this.rejectPending(wrapped);
+    this.proc = undefined;
+    this.ready = undefined;
+  }
+
+  private rejectPending(error: Error): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
   }
 }
 

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { CodexDriver } from "../../src/providers/agents/codex/driver.ts";
 import type { AgentOutputEvent } from "../../src/ports/agent.ts";
 
@@ -13,6 +13,25 @@ afterEach(() => {
 });
 
 describe("CodexDriver app-server protocol", () => {
+  test("resets failed app-server startup so a later start can retry", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-relay-fake-codex-"));
+    dirs.push(dir);
+    const fake = join(dir, "codex-fake.js");
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    await expect(driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() })).rejects.toThrow("Failed to start Codex app-server");
+
+    fakeCodexBin(fake);
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+
+    expect(status.threadId).toBe("thread-1");
+    await driver.stop(status.sessionKey);
+  });
+
   test("emits only assistant deltas and ignores command and terminal output", async () => {
     const fake = fakeCodexBin();
     const events: AgentOutputEvent[] = [];
@@ -407,10 +426,10 @@ describe("CodexDriver app-server protocol", () => {
   });
 });
 
-function fakeCodexBin(): string {
-  const dir = mkdtempSync(join(tmpdir(), "agent-relay-fake-codex-"));
-  dirs.push(dir);
-  const script = join(dir, "codex-fake.js");
+function fakeCodexBin(scriptPath?: string): string {
+  const dir = scriptPath ? dirname(scriptPath) : mkdtempSync(join(tmpdir(), "agent-relay-fake-codex-"));
+  if (!scriptPath) dirs.push(dir);
+  const script = scriptPath ?? join(dir, "codex-fake.js");
   const log = join(dir, "messages.log");
   writeFileSync(script, `#!/usr/bin/env node
 const fs = require("fs");

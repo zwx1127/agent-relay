@@ -118,6 +118,8 @@ The relay loads `.env` first, then overlays shell environment variables, so expo
 
 When both `CODEX_DEVELOPER_INSTRUCTIONS_FILE` and `CODEX_DEVELOPER_INSTRUCTIONS` are set, file contents are sent first, then a blank line, then the inline text. `CODEX_MODEL_INSTRUCTIONS_FILE` is sent as Codex base instructions. The relay does not inject `AGENTS.md`; Codex discovers it normally from the selected workspace.
 
+On Windows, `CODEX_BIN=codex` is resolved through `PATH` and `PATHEXT`, so npm-style shims such as `codex.cmd` are supported. If Codex cannot be found, inspect the command from the same terminal that starts the relay with `where.exe codex` or `Get-Command codex`; if needed, set `CODEX_BIN` to the full `codex.cmd` or `codex.exe` path.
+
 ## Telegram Usage
 
 Send `/relay` to open Relay Home. Relay Home shows the selected workspace, Codex status, waiting state, and recent errors. The detail toggle shows waiting state, prompt counts, thread, model, combined numeric token/context usage, approval/sandbox policy, and recent output timing. Relay Home uses English inline buttons; successful actions update the message in place without extra Telegram callback notices, while errors and expired actions still show explicit feedback.

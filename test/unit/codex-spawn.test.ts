@@ -1,0 +1,60 @@
+import { describe, expect, test } from "bun:test";
+import { codexAppServerSpawnCommand, formatCodexSpawnError } from "../../src/providers/agents/codex/spawn.ts";
+
+describe("codex app-server spawn command", () => {
+  test("keeps direct spawn behavior on non-Windows platforms", () => {
+    expect(codexAppServerSpawnCommand("codex", {}, "linux")).toEqual({
+      command: "codex",
+      args: ["app-server", "--listen", "stdio://"],
+      resolvedCodexBin: "codex",
+    });
+  });
+
+  test("resolves a Windows cmd shim from PATH and launches it through cmd.exe", () => {
+    const shim = String.raw`C:\Users\Admin\AppData\Roaming\npm\codex.cmd`;
+    const command = codexAppServerSpawnCommand("codex", {
+      Path: String.raw`C:\Windows\System32;C:\Users\Admin\AppData\Roaming\npm`,
+      PATHEXT: ".EXE;.CMD",
+      ComSpec: String.raw`C:\Windows\System32\cmd.exe`,
+    }, "win32", (path) => path === shim);
+
+    expect(command).toEqual({
+      command: String.raw`C:\Windows\System32\cmd.exe`,
+      args: ["/d", "/s", "/c", String.raw`"C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`],
+      resolvedCodexBin: shim,
+    });
+  });
+
+  test("launches a Windows exe directly", () => {
+    const exe = String.raw`C:\Tools\codex.exe`;
+    const command = codexAppServerSpawnCommand(exe, {}, "win32", (path) => path === exe);
+
+    expect(command).toEqual({
+      command: exe,
+      args: ["app-server", "--listen", "stdio://"],
+      resolvedCodexBin: exe,
+    });
+  });
+
+  test("normalizes PowerShell npm shims to sibling cmd shims when available", () => {
+    const ps1 = String.raw`C:\Users\Admin\AppData\Roaming\npm\codex.ps1`;
+    const cmd = String.raw`C:\Users\Admin\AppData\Roaming\npm\codex.cmd`;
+    const command = codexAppServerSpawnCommand(ps1, {}, "win32", (path) => path === ps1 || path === cmd);
+
+    expect(command.command).toBe("cmd.exe");
+    expect(command.resolvedCodexBin).toBe(cmd);
+    expect(command.args[3]).toBe(String.raw`"C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`);
+  });
+
+  test("formats missing Codex diagnostics with Windows inspection hints", () => {
+    const error = new Error("spawn codex ENOENT") as Error & { code: string; path: string };
+    error.code = "ENOENT";
+    error.path = "codex";
+
+    const formatted = formatCodexSpawnError(error, "codex");
+
+    expect(formatted.message).toContain("Failed to start Codex app-server");
+    expect(formatted.message).toContain("where.exe codex");
+    expect(formatted.message).toContain("Get-Command codex");
+  });
+});
