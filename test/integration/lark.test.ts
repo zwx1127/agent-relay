@@ -171,9 +171,12 @@ describe("lark adapter", () => {
     await adapter.setMessageReaction("oc_chat", "om_1", "🤔");
 
     expect(channel.sent[0]).toEqual({ to: "oc_chat", input: { markdown: "hello" }, options: { replyTo: "om_parent" } });
-    expect(channel.sent[1]?.input).toMatchObject({ card: { schema: "2.0" } });
-    expect(JSON.stringify(channel.sent[1]?.input)).toContain("\"callback_data\":\"ar:s\"");
-    expect(channel.updated[0]).toMatchObject({ messageId: "om_2", card: { schema: "2.0" } });
+    const sentCard = expectLarkCard(channel.sent[1]?.input);
+    expectNoLarkCardFooter(sentCard);
+    expect(JSON.stringify(sentCard)).toContain("\"tag\":\"column_set\"");
+    expect(JSON.stringify(sentCard)).toContain("\"callback_data\":\"ar:s\"");
+    expect(channel.updated[0]).toMatchObject({ messageId: "om_2" });
+    expectNoLarkCardFooter(channel.updated[0]!.card);
     expect(channel.edited).toEqual([{ messageId: "om_1", text: "plain edit" }]);
     expect(channel.sent[2]?.input).toHaveProperty("image");
     expect(channel.sent[3]).toEqual({ to: "oc_chat", input: { text: "caption" }, options: { replyTo: "om_3" } });
@@ -201,7 +204,9 @@ describe("lark adapter", () => {
       ]] },
     })).resolves.toEqual({ messageId: "om_1" });
 
-    const payload = JSON.stringify(channel.sent[0]?.input);
+    const card = expectLarkCard(channel.sent[0]?.input);
+    expectNoLarkCardFooter(card);
+    const payload = JSON.stringify(card);
     expect(payload).toContain("**Done**");
     expect(payload).toContain("`src/app.ts`");
     expect(payload).toContain("\"type\":\"primary\"");
@@ -214,7 +219,8 @@ describe("lark adapter", () => {
       replyMarkup: { inline_keyboard: [] },
     });
 
-    expect(channel.updated.at(-1)).toMatchObject({ messageId: "om_1", card: { schema: "2.0" } });
+    expect(channel.updated.at(-1)).toMatchObject({ messageId: "om_1" });
+    expectNoLarkCardFooter(channel.updated.at(-1)!.card);
   });
 
   test("renders force reply prompts as Lark cards", async () => {
@@ -226,12 +232,24 @@ describe("lark adapter", () => {
       inputFieldPlaceholder: "repo name under WORKSPACE_ROOT",
     })).resolves.toEqual({ messageId: "om_1" });
 
-    const payload = JSON.stringify(channel.sent[0]?.input);
+    const card = expectLarkCard(channel.sent[0]?.input);
+    expectNoLarkCardFooter(card);
+    const payload = JSON.stringify(card);
     expect(payload).toContain("Reply to this message.");
     expect(payload).toContain("repo name under WORKSPACE_ROOT");
-    expect(channel.sent[0]?.input).toMatchObject({ card: { schema: "2.0" } });
   });
 });
+
+function expectLarkCard(input: SendInput | undefined): object {
+  expect(input).toMatchObject({ card: { schema: "2.0" } });
+  if (!input || !("card" in input)) throw new Error("expected Lark card input");
+  return input.card;
+}
+
+function expectNoLarkCardFooter(card: object): void {
+  expect(card).toMatchObject({ schema: "2.0" });
+  expect(card).not.toHaveProperty("footer");
+}
 
 function adapterWith(channel: FakeLarkChannel): LarkAdapter {
   return new LarkAdapter({

@@ -23,6 +23,16 @@ export function createLarkCard(text: string, options: LarkCardOptions = {}): obj
     });
   }
 
+  for (const row of options.replyMarkup?.inline_keyboard ?? []) {
+    if (row.length === 0) continue;
+    bodyElements.push({
+      tag: "column_set",
+      horizontal_spacing: "8px",
+      horizontal_align: "left",
+      columns: row.map(buttonColumn),
+    });
+  }
+
   return {
     schema: "2.0",
     config: {
@@ -31,11 +41,6 @@ export function createLarkCard(text: string, options: LarkCardOptions = {}): obj
     body: {
       elements: bodyElements,
     },
-    ...(options.replyMarkup && options.replyMarkup.inline_keyboard.length > 0 ? {
-      footer: {
-        elements: options.replyMarkup.inline_keyboard.flatMap((row) => row.map(buttonElement)),
-      },
-    } : {}),
   };
 }
 
@@ -60,6 +65,14 @@ function buttonElement(button: InlineKeyboardButton): object {
         },
       },
     ],
+  };
+}
+
+function buttonColumn(button: InlineKeyboardButton): object {
+  return {
+    tag: "column",
+    width: "auto",
+    elements: [buttonElement(button)],
   };
 }
 
