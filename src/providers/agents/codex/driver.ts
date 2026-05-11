@@ -441,6 +441,7 @@ export class CodexDriver implements AgentDriver {
       this.proc = spawn(command.command, command.args, {
         env,
         stdio: ["pipe", "pipe", "pipe"],
+        ...(command.windowsVerbatimArguments === undefined ? {} : { windowsVerbatimArguments: command.windowsVerbatimArguments }),
       });
     } catch (error) {
       this.proc = undefined;
@@ -833,7 +834,7 @@ export class CodexDriver implements AgentDriver {
     const details = [
       `Codex app-server exited with ${status}.`,
       this.recentServerStderrText() ? `Recent stderr:\n${this.recentServerStderrText()}` : undefined,
-      command ? `CODEX_BIN=${JSON.stringify(this.options.codexBin)}, resolved=${JSON.stringify(command.resolvedCodexBin)}, command=${JSON.stringify(command.command)}, args=${JSON.stringify(command.args)}` : undefined,
+      command ? `CODEX_BIN=${JSON.stringify(this.options.codexBin)}, resolved=${JSON.stringify(command.resolvedCodexBin)}, command=${JSON.stringify(command.command)}, args=${JSON.stringify(command.args)}, windowsVerbatimArguments=${JSON.stringify(command.windowsVerbatimArguments)}` : undefined,
     ].filter((part): part is string => Boolean(part));
     return new Error(details.join(" "));
   }

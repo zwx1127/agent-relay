@@ -8,6 +8,7 @@ describe("codex app-server spawn command", () => {
       args: ["app-server", "--listen", "stdio://"],
       resolvedCodexBin: "codex",
     });
+    expect(codexAppServerSpawnCommand("codex", {}, "linux").windowsVerbatimArguments).toBeUndefined();
   });
 
   test("resolves a Windows cmd shim from PATH and launches it through cmd.exe", () => {
@@ -22,6 +23,7 @@ describe("codex app-server spawn command", () => {
       command: String.raw`C:\Windows\System32\cmd.exe`,
       args: ["/d", "/s", "/c", String.raw`call "C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`],
       resolvedCodexBin: shim,
+      windowsVerbatimArguments: true,
     });
     expect(command.args[3]).not.toContain(String.raw`\"`);
     expect(command.args[3]).toStartWith("call ");
@@ -35,6 +37,7 @@ describe("codex app-server spawn command", () => {
       command: "cmd.exe",
       args: ["/d", "/s", "/c", String.raw`call "C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`],
       resolvedCodexBin: shim,
+      windowsVerbatimArguments: true,
     });
     expect(command.args[3]).not.toContain(String.raw`\"`);
   });
@@ -47,6 +50,7 @@ describe("codex app-server spawn command", () => {
       command: "cmd.exe",
       args: ["/d", "/s", "/c", String.raw`call "C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`],
       resolvedCodexBin: shim,
+      windowsVerbatimArguments: true,
     });
     expect(command.args[3]).not.toContain(String.raw`\"`);
   });
@@ -60,6 +64,7 @@ describe("codex app-server spawn command", () => {
       args: ["app-server", "--listen", "stdio://"],
       resolvedCodexBin: exe,
     });
+    expect(command.windowsVerbatimArguments).toBeUndefined();
   });
 
   test("normalizes PowerShell npm shims to sibling cmd shims when available", () => {
@@ -70,6 +75,7 @@ describe("codex app-server spawn command", () => {
     expect(command.command).toBe("cmd.exe");
     expect(command.resolvedCodexBin).toBe(cmd);
     expect(command.args[3]).toBe(String.raw`call "C:\Users\Admin\AppData\Roaming\npm\codex.cmd" app-server --listen stdio://`);
+    expect(command.windowsVerbatimArguments).toBe(true);
   });
 
   test("formats missing Codex diagnostics with Windows inspection hints", () => {

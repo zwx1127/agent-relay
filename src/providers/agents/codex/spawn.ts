@@ -7,6 +7,7 @@ export interface CodexSpawnCommand {
   command: string;
   args: string[];
   resolvedCodexBin: string;
+  windowsVerbatimArguments?: boolean;
 }
 
 type Env = Record<string, string | undefined>;
@@ -32,6 +33,7 @@ export function codexAppServerSpawnCommand(
       command: windowsEnvValue(env, "ComSpec") || "cmd.exe",
       args: ["/d", "/s", "/c", ["call", quoteCmdCommand(resolvedCodexBin), ...args.map(quoteCmdArg)].join(" ")],
       resolvedCodexBin,
+      windowsVerbatimArguments: true,
     };
   }
 
