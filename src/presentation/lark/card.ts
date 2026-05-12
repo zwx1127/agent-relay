@@ -29,6 +29,7 @@ export function createLarkCard(text: string, options: LarkCardOptions = {}): obj
     if (row.length === 0) continue;
     elements.push({
       tag: "action",
+      ...actionLayout(row),
       actions: row.map((button) => buttonElement(button, callbackNonce)),
     });
   }
@@ -59,6 +60,13 @@ function buttonElement(button: InlineKeyboardButton, callbackNonce: string): obj
       callback_data: button.callback_data,
     },
   };
+}
+
+function actionLayout(row: InlineKeyboardButton[]): { layout?: "bisected" | "trisection" | "flow" } {
+  if (row.length === 2) return { layout: "bisected" };
+  if (row.length === 3) return { layout: "trisection" };
+  if (row.length >= 4) return { layout: "flow" };
+  return {};
 }
 
 function cardCallbackNonce(): string {

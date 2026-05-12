@@ -343,6 +343,38 @@ describe("lark adapter", () => {
     expect(channel.removedReactions).toEqual([{ messageId: "om_1", emojiType: "DONE" }]);
   });
 
+  test("maps inline keyboard row widths to mobile-friendly Lark action layouts", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+
+    await adapter.sendMessage("oc_chat", "choose", {
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: "Refresh", callback_data: "ar:s" }],
+          [
+            { text: "Approve", callback_data: "ar:a:y" },
+            { text: "Deny", callback_data: "ar:a:n" },
+          ],
+          [
+            { text: "Workspaces", callback_data: "ar:w" },
+            { text: "Details", callback_data: "ar:status" },
+            { text: "Refresh", callback_data: "ar:s" },
+          ],
+          [
+            { text: "First", callback_data: "ar:p:t:0" },
+            { text: "Prev", callback_data: "ar:p:t:0" },
+            { text: "Next", callback_data: "ar:p:t:1" },
+            { text: "Last", callback_data: "ar:p:t:2" },
+          ],
+        ],
+      },
+    });
+
+    const actions = larkActionElements(expectLarkCard(channel.sent[0]?.input));
+    expect(actions.map((action) => action.layout)).toEqual([undefined, "bisected", "trisection", "flow"]);
+    expect(actions.map((action) => action.actions?.length)).toEqual([1, 2, 3, 4]);
+  });
+
   test("maps relay status reactions to Lark emoji types", async () => {
     const channel = new FakeLarkChannel();
     const adapter = adapterWith(channel);
@@ -441,6 +473,11 @@ function firstButtonValue(card: object): { callback_nonce?: string; callback_dat
   const buttonValue = action?.actions?.[0]?.value;
   if (!buttonValue || typeof buttonValue !== "object") throw new Error("expected button value");
   return buttonValue as { callback_nonce?: string; callback_data?: string };
+}
+
+function larkActionElements(card: object): Array<{ layout?: string; actions?: unknown[] }> {
+  const value = card as { elements?: Array<{ tag?: string; layout?: string; actions?: unknown[] }> };
+  return value.elements?.filter((element) => element.tag === "action") ?? [];
 }
 
 function adapterWith(channel: FakeLarkChannel, options: Partial<ConstructorParameters<typeof LarkAdapter>[0]> = {}): LarkAdapter {
