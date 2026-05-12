@@ -15,7 +15,7 @@ import { confirmMessage, formatWorkspacesMessage } from "./ui/messages.ts";
 import { consoleKeyboard, deleteWorkspaceConfirmKeyboard, workspaceIntroKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
 import { paginateWorkspaces } from "./ui/pagination.ts";
 import { parsePromptPayload } from "./ui/prompt-state.ts";
-import { code, textMessage, bold } from "./ui/text-parts.ts";
+import { code, messageWithTitle, textMessage, bold } from "./ui/text-parts.ts";
 import { formatHomeMessage } from "./ui/status-message.ts";
 import { renderTelegramText, type RenderedTelegramText } from "../presentation/telegram/text.ts";
 import type { RenderCallbackPageResult } from "./controller-types.ts";
@@ -37,6 +37,7 @@ export interface WorkspaceFlowDeps {
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
   editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: Omit<EditMessageTextOptions, "entities" | "parseMode">): Promise<void>;
   renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
+  renderStrictCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
 }
 
 export class WorkspaceFlow {
@@ -103,6 +104,7 @@ export class WorkspaceFlow {
   async selectWorkspaceFromToken(message: CallbackMessage, token: string): Promise<void> {
     const name = await this.workspaceNameForToken(token);
     const workspace = this.requireWorkspace(name);
+    await this.deps.renderStrictCallbackPage(message, messageWithTitle("Selecting workspace.", workspace.name), { inline_keyboard: [] });
     this.deps.store.bindConversation(message.conversationId, workspace.name);
     this.deps.logger.info("router.workspace_selected", { conversation_id: message.conversationId, workspace: workspace.name, path: workspace.path });
     await this.deps.ensureAgentStarted(message.conversationId, workspace, undefined, { resumePrevious: false });
@@ -122,6 +124,7 @@ export class WorkspaceFlow {
   async deleteWorkspaceCallback(message: CallbackMessage, token: string): Promise<void> {
     const name = await this.workspaceNameForToken(token);
     const workspace = this.requireWorkspace(name);
+    await this.deps.renderStrictCallbackPage(message, messageWithTitle("Deleting workspace.", workspace.name), { inline_keyboard: [] });
     const key = sessionKey(message.conversationId, workspace.name);
     await this.deps.finalizeSessionOutput(key);
     await this.deps.agent.stop(key).catch((error) => {
@@ -141,6 +144,7 @@ export class WorkspaceFlow {
 
   async stopFromCallback(message: CallbackMessage): Promise<void> {
     const workspace = this.requireCurrentWorkspace(message.conversationId);
+    await this.deps.renderStrictCallbackPage(message, messageWithTitle("Stopping session.", workspace.name), { inline_keyboard: [] });
     const key = sessionKey(message.conversationId, workspace.name);
     await this.deps.finalizeSessionOutput(key);
     await this.deps.agent.stop(key);
@@ -169,6 +173,7 @@ export class WorkspaceFlow {
   }
 
   async promptForWorkspaceName(message: CallbackMessage, pageIndex: number): Promise<void> {
+    await this.deps.renderStrictCallbackPage(message, messageWithTitle("Workspace name requested.", "Reply to the prompt below."), { inline_keyboard: [] });
     const result = await this.deps.sendRendered(message.conversationId, textMessage("Reply with the workspace name. Existing directories under WORKSPACE_ROOT are selected; missing names are created."), {
       forceReply: true,
       inputFieldPlaceholder: "repo name under WORKSPACE_ROOT",

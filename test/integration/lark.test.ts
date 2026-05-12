@@ -9,6 +9,7 @@ class FakeLarkChannel implements LarkChannelClient {
   disconnected = false;
   sent: Array<{ to: string; input: SendInput; options?: SendOptions }> = [];
   updateStarted: Array<{ messageId: string; card: object }> = [];
+  updateFailures: Error[] = [];
   updateWaits: Promise<void>[] = [];
   updated: Array<{ messageId: string; card: object }> = [];
   edited: Array<{ messageId: string; text: string }> = [];
@@ -41,6 +42,8 @@ class FakeLarkChannel implements LarkChannelClient {
 
   async updateCard(messageId: string, card: object): Promise<void> {
     this.updateStarted.push({ messageId, card });
+    const failure = this.updateFailures.shift();
+    if (failure) throw failure;
     const wait = this.updateWaits.shift();
     if (wait) await wait;
     this.updated.push({ messageId, card });
@@ -179,6 +182,33 @@ describe("lark adapter", () => {
     }]);
   });
 
+  test("waits for card action handling before resolving SDK handler", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+    const release = deferred<void>();
+    let settled = false;
+
+    await adapter.start(async () => {
+      await release.promise;
+    });
+    const handling = channel.handlers.cardAction?.({
+      messageId: "om_card",
+      chatId: "oc_chat",
+      operator: { openId: "ou_user" },
+      action: { tag: "button", value: { callback_data: "ar:s" } },
+    } satisfies CardActionEvent);
+    if (!handling) throw new Error("expected card action handler");
+    void handling.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+
+    expect(settled).toBe(false);
+    release.resolve();
+    await handling;
+    expect(settled).toBe(true);
+  });
+
   test("uses fresh callback nonces when cards are re-rendered", async () => {
     const channel = new FakeLarkChannel();
     const adapter = adapterWith(channel);
@@ -225,6 +255,24 @@ describe("lark adapter", () => {
       expect.stringContaining("first"),
       expect.stringContaining("second"),
     ]);
+  });
+
+  test("retries transient card update failures", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+    channel.updateFailures.push(new Error("temporary card patch failure"));
+
+    await adapter.sendMessage("oc_chat", "choose", {
+      replyMarkup: { inline_keyboard: [[{ text: "Refresh", callback_data: "ar:s" }]] },
+    });
+    await adapter.editMessageText("oc_chat", "recovered", {
+      messageId: "om_1",
+      replyMarkup: { inline_keyboard: [] },
+    });
+
+    expect(channel.updateStarted).toHaveLength(2);
+    expect(channel.updated).toHaveLength(1);
+    expect(JSON.stringify(channel.updated[0]!.card)).toContain("recovered");
   });
 
   test("times out a stuck card update without blocking later updates", async () => {

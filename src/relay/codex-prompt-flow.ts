@@ -45,6 +45,7 @@ export interface CodexPromptFlowDeps {
   adapter: Pick<ImAdapter, "capabilities">;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
   renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
+  renderStrictCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
   markActiveTask(sessionKey: string, status: "blocked" | "running", turnId?: string): Promise<void>;
 }
 
@@ -155,10 +156,10 @@ export class CodexPromptFlow {
     if (rawAction === "submit") {
       const selectedAnswer = typeof data.selectedAnswer === "string" ? data.selectedAnswer : undefined;
       if (!selectedAnswer) throw new Error("Question selection expired.");
+      await this.deps.renderStrictCallbackPage(message, answeredMessage(selectedAnswer), { inline_keyboard: [] });
       const response = await this.recordCodexAnswer(pending, data, [selectedAnswer]);
       if (response === "expired") return;
       if (!response) await this.sendNextCodexQuestion(message.conversationId, pending, data);
-      await this.deps.renderCallbackPage(message, answeredMessage(selectedAnswer), { inline_keyboard: [] });
       if (response) await this.respondToCodexPrompt(response);
       return;
     }
@@ -188,11 +189,11 @@ export class CodexPromptFlow {
       };
       const questionIndex = typeof data.questionIndex === "number" ? data.questionIndex : 0;
       const totalQuestions = typeof data.totalQuestions === "number" ? data.totalQuestions : 1;
+      await this.deps.renderStrictCallbackPage(message, formatCodexQuestion(question, questionIndex, totalQuestions), codexQuestionKeyboard(token, options, Boolean(data.isOther)));
       this.deps.store.setPendingPrompt({
         ...pending,
         payloadJson: JSON.stringify({ ...data, selectedAnswer: undefined, answerMode: undefined }),
       });
-      await this.deps.renderCallbackPage(message, formatCodexQuestion(question, questionIndex, totalQuestions), codexQuestionKeyboard(token, options, Boolean(data.isOther)));
       return;
     }
 
@@ -208,18 +209,18 @@ export class CodexPromptFlow {
     if (!answer) throw new Error("Question selection expired.");
 
     if (this.deps.store.getCollaborationMode(pending.sessionKey ?? "") === "plan") {
+      await this.deps.renderStrictCallbackPage(message, formatCodexSelectedAnswer(answer), codexQuestionConfirmKeyboard(token));
       this.deps.store.setPendingPrompt({
         ...pending,
         payloadJson: JSON.stringify({ ...data, selectedAnswer: answer }),
       });
-      await this.deps.renderCallbackPage(message, formatCodexSelectedAnswer(answer), codexQuestionConfirmKeyboard(token));
       return;
     }
 
+    await this.deps.renderStrictCallbackPage(message, answeredMessage(answer), { inline_keyboard: [] });
     const response = await this.recordCodexAnswer(pending, data, [answer]);
     if (response === "expired") return;
     if (!response) await this.sendNextCodexQuestion(message.conversationId, pending, data);
-    await this.deps.renderCallbackPage(message, answeredMessage(answer), { inline_keyboard: [] });
     if (response) await this.respondToCodexPrompt(response);
   }
 
@@ -229,14 +230,14 @@ export class CodexPromptFlow {
     data: Record<string, unknown>,
     selectedAnswer: string,
   ): Promise<void> {
-    this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-    await this.deps.renderCallbackPage(message, formatCodexSelectedAnswerSummary(selectedAnswer), { inline_keyboard: [] });
+    await this.deps.renderStrictCallbackPage(message, formatCodexSelectedAnswerSummary(selectedAnswer), { inline_keyboard: [] });
     const result = await this.deps.sendRendered(message.conversationId, formatCodexAnswerNotePrompt(), {
       forceReply: true,
       disableWebPagePreview: true,
       replyToMessageId: pending.promptMessageId,
     });
     if (!result.messageId) throw new Error("IM adapter did not return a note prompt message id.");
+    this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
     this.deps.store.setPendingPrompt({
       conversationId: message.conversationId,
       promptMessageId: result.messageId,
@@ -253,14 +254,14 @@ export class CodexPromptFlow {
     pending: PendingPrompt,
     data: Record<string, unknown>,
   ): Promise<void> {
-    this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-    await this.deps.renderCallbackPage(message, formatCodexSelectedAnswerSummary("Other"), { inline_keyboard: [] });
+    await this.deps.renderStrictCallbackPage(message, formatCodexSelectedAnswerSummary("Other"), { inline_keyboard: [] });
     const result = await this.deps.sendRendered(message.conversationId, messageWithTitle("Other answer", "Reply with the answer to use."), {
       forceReply: true,
       disableWebPagePreview: true,
       replyToMessageId: pending.promptMessageId,
     });
     if (!result.messageId) throw new Error("IM adapter did not return an other-answer prompt message id.");
+    this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
     this.deps.store.setPendingPrompt({
       conversationId: message.conversationId,
       promptMessageId: result.messageId,
@@ -350,8 +351,7 @@ export class CodexPromptFlow {
     }
     if (!pending.sessionKey || !this.deps.agent.respond) throw new Error("Approval session is missing.");
     const approved = decision === "y";
-    this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-    await this.deps.renderCallbackPage(
+    await this.deps.renderStrictCallbackPage(
       message,
       formatApprovalDecisionMessage(
         approved ? "Approved." : "Denied.",
@@ -360,13 +360,14 @@ export class CodexPromptFlow {
       ),
       { inline_keyboard: [] },
     );
+    this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
     await this.deps.agent.respond(pending.sessionKey, data.requestId as string | number, approvalResponse(data.approvalKind as AgentApprovalKind, approved, data.params));
     await this.deps.markActiveTask(pending.sessionKey, "running");
   }
 
   private async expireCallbackPrompt(message: CallbackMessage): Promise<void> {
     if (message.messageId) this.deps.store.deletePendingPrompt(message.conversationId, message.messageId);
-    await this.deps.renderCallbackPage(message, messageWithTitle("Question expired."), { inline_keyboard: [] });
+    await this.deps.renderStrictCallbackPage(message, messageWithTitle("Question expired."), { inline_keyboard: [] });
   }
 
   clearForSession(sessionKeyValue: string): void {

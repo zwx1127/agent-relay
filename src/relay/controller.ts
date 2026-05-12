@@ -83,6 +83,7 @@ export class RelayController {
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
       editRendered: (conversationId, rendered, options) => this.editRendered(conversationId, rendered, options),
       renderCallbackPage: (message, body, replyMarkup) => this.renderCallbackPage(message, body, replyMarkup),
+      renderStrictCallbackPage: (message, body, replyMarkup) => this.renderStrictCallbackPage(message, body, replyMarkup),
     });
     this.mediaRelay = new MediaRelayService({
       config: deps.config,
@@ -106,6 +107,7 @@ export class RelayController {
       adapter: deps.adapter,
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
       renderCallbackPage: (message, body, replyMarkup) => this.renderCallbackPage(message, body, replyMarkup),
+      renderStrictCallbackPage: (message, body, replyMarkup) => this.renderStrictCallbackPage(message, body, replyMarkup),
       markActiveTask: (sessionKeyValue, status, turnId) => this.markActiveTask(sessionKeyValue, status, turnId),
     });
     this.threadCommands = new ThreadCommandService({
@@ -122,6 +124,7 @@ export class RelayController {
       submitTask: (conversationId, text, userMessageId, preference, input) => this.submitTask(conversationId, text, userMessageId, preference, input),
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
       renderCallbackPage: (message, body, replyMarkup) => this.renderCallbackPage(message, body, replyMarkup),
+      renderStrictCallbackPage: (message, body, replyMarkup) => this.renderStrictCallbackPage(message, body, replyMarkup),
       expireCallbackPrompt: (message) => this.expireCallbackPrompt(message),
       clearCodexPromptsForSession: (sessionKeyValue) => this.clearCodexPromptsForSession(sessionKeyValue),
       hasTaskCreatedAfter: (conversationId, workspaceName, timestamp) => this.hasTaskCreatedAfter(conversationId, workspaceName, timestamp),
@@ -428,6 +431,20 @@ export class RelayController {
       const result = await this.sendRendered(message.conversationId, rendered, { replyMarkup });
       return { method: "send", messageId: result.messageId };
     }
+  }
+
+  private async renderStrictCallbackPage(
+    message: Extract<InboundMessage, { kind: "callback_query" }>,
+    body: string | RenderedTelegramText,
+    replyMarkup: InlineKeyboardMarkup,
+  ): Promise<RenderCallbackPageResult> {
+    const rendered = ensureRendered(body);
+    if (!message.messageId) throw new Error("Callback message is missing.");
+    await this.editRendered(message.conversationId, rendered, {
+      messageId: message.messageId,
+      replyMarkup,
+    });
+    return { method: "edit", messageId: message.messageId };
   }
 
   private async tryRenderCallbackPage(

@@ -42,6 +42,8 @@ type LarkEventHandlers = {
 
 const DEFAULT_CARD_UPDATE_TIMEOUT_MS = 10_000;
 const DEFAULT_CARD_ACTION_DEDUP_TTL_MS = 500;
+const CARD_UPDATE_MAX_ATTEMPTS = 3;
+const CARD_UPDATE_RETRY_DELAY_MS = 250;
 
 export interface LarkChannelClient {
   connect(): Promise<void>;
@@ -94,10 +96,10 @@ export class LarkAdapter implements ImAdapter {
     this.logger.info("lark.websocket_started");
     this.unsubscribe = this.channel.on({
       message: (message) => {
-        void this.handleChannelMessage(message, onMessage);
+        return this.handleChannelMessage(message, onMessage);
       },
       cardAction: (event) => {
-        void this.handleCardAction(event, onMessage);
+        return this.handleCardAction(event, onMessage);
       },
       error: (error) => {
         this.logger.error("lark.channel_error", { error });
@@ -253,7 +255,7 @@ export class LarkAdapter implements ImAdapter {
   private async updateCardMessage(messageId: string, card: object): Promise<void> {
     const previous = this.cardUpdateQueues.get(messageId) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(() => withTimeout(
-      this.channel.updateCard(messageId, card),
+      this.updateCardWithRetry(messageId, card),
       this.cardUpdateTimeoutMs,
       `Lark card update timed out after ${this.cardUpdateTimeoutMs}ms`,
     ));
@@ -269,6 +271,26 @@ export class LarkAdapter implements ImAdapter {
     } finally {
       if (this.cardUpdateQueues.get(messageId) === current) this.cardUpdateQueues.delete(messageId);
     }
+  }
+
+  private async updateCardWithRetry(messageId: string, card: object): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= CARD_UPDATE_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        await this.channel.updateCard(messageId, card);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt === CARD_UPDATE_MAX_ATTEMPTS) break;
+        this.logger.debug("lark.card_update_retrying", {
+          message_id: messageId,
+          attempt,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+        await sleep(CARD_UPDATE_RETRY_DELAY_MS);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
   private toInboundMessage(message: NormalizedMessage): InboundMessage | undefined {
@@ -347,6 +369,10 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) clearTimeout(timer);
   });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function callbackDataFromActionValue(value: unknown): string | undefined {

@@ -678,6 +678,29 @@ describe("relay controller", () => {
     expect(adapter.edited.at(-1)?.text).toContain("Plan action expired.");
   });
 
+  test("plan implement callback does not submit when original card edit fails", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/plan design this"));
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    agent.getStatus("codex:1:demo")!.activeTurnId = undefined;
+    const planMessage = adapter.sent.at(-1)!;
+    const planButton = planMessage.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Implement");
+    const sentCount = agent.sent.length;
+    adapter.failEditMessage = new Error("edit failed");
+
+    await router.handle(callbackMessage(planButton!.callback_data, 7, "cb-plan-edit-failed", planMessage.messageId));
+
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+    expect(agent.sent).toHaveLength(sentCount);
+    expect(store.getPendingPrompt("1", planMessage.messageId!)).toBeDefined();
+    expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-plan-edit-failed", text: "edit failed" });
+  });
+
   test("turn completion marks every active task for the turn done", async () => {
     const { router, store, root } = fixture();
     const path = join(root, "demo");
@@ -1370,6 +1393,27 @@ describe("relay controller", () => {
     expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb2", text: undefined });
   });
 
+  test("workspace selection does not switch binding when original card edit fails", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const first = join(root, "first");
+    const second = join(root, "second");
+    mkdirSync(first);
+    mkdirSync(second);
+    store.upsertWorkspace({ name: "first", path: first, createdAt: 1 });
+    store.upsertWorkspace({ name: "second", path: second, createdAt: 1 });
+    store.bindConversation(1, "first");
+
+    await router.handle(callbackMessage("ar:w"));
+    const button = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.find((row) => row.at(0)?.text === "second")?.at(1);
+    adapter.failEditMessage = new Error("edit failed");
+
+    await router.handle(callbackMessage(button!.callback_data, 7, "cb-workspace-edit-failed", adapter.edited.at(-1)?.options.messageId));
+
+    expect(store.getBinding(1)?.workspaceName).toBe("first");
+    expect(agent.getStatus("codex:1:second")).toBeUndefined();
+    expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-workspace-edit-failed", text: "edit failed" });
+  });
+
   test("workspaces callback discovers existing directories and uses short buttons", async () => {
     const { router, store, adapter, root } = fixture();
     const normal = join(root, "demo");
@@ -1642,6 +1686,49 @@ describe("relay controller", () => {
     ]);
   });
 
+  test("codex option question keeps pending state when callback card edit fails", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("ask mode"));
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "codex:1:demo",
+      requestId: 771,
+      questions: [{
+        id: "choice",
+        header: "Mode",
+        question: "Pick one.",
+        options: [{ label: "Fast", description: "Low detail" }],
+      }],
+    });
+
+    const prompt = adapter.sent.at(-1)!;
+    const fast = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
+    adapter.failEditMessage = new Error("card update failed");
+
+    await router.handle(callbackMessage(fast.callback_data, 7, "cb-fast-failed", prompt.messageId));
+
+    expect(agent.responses).toEqual([]);
+    expect(store.getPendingPrompt("1", prompt.messageId!)).toBeDefined();
+    expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-fast-failed", text: "card update failed" });
+
+    adapter.failEditMessage = undefined;
+    await router.handle(callbackMessage(fast.callback_data, 7, "cb-fast-retry", prompt.messageId));
+
+    expect(agent.responses).toEqual([{
+      key: "codex:1:demo",
+      requestId: 771,
+      result: { answers: { choice: { answers: ["Fast"] } } },
+    }]);
+    expect(store.getPendingPrompt("1", prompt.messageId!)).toBeUndefined();
+    expect(adapter.edited.at(-1)?.text).toContain("Answered");
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
+  });
+
   test("plan option question confirms selected answer before responding", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
@@ -1800,7 +1887,7 @@ describe("relay controller", () => {
     expect(agent.sent).toEqual([]);
   });
 
-  test("other answer prompt is not duplicated when original question edit falls back to send", async () => {
+  test("other answer prompt waits until original question card edit succeeds", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -1826,10 +1913,18 @@ describe("relay controller", () => {
     adapter.failEditMessage = new Error("edit failed");
     await router.handle(callbackMessage(other.callback_data, 7, "cb-other", prompt.messageId));
 
+    expect(adapter.sent.filter((message) => message.text.includes("Other answer"))).toHaveLength(0);
+    expect(adapter.sent.filter((message) => message.text === "Selected: Other")).toHaveLength(0);
+    expect(store.getPendingPrompt("1", prompt.messageId!)).toBeDefined();
+
+    adapter.failEditMessage = undefined;
+    await router.handle(callbackMessage(other.callback_data, 7, "cb-other-retry", prompt.messageId));
+
     expect(adapter.sent.filter((message) => message.text.includes("Other answer"))).toHaveLength(1);
-    expect(adapter.sent.filter((message) => message.text === "Selected: Other")).toHaveLength(1);
+    expect(adapter.edited.at(-1)?.text).toBe("Selected: Other");
     expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
     expect(adapter.sent.at(-1)?.options?.replyToMessageId).toBe(String(prompt.messageId));
+    expect(store.getPendingPrompt("1", prompt.messageId!)).toBeUndefined();
   });
 
   test("stale codex user input callback expires without responding", async () => {
