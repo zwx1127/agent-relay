@@ -86,10 +86,11 @@ export class WorkspaceFlow {
     const workspaces = await this.listAvailableWorkspaces();
     const selected = this.currentWorkspace(message.conversationId)?.name;
     const page = paginateWorkspaces(workspaces, selected, pageIndex);
-    await this.deps.renderCallbackPage(message, formatWorkspacesMessage(page.items.map((workspace) => ({
+    const result = await this.deps.renderCallbackPage(message, formatWorkspacesMessage(page.items.map((workspace) => ({
       name: workspace.name,
       selected: workspace.name === selected,
     })), page.pageIndex, page.totalPages), workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages));
+    this.trackControlMessage(message.conversationId, result);
   }
 
   async renderWorkspaceIntroCallback(message: CallbackMessage, token: string, pageIndex: number): Promise<void> {
@@ -98,7 +99,8 @@ export class WorkspaceFlow {
     const selected = this.currentWorkspace(message.conversationId)?.name === workspace.name;
     const safePageIndex = Number.isFinite(pageIndex) && pageIndex >= 0 ? Math.floor(pageIndex) : 0;
     const intro = await this.readWorkspaceIntro(workspace);
-    await this.deps.renderCallbackPage(message, formatWorkspaceIntroMessage(workspace, intro), workspaceIntroKeyboard(workspace, selected, safePageIndex));
+    const result = await this.deps.renderCallbackPage(message, formatWorkspaceIntroMessage(workspace, intro), workspaceIntroKeyboard(workspace, selected, safePageIndex));
+    this.trackControlMessage(message.conversationId, result);
   }
 
   async selectWorkspaceFromToken(message: CallbackMessage, token: string): Promise<void> {
@@ -114,11 +116,12 @@ export class WorkspaceFlow {
   async confirmDeleteWorkspaceCallback(message: CallbackMessage, token: string): Promise<void> {
     const name = await this.workspaceNameForToken(token);
     const workspace = this.requireWorkspace(name);
-    await this.deps.renderCallbackPage(
+    const result = await this.deps.renderCallbackPage(
       message,
       confirmMessage("Delete workspace?", `This permanently deletes ${workspace.path}.`),
       deleteWorkspaceConfirmKeyboard(workspace.name),
     );
+    this.trackControlMessage(message.conversationId, result);
   }
 
   async deleteWorkspaceCallback(message: CallbackMessage, token: string): Promise<void> {
@@ -159,7 +162,7 @@ export class WorkspaceFlow {
     const status = this.deps.statusView(message.conversationId);
     const mode = this.deps.store.getHomeStatusMode(message.conversationId);
     const result = await this.deps.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
-    if (result.messageId) this.deps.store.setConsoleMessageId(message.conversationId, result.messageId);
+    this.trackControlMessage(message.conversationId, result);
     this.deps.logger.info("router.workspace_home_rendered", {
       conversation_id: message.conversationId,
       message_id: message.messageId,
@@ -236,6 +239,7 @@ export class WorkspaceFlow {
         messageId: sourceMessageId,
         replyMarkup: workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages),
       });
+      this.deps.store.setConsoleMessageId(conversationId, sourceMessageId);
     } catch (error) {
       this.deps.logger.warn("router.workspace_prompt_source_refresh_failed", {
         conversation_id: conversationId,
@@ -243,6 +247,10 @@ export class WorkspaceFlow {
         error: error instanceof Error ? error : new Error(String(error)),
       });
     }
+  }
+
+  private trackControlMessage(conversationId: ConversationId, result: RenderCallbackPageResult): void {
+    if (result.messageId) this.deps.store.setConsoleMessageId(conversationId, result.messageId);
   }
 
   private async readWorkspaceIntro(workspace: WorkspaceRecord): Promise<string> {

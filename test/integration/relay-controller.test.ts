@@ -1449,6 +1449,30 @@ describe("relay controller", () => {
     expect(callbackData?.every((data) => new TextEncoder().encode(data).length <= 64)).toBe(true);
   });
 
+  test("workspace fallback card becomes the current control card", async () => {
+    const { router, store, adapter, root } = fixture();
+    mkdirSync(join(root, "demo"));
+
+    await router.handle(textMessage("/relay"));
+    const homeMessageId = adapter.sent.at(-1)?.messageId;
+    adapter.failEditMessage = new Error("card update timed out");
+
+    await router.handle(callbackMessage("ar:w", 7, "cb-workspaces-fallback", homeMessageId));
+
+    const fallbackMessageId = adapter.sent.at(-1)?.messageId;
+    expect(fallbackMessageId).not.toBe(homeMessageId);
+    expect(store.getConsoleMessageId(1)).toBe(String(fallbackMessageId));
+    expect(adapter.sent.at(-1)?.text).toContain("Workspaces");
+    expect(adapter.sent.at(-1)?.text).not.toContain("Stale Relay Home");
+
+    adapter.failEditMessage = undefined;
+    await router.handle(callbackMessage("ar:w", 7, "cb-workspaces-refresh", fallbackMessageId));
+
+    expect(adapter.edited.at(-1)?.options.messageId).toBe(fallbackMessageId);
+    expect(adapter.edited.at(-1)?.text).toContain("Workspaces");
+    expect(adapter.edited.at(-1)?.text).not.toContain("Stale Relay Home");
+  });
+
   test("new workspace reply refreshes source workspace list without opening Relay Home", async () => {
     const { router, store, adapter, agent, root } = fixture();
     mkdirSync(join(root, "existing"));
