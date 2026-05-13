@@ -496,29 +496,24 @@ function readableTextFromCard(card: object): CardReadbackDiagnostics {
 
 function readableTextFromElements(elements: unknown[]): string {
   const lines: string[] = [];
-  for (const element of elements) {
-    if (!element || typeof element !== "object") continue;
-    const record = element as Record<string, unknown>;
-    if (record.tag === "markdown" && typeof record.content === "string") {
-      lines.push(stripBasicMarkdown(record.content));
-    }
-    const actions = Array.isArray(record.actions) ? record.actions : [];
-    for (const action of actions) {
-      if (!action || typeof action !== "object") continue;
-      const text = recordValue(action, "text");
-      const content = stringValue(text, "content");
-      if (content) lines.push(content);
-    }
-  }
+  collectCardTextRecursive(elements, lines);
   return dedupeLines(lines).join("\n").trim();
 }
 
 function collectCardTextRecursive(value: unknown, lines: string[], seen = new Set<unknown>()): void {
   if (!value || typeof value !== "object" || seen.has(value)) return;
   seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) collectCardTextRecursive(item, lines, seen);
+    return;
+  }
   const record = value as Record<string, unknown>;
   if (record.tag === "markdown" && typeof record.content === "string") {
     lines.push(stripBasicMarkdown(record.content));
+  }
+  if (record.tag === "text") {
+    const text = stringValue(record, "text");
+    if (text) lines.push(text);
   }
   const text = recordValue(record, "text");
   const textContent = stringValue(text, "content");
