@@ -411,18 +411,25 @@ describe("lark adapter", () => {
     const sentCard = expectLarkCard(channel.sent[1]?.input);
     expectNoLarkCardFooter(sentCard);
     expect(sentCard).toMatchObject({
-      elements: [
-        { tag: "markdown", content: "choose" },
-        {
-          tag: "action",
-          actions: [{
-            tag: "button",
-            text: { tag: "plain_text", content: "Status" },
-            type: "default",
-            value: { callback_data: "ar:s" },
-          }],
-        },
-      ],
+      schema: "2.0",
+      body: {
+        elements: [
+          { tag: "markdown", content: "choose", text_size: "normal" },
+          {
+            tag: "column_set",
+            columns: [{
+              elements: [{
+                tag: "button",
+                text: { tag: "plain_text", content: "Status" },
+                type: "default",
+                size: "small",
+                width: "fill",
+                behaviors: [{ type: "callback", value: { callback_data: "ar:s" } }],
+              }],
+            }],
+          },
+        ],
+      },
     });
     expect(channel.updated[0]).toMatchObject({ messageId: "om_2" });
     expectNoLarkCardFooter(channel.updated[0]!.card);
@@ -437,7 +444,7 @@ describe("lark adapter", () => {
     expect(channel.removedReactions).toEqual([{ messageId: "om_1", emojiType: "DONE" }]);
   });
 
-  test("maps inline keyboard row widths to mobile-friendly Lark action layouts", async () => {
+  test("splits inline keyboard rows into mobile-friendly Lark button rows", async () => {
     const channel = new FakeLarkChannel();
     const adapter = adapterWith(channel);
 
@@ -464,9 +471,21 @@ describe("lark adapter", () => {
       },
     });
 
-    const actions = larkActionElements(expectLarkCard(channel.sent[0]?.input));
-    expect(actions.map((action) => action.layout)).toEqual([undefined, "bisected", "trisection", "flow"]);
-    expect(actions.map((action) => action.actions?.length)).toEqual([1, 2, 3, 4]);
+    const rows = larkButtonRows(expectLarkCard(channel.sent[0]?.input));
+    expect(rows.map((row) => row.length)).toEqual([1, 2, 2, 1, 2, 2]);
+    expect(rows.flat().map((button) => button.text?.content)).toEqual([
+      "Refresh",
+      "Approve",
+      "Deny",
+      "Workspaces",
+      "Details",
+      "Refresh",
+      "First",
+      "Prev",
+      "Next",
+      "Last",
+    ]);
+    expect(rows.flat().every((button) => button.size === "small" && button.width === "fill")).toBe(true);
   });
 
   test("maps relay status reactions to Lark emoji types", async () => {
@@ -574,28 +593,41 @@ function expectLarkCard(input: SendInput | undefined): object {
 
 function expectNoLarkCardFooter(card: object): void {
   expectLarkCardShape(card);
-  expect(card).not.toHaveProperty("schema");
-  expect(card).not.toHaveProperty("body");
   expect(card).not.toHaveProperty("footer");
 }
 
 function expectLarkCardShape(card: object): void {
-  const value = card as { config?: { wide_screen_mode?: boolean; update_multi?: boolean }; elements?: unknown };
-  expect(value.config).toEqual({ wide_screen_mode: true, update_multi: true });
-  expect(Array.isArray(value.elements)).toBe(true);
+  const value = card as { schema?: string; config?: { update_multi?: boolean; width_mode?: string }; body?: { elements?: unknown } };
+  expect(value.schema).toBe("2.0");
+  expect(value.config).toEqual({ update_multi: true, width_mode: "fill" });
+  expect(Array.isArray(value.body?.elements)).toBe(true);
 }
 
 function firstButtonValue(card: object): { callback_nonce?: string; callback_data?: string } {
-  const value = card as { elements?: Array<{ tag?: string; actions?: Array<{ value?: unknown }> }> };
-  const action = value.elements?.find((element) => element.tag === "action");
-  const buttonValue = action?.actions?.[0]?.value;
+  const buttonValue = firstLarkButton(card).behaviors?.find((behavior) => behavior.type === "callback")?.value;
   if (!buttonValue || typeof buttonValue !== "object") throw new Error("expected button value");
   return buttonValue as { callback_nonce?: string; callback_data?: string };
 }
 
-function larkActionElements(card: object): Array<{ layout?: string; actions?: unknown[] }> {
-  const value = card as { elements?: Array<{ tag?: string; layout?: string; actions?: unknown[] }> };
-  return value.elements?.filter((element) => element.tag === "action") ?? [];
+function firstLarkButton(card: object): LarkButtonElement {
+  const button = larkButtonRows(card).flat()[0];
+  if (!button) throw new Error("expected button");
+  return button;
+}
+
+function larkButtonRows(card: object): LarkButtonElement[][] {
+  const value = card as { body?: { elements?: Array<{ tag?: string; columns?: Array<{ elements?: LarkButtonElement[] }> }> } };
+  return value.body?.elements
+    ?.filter((element) => element.tag === "column_set")
+    .map((element) => element.columns?.flatMap((column) => column.elements?.filter((item) => item.tag === "button") ?? []) ?? []) ?? [];
+}
+
+interface LarkButtonElement {
+  tag?: string;
+  text?: { content?: string };
+  size?: string;
+  width?: string;
+  behaviors?: Array<{ type?: string; value?: unknown }>;
 }
 
 function adapterWith(channel: FakeLarkChannel, options: Partial<ConstructorParameters<typeof LarkAdapter>[0]> = {}): LarkAdapter {

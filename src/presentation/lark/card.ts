@@ -15,6 +15,8 @@ export function createLarkCard(text: string, options: LarkCardOptions = {}): obj
     {
       tag: "markdown",
       content: renderLarkMarkdown(text, options.entities),
+      text_align: "left",
+      text_size: "normal",
     },
   ];
 
@@ -22,24 +24,29 @@ export function createLarkCard(text: string, options: LarkCardOptions = {}): obj
     elements.push({
       tag: "markdown",
       content: replyPromptMarkdown(options.inputFieldPlaceholder),
+      text_align: "left",
+      text_size: "normal",
     });
   }
 
   for (const row of options.replyMarkup?.inline_keyboard ?? []) {
     if (row.length === 0) continue;
-    elements.push({
-      tag: "action",
-      ...actionLayout(row),
-      actions: row.map((button) => buttonElement(button, callbackNonce)),
-    });
+    for (const group of buttonRowGroups(row)) {
+      elements.push(buttonRowElement(group, callbackNonce));
+    }
   }
 
   return {
+    schema: "2.0",
     config: {
-      wide_screen_mode: true,
       update_multi: true,
+      width_mode: "fill",
     },
-    elements,
+    body: {
+      direction: "vertical",
+      padding: "12px 12px 12px 12px",
+      elements,
+    },
   };
 }
 
@@ -56,18 +63,40 @@ function buttonElement(button: InlineKeyboardButton, callbackNonce: string): obj
       content: button.text,
     },
     type: buttonType(button.text),
-    value: {
-      callback_nonce: callbackNonce,
-      callback_data: button.callback_data,
-    },
+    width: "fill",
+    size: "small",
+    behaviors: [{
+      type: "callback",
+      value: {
+        callback_nonce: callbackNonce,
+        callback_data: button.callback_data,
+      },
+    }],
   };
 }
 
-function actionLayout(row: InlineKeyboardButton[]): { layout?: "bisected" | "trisection" | "flow" } {
-  if (row.length === 2) return { layout: "bisected" };
-  if (row.length === 3) return { layout: "trisection" };
-  if (row.length >= 4) return { layout: "flow" };
-  return {};
+function buttonRowElement(row: InlineKeyboardButton[], callbackNonce: string): object {
+  return {
+    tag: "column_set",
+    horizontal_spacing: "8px",
+    horizontal_align: "left",
+    columns: row.map((button) => ({
+      tag: "column",
+      width: "weighted",
+      weight: 1,
+      padding: "0px 0px 0px 0px",
+      vertical_spacing: "8px",
+      elements: [buttonElement(button, callbackNonce)],
+    })),
+  };
+}
+
+function buttonRowGroups(row: InlineKeyboardButton[]): InlineKeyboardButton[][] {
+  const groups: InlineKeyboardButton[][] = [];
+  for (let index = 0; index < row.length; index += 2) {
+    groups.push(row.slice(index, index + 2));
+  }
+  return groups;
 }
 
 function cardCallbackNonce(): string {
