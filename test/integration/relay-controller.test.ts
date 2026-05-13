@@ -1101,6 +1101,34 @@ describe("relay controller", () => {
     expect(adapter.edited.at(-1)?.text).toContain("Question expired.");
   });
 
+  test("/interrupt clears stale waiting approval state without an active turn", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    const status = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
+    status.waitingForApproval = true;
+    const task = store.createTask({ conversationId: 1, workspaceName: "demo", text: "run tests", status: "blocked", userMessageId: 88 });
+    store.setPendingPrompt({
+      conversationId: "1",
+      promptMessageId: 101,
+      kind: "codex_approval",
+      createdAt: 1,
+      sessionKey: "codex:1:demo",
+      payloadJson: JSON.stringify({ token: "tok", requestId: 91, approvalKind: "command" }),
+      expiresAt: 1,
+    });
+
+    await router.handle(textMessage("/interrupt"));
+
+    expect(agent.interrupted).toEqual([{ key: "codex:1:demo" }]);
+    expect(agent.getStatus("codex:1:demo")?.waitingForApproval).toBe(false);
+    expect(store.getPendingPrompt("1", 101)).toBeUndefined();
+    expect(store.getTask(task.id)?.status).toBe("interrupted");
+    expect(adapter.sent.at(-1)?.text).toContain("Cleared stale Relay state.");
+  });
+
   test("queued prompt updates the user message reaction", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
@@ -2018,6 +2046,33 @@ describe("relay controller", () => {
     await router.handle(callbackMessage("ar:q:old:0:0"));
 
     expect(adapter.edited.at(-1)?.text).toContain("Question expired.");
+    expect(adapter.edited.at(-1)?.text).toContain("/interrupt");
+  });
+
+  test("expired codex question callback tells the user how to recover", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "codex:1:demo",
+      requestId: "req1",
+      questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [{ label: "Fast", description: "Quick" }] }],
+    });
+    const prompt = adapter.sent.at(-1)!;
+    const pending = store.getPendingPrompt("1", prompt.messageId!)!;
+    store.setPendingPrompt({ ...pending, expiresAt: 1 });
+    const option = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
+
+    await router.handle(callbackMessage(option.callback_data, 7, "cb-expired-question", prompt.messageId));
+
+    expect(agent.responses).toEqual([]);
+    expect(store.getPendingPrompt("1", prompt.messageId!)).toBeUndefined();
+    expect(adapter.edited.at(-1)?.text).toContain("Question expired.");
+    expect(adapter.edited.at(-1)?.text).toContain("/interrupt");
   });
 
   test("codex free text question uses ForceReply and reply is not forwarded as prompt", async () => {
@@ -2059,6 +2114,7 @@ describe("relay controller", () => {
 
     expect(agent.sent).toEqual([]);
     expect(adapter.sent.at(-1)?.text).toContain("Codex is waiting for your answer.");
+    expect(adapter.sent.at(-1)?.text).toContain("/interrupt");
   });
 
   test("ordinary text is not forwarded while Codex waits for approval", async () => {
@@ -2074,6 +2130,7 @@ describe("relay controller", () => {
 
     expect(agent.sent).toEqual([]);
     expect(adapter.sent.at(-1)?.text).toContain("Codex is waiting for approval.");
+    expect(adapter.sent.at(-1)?.text).toContain("/interrupt");
   });
 
   test("codex multi-question request waits for all answers", async () => {
@@ -2130,7 +2187,8 @@ describe("relay controller", () => {
     await router.handle(textMessage("late answer", 7, 501));
 
     expect(agent.responses).toEqual([]);
-    expect(adapter.sent.at(-1)?.text).toBe("Question expired.");
+    expect(adapter.sent.at(-1)?.text).toContain("Question expired.");
+    expect(adapter.sent.at(-1)?.text).toContain("/interrupt");
   });
 
   test("codex command approval sends button decision", async () => {
@@ -2169,6 +2227,40 @@ describe("relay controller", () => {
       { conversationId: "1", messageId: "1", emoji: "🤔" },
       { conversationId: "1", messageId: "1", emoji: "✍" },
     ]);
+  });
+
+  test("expired codex command approval denies the action and resumes the blocked task", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("run tests"));
+
+    await router.handleAgentOutput({
+      type: "approval_request",
+      sessionKey: "codex:1:demo",
+      requestId: 91,
+      method: "item/commandExecution/requestApproval",
+      approvalKind: "command",
+      title: "Approve command?",
+      body: "Run tests",
+      params: { command: "bun test" },
+      turnId: "turn-1",
+    });
+    const prompt = adapter.sent.at(-1)!;
+    const pending = store.getPendingPrompt("1", prompt.messageId!)!;
+    store.setPendingPrompt({ ...pending, expiresAt: 1 });
+    const approve = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
+
+    await router.handle(callbackMessage(approve.callback_data, 7, "cb-expired-approval", prompt.messageId));
+
+    expect(agent.responses).toEqual([{ key: "codex:1:demo", requestId: 91, result: { decision: "decline" } }]);
+    expect(store.getPendingPrompt("1", prompt.messageId!)).toBeUndefined();
+    expect(store.getTask(1)?.status).toBe("running");
+    expect(adapter.edited.at(-1)?.text).toContain("Approval expired.");
+    expect(adapter.edited.at(-1)?.text).toContain("denied");
+    expect(adapter.reactions.at(-1)).toEqual({ conversationId: "1", messageId: "1", emoji: "✍" });
   });
 });
 

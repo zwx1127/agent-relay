@@ -23,7 +23,7 @@ import {
   formatCodexSelectedAnswer,
   formatCodexSelectedAnswerSummary,
 } from "./ui/messages.ts";
-import { messageWithTitle, textMessage } from "./ui/text-parts.ts";
+import { messageWithTitle } from "./ui/text-parts.ts";
 import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
 import type { RenderCallbackPageResult } from "./controller-types.ts";
 
@@ -149,7 +149,7 @@ export class CodexPromptFlow {
     const pending = message.messageId ? this.deps.store.getPendingPrompt(message.conversationId, message.messageId) : undefined;
     const data = parsePromptPayload(pending?.payloadJson);
     if (!pending || pending.kind !== "codex_user_input" || !data || data.token !== token || isExpired(pending)) {
-      await this.expireCallbackPrompt(message);
+      await this.expireQuestionPrompt(message);
       return;
     }
 
@@ -297,7 +297,7 @@ export class CodexPromptFlow {
     const data = parsePromptPayload(pending?.payloadJson);
     if (!pending || pending.kind !== "codex_user_input" || !data || isExpired(pending)) {
       this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
-      await this.deps.sendRendered(conversationId, textMessage("Question expired."));
+      await this.deps.sendRendered(conversationId, expiredQuestionMessage());
       return;
     }
     const selectedAnswer = typeof data.selectedAnswer === "string" ? data.selectedAnswer : undefined;
@@ -323,7 +323,7 @@ export class CodexPromptFlow {
     const request = this.codexRequests.get(codexRequestKey(pending.sessionKey, requestId));
     if (!request) {
       this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-      await this.deps.sendRendered(pending.conversationId, textMessage("Question expired."));
+      await this.deps.sendRendered(pending.conversationId, expiredQuestionMessage());
       return "expired";
     }
 
@@ -346,7 +346,7 @@ export class CodexPromptFlow {
     const pending = message.messageId ? this.deps.store.getPendingPrompt(message.conversationId, message.messageId) : undefined;
     const data = parsePromptPayload(pending?.payloadJson);
     if (!pending || pending.kind !== "codex_approval" || !data || data.token !== token || isExpired(pending)) {
-      await this.expireCallbackPrompt(message);
+      await this.expireApprovalPrompt(message, pending, data);
       return;
     }
     if (!pending.sessionKey || !this.deps.agent.respond) throw new Error("Approval session is missing.");
@@ -365,9 +365,41 @@ export class CodexPromptFlow {
     await this.deps.markActiveTask(pending.sessionKey, "running");
   }
 
-  private async expireCallbackPrompt(message: CallbackMessage): Promise<void> {
+  private async expireQuestionPrompt(message: CallbackMessage): Promise<void> {
     if (message.messageId) this.deps.store.deletePendingPrompt(message.conversationId, message.messageId);
-    await this.deps.renderStrictCallbackPage(message, messageWithTitle("Question expired."), { inline_keyboard: [] });
+    await this.deps.renderStrictCallbackPage(message, expiredQuestionMessage(), { inline_keyboard: [] });
+  }
+
+  private async expireApprovalPrompt(
+    message: CallbackMessage,
+    pending: PendingPrompt | undefined,
+    data: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    if (message.messageId) this.deps.store.deletePendingPrompt(message.conversationId, message.messageId);
+    const agent = this.deps.agent;
+    const sessionKeyValue = pending?.sessionKey;
+    if (sessionKeyValue && data && data.requestId !== undefined && typeof data.approvalKind === "string" && agent.respond) {
+      await this.deps.renderStrictCallbackPage(
+        message,
+        messageWithTitle(
+          "Approval expired.",
+          "The blocked action was denied. Resend the instruction if you still want Codex to continue.",
+        ),
+        { inline_keyboard: [] },
+      );
+      await agent.respond(
+        sessionKeyValue,
+        data.requestId as string | number,
+        approvalResponse(data.approvalKind as AgentApprovalKind, false, data.params),
+      );
+      await this.deps.markActiveTask(sessionKeyValue, "running");
+      return;
+    }
+    await this.deps.renderStrictCallbackPage(
+      message,
+      messageWithTitle("Approval expired.", "Send /interrupt to stop the blocked turn, then resend your instruction."),
+      { inline_keyboard: [] },
+    );
   }
 
   clearForSession(sessionKeyValue: string): void {
@@ -376,4 +408,8 @@ export class CodexPromptFlow {
       if (key.startsWith(`${sessionKeyValue}:`)) this.codexRequests.delete(key);
     }
   }
+}
+
+function expiredQuestionMessage(): RenderedTelegramText {
+  return messageWithTitle("Question expired.", "Send /interrupt to stop the blocked turn, then resend your instruction.");
 }

@@ -237,11 +237,11 @@ export class TaskCoordinator {
 
   async sendWaitingPromptNotice(conversationId: ConversationId, status: AgentSessionStatus): Promise<boolean> {
     if (status.waitingForUserInput) {
-      await this.deps.sendRendered(conversationId, messageWithTitle("Codex is waiting for your answer.", "Open the latest question card or reply to it. New prompts are paused while the active turn is blocked."));
+      await this.deps.sendRendered(conversationId, messageWithTitle("Codex is waiting for your answer.", "Open the latest question card or reply to it. If the question expired, send /interrupt and resend your instruction."));
       return true;
     }
     if (status.waitingForApproval) {
-      await this.deps.sendRendered(conversationId, messageWithTitle("Codex is waiting for approval.", "Use the approval buttons before sending another instruction."));
+      await this.deps.sendRendered(conversationId, messageWithTitle("Codex is waiting for approval.", "Use the approval buttons before sending another instruction. If the approval expired, tap the old button to deny it or send /interrupt."));
       return true;
     }
     return false;

@@ -260,7 +260,8 @@ export class ThreadCommandService {
     const workspace = this.deps.requireCurrentWorkspace(conversationId);
     const key = sessionKey(conversationId, workspace.name);
     const status = this.deps.agent.getStatus(key);
-    if (!status?.running || !status.activeTurnId) {
+    const blockedOnPrompt = Boolean(status?.waitingForApproval || status?.waitingForUserInput);
+    if (!status?.running || (!status.activeTurnId && !blockedOnPrompt)) {
       await this.deps.sendRendered(conversationId, messageWithTitle("No active Codex turn to interrupt."));
       return;
     }
@@ -279,6 +280,23 @@ export class ThreadCommandService {
         await this.deps.interruptActiveTasks(key);
       }
       this.deps.logger.info("router.stale_turn_interrupt_recovered", {
+        conversation_id: conversationId,
+        workspace: workspace.name,
+        session_key: key,
+        turn_id: result.turnId,
+        mode: mode || "current",
+      });
+      await this.deps.sendRendered(conversationId, messageWithTitle("No active Codex turn remained.", "Cleared stale Relay state."));
+      return;
+    }
+    if (!result.interrupted && blockedOnPrompt) {
+      this.deps.clearCodexPromptsForSession(key);
+      if (mode === "all") {
+        await this.deps.interruptTasksByStatus(key, ["waiting", "queued", "running", "blocked"]);
+      } else {
+        await this.deps.interruptActiveTasks(key);
+      }
+      this.deps.logger.info("router.blocked_turn_interrupt_recovered", {
         conversation_id: conversationId,
         workspace: workspace.name,
         session_key: key,

@@ -144,7 +144,13 @@ export class FakeAgent implements AgentDriver {
       status.waitingForUserInput = false;
       return { interrupted: false, turnId, stale: true };
     }
-    if (!status || !turnId) return { interrupted: false };
+    if (!status || !turnId) {
+      if (status) {
+        status.waitingForApproval = false;
+        status.waitingForUserInput = false;
+      }
+      return { interrupted: false };
+    }
     status.activeTurnId = undefined;
     status.waitingForApproval = false;
     status.waitingForUserInput = false;
@@ -157,6 +163,11 @@ export class FakeAgent implements AgentDriver {
 
   async respond(key: string, requestId: string | number, result: unknown): Promise<void> {
     this.responses.push({ key, requestId, result });
+    const status = this.statuses.get(key);
+    if (status) {
+      status.waitingForApproval = false;
+      status.waitingForUserInput = false;
+    }
   }
 
   async runBuiltinCommand(key: string, command: AgentBuiltinCommand): Promise<AgentBuiltinResult> {

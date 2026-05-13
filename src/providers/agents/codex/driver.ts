@@ -308,8 +308,13 @@ export class CodexDriver implements AgentDriver {
     return { interrupted: true, turnId };
   }
 
-  async respond(_sessionKey: string, requestId: string | number, result: unknown): Promise<void> {
+  async respond(sessionKey: string, requestId: string | number, result: unknown): Promise<void> {
     await this.writeMessage({ id: requestId, result });
+    const running = this.sessions.get(sessionKey);
+    if (running) {
+      running.status.waitingForApproval = false;
+      running.status.waitingForUserInput = false;
+    }
   }
 
   async runBuiltinCommand(key: string, command: AgentBuiltinCommand): Promise<AgentBuiltinResult> {
