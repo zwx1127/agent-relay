@@ -262,16 +262,25 @@ export class LarkAdapter implements ImAdapter {
       messageId: event.messageId,
       data,
     };
-    try {
-      await onMessage(inbound);
-    } catch (error) {
-      this.logger.error("lark.card_action_handler_failed", {
-        message_id: event.messageId,
-        conversation_id: event.chatId,
-        user_id: event.operator.openId,
-        error: error instanceof Error ? error : new Error(String(error)),
+    this.logger.info("lark.card_action_dispatched", {
+      message_id: event.messageId,
+      conversation_id: event.chatId,
+      user_id: event.operator.openId,
+      action_tag: event.action.tag,
+      callback_data: data,
+      callback_nonce: callbackNonceFromActionValue(event.action.value),
+    });
+    setTimeout(() => {
+      void onMessage(inbound).catch((error) => {
+        this.logger.error("lark.card_action_handler_failed", {
+          message_id: event.messageId,
+          conversation_id: event.chatId,
+          user_id: event.operator.openId,
+          callback_data: data,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
       });
-    }
+    }, 0);
   }
 
   private async updateCardMessage(messageId: string, card: object, diagnostics: CardUpdateDiagnostics): Promise<void> {
@@ -635,6 +644,13 @@ function callbackDataFromActionValue(value: unknown): string | undefined {
   const record = value as Record<string, unknown>;
   const data = record.callback_data ?? record.callbackData;
   return typeof data === "string" && data.length > 0 ? data : undefined;
+}
+
+function callbackNonceFromActionValue(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const nonce = record.callback_nonce ?? record.callbackNonce;
+  return typeof nonce === "string" && nonce.length > 0 ? nonce : undefined;
 }
 
 function resourceToPhoto(resource: ResourceDescriptor): InboundMediaFile {

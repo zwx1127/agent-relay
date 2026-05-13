@@ -210,6 +210,7 @@ describe("lark adapter", () => {
       operator: { openId: "ou_user" },
       action: { tag: "button", value: { callback_nonce: "nonce-1", callback_data: "ar:s" } },
     } satisfies CardActionEvent);
+    await waitUntil(() => received.length === 1);
 
     expect(received).toEqual([{
       kind: "callback_query",
@@ -222,14 +223,15 @@ describe("lark adapter", () => {
     }]);
   });
 
-  test("waits for card action handling before resolving SDK handler", async () => {
+  test("releases card action SDK handler before async relay handling completes", async () => {
     const channel = new FakeLarkChannel();
     const adapter = adapterWith(channel);
     const release = deferred<void>();
-    let settled = false;
+    let completed = false;
 
     await adapter.start(async () => {
       await release.promise;
+      completed = true;
     });
     const handling = channel.handlers.cardAction?.({
       messageId: "om_card",
@@ -238,15 +240,36 @@ describe("lark adapter", () => {
       action: { tag: "button", value: { callback_data: "ar:s" } },
     } satisfies CardActionEvent);
     if (!handling) throw new Error("expected card action handler");
-    void handling.then(() => {
-      settled = true;
-    });
-    await Promise.resolve();
 
-    expect(settled).toBe(false);
-    release.resolve();
     await handling;
-    expect(settled).toBe(true);
+    expect(completed).toBe(false);
+    release.resolve();
+    await waitUntil(() => completed);
+  });
+
+  test("logs asynchronous card action handling failures", async () => {
+    const channel = new FakeLarkChannel();
+    const logLines: string[] = [];
+    const logger = new TextLogger("info", (line) => logLines.push(line), () => new Date("2026-05-13T03:24:22.000Z"));
+    const adapter = adapterWith(channel, { logger });
+
+    await adapter.start(async () => {
+      throw new Error("callback failed");
+    });
+    await channel.handlers.cardAction?.({
+      messageId: "om_card",
+      chatId: "oc_chat",
+      operator: { openId: "ou_user" },
+      action: { tag: "button", value: { callback_nonce: "nonce-1", callback_data: "ar:s" } },
+    } satisfies CardActionEvent);
+    await waitUntil(() => logLines.some((line) => line.includes("lark.card_action_handler_failed")));
+
+    const logs = logLines.join("\n");
+    expect(logs).toContain("lark.card_action_dispatched");
+    expect(logs).toContain('callback_data="ar:s"');
+    expect(logs).toContain('callback_nonce="nonce-1"');
+    expect(logs).toContain("lark.card_action_handler_failed");
+    expect(logs).toContain('error="callback failed"');
   });
 
   test("uses fresh callback nonces when cards are re-rendered", async () => {
@@ -686,6 +709,14 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T | PromiseLike<
     reject = promiseReject;
   });
   return { promise, resolve, reject };
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) throw new Error("timed out waiting for condition");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 function normalizedMessage(overrides: Partial<NormalizedMessage>): NormalizedMessage {
