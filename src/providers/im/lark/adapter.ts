@@ -47,6 +47,16 @@ interface CardUpdateDiagnostics {
   textLength: number;
 }
 
+type LarkRawClient = {
+  im?: {
+    v1?: {
+      message?: {
+        get(input: { path: { message_id: string } }): Promise<unknown>;
+      };
+    };
+  };
+};
+
 const DEFAULT_CARD_UPDATE_TIMEOUT_MS = 10_000;
 const DEFAULT_CARD_ACTION_DEDUP_TTL_MS = 500;
 const CARD_UPDATE_MAX_ATTEMPTS = 3;
@@ -279,6 +289,7 @@ export class LarkAdapter implements ImAdapter {
         content_hash: diagnostics.contentHash,
         text_len: diagnostics.textLength,
       });
+      await this.verifyCardUpdate(messageId, diagnostics);
     });
     this.cardUpdateQueues.set(messageId, current);
     try {
@@ -315,6 +326,49 @@ export class LarkAdapter implements ImAdapter {
       }
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  private async verifyCardUpdate(messageId: string, diagnostics: CardUpdateDiagnostics): Promise<void> {
+    const getMessage = channelMessageGetter(this.channel);
+    if (!getMessage) {
+      this.logger.debug("lark.card_update_verify_skipped", {
+        message_id: messageId,
+        reason: "message_get_unavailable",
+      });
+      return;
+    }
+
+    try {
+      const result = await getMessage(messageId);
+      const content = messageContentFromGetResult(result);
+      if (!content) {
+        this.logger.warn("lark.card_update_verify_unavailable", {
+          message_id: messageId,
+          target_view: diagnostics.targetView,
+          content_hash: diagnostics.contentHash,
+          reason: "message_content_missing",
+        });
+        return;
+      }
+      const postUpdateText = readableTextFromMessageContent(content);
+      const postUpdateTargetView = cardTargetView(postUpdateText);
+      this.logger.info("lark.card_update_verified", {
+        message_id: messageId,
+        target_view: diagnostics.targetView,
+        content_hash: diagnostics.contentHash,
+        post_update_target_view: postUpdateTargetView,
+        post_update_content_hash: contentHash({ content }),
+        post_update_text_len: postUpdateText.length,
+        post_update_matches_target: postUpdateTargetView === diagnostics.targetView,
+      });
+    } catch (error) {
+      this.logger.warn("lark.card_update_verify_failed", {
+        message_id: messageId,
+        target_view: diagnostics.targetView,
+        content_hash: diagnostics.contentHash,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
   }
 
   private toInboundMessage(message: NormalizedMessage): InboundMessage | undefined {
@@ -386,6 +440,50 @@ function shouldSendCard(options: SendMessageOptions): boolean {
   return Boolean(options.replyMarkup || options.forceReply || options.entities?.length || options.disableWebPagePreview);
 }
 
+function channelMessageGetter(channel: LarkChannelClient): ((messageId: string) => Promise<unknown>) | undefined {
+  const rawClient = (channel as LarkChannelClient & { rawClient?: LarkRawClient }).rawClient;
+  const messageApi = rawClient?.im?.v1?.message;
+  const get = messageApi?.get;
+  if (typeof get !== "function") return undefined;
+  return (messageId) => get.call(messageApi, { path: { message_id: messageId } });
+}
+
+function messageContentFromGetResult(result: unknown): string | undefined {
+  const data = recordValue(result, "data");
+  const items = arrayValue(data, "items");
+  const item = items?.[0] ?? data;
+  const body = recordValue(item, "body");
+  const content = stringValue(body, "content") ?? stringValue(item, "content");
+  return content && content.trim().length > 0 ? content : undefined;
+}
+
+function readableTextFromMessageContent(content: string): string {
+  const parsed = safeJsonParse(content);
+  if (!parsed || typeof parsed !== "object") return content;
+  const cardText = readableTextFromCard(parsed);
+  return cardText.length > 0 ? cardText : content;
+}
+
+function readableTextFromCard(card: object): string {
+  const elements = Array.isArray((card as { elements?: unknown }).elements) ? (card as { elements: unknown[] }).elements : [];
+  const lines: string[] = [];
+  for (const element of elements) {
+    if (!element || typeof element !== "object") continue;
+    const record = element as Record<string, unknown>;
+    if (record.tag === "markdown" && typeof record.content === "string") {
+      lines.push(stripBasicMarkdown(record.content));
+    }
+    const actions = Array.isArray(record.actions) ? record.actions : [];
+    for (const action of actions) {
+      if (!action || typeof action !== "object") continue;
+      const text = recordValue(action, "text");
+      const content = stringValue(text, "content");
+      if (content) lines.push(content);
+    }
+  }
+  return lines.join("\n").trim();
+}
+
 function cardUpdateDiagnostics(text: string, options: SendMessageOptions): CardUpdateDiagnostics {
   return {
     targetView: cardTargetView(text),
@@ -402,7 +500,7 @@ function cardUpdateDiagnostics(text: string, options: SendMessageOptions): CardU
 }
 
 function cardTargetView(text: string): string {
-  const firstLine = text.split(/\r?\n/, 1)[0]?.trim().toLowerCase() ?? "";
+  const firstLine = stripBasicMarkdown(text.split(/\r?\n/, 1)[0] ?? "").trim().toLowerCase();
   if (firstLine === "relay home") return "home";
   if (firstLine === "workspaces") return "workspaces";
   if (firstLine === "workspace") return "workspace_intro";
@@ -416,6 +514,36 @@ function cardTargetView(text: string): string {
 
 function contentHash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
+}
+
+function stripBasicMarkdown(value: string): string {
+  return value.replace(/\*\*/g, "").replace(/`/g, "");
+}
+
+function safeJsonParse(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function recordValue(value: unknown, key: string): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const child = (value as Record<string, unknown>)[key];
+  return child && typeof child === "object" ? child as Record<string, unknown> : undefined;
+}
+
+function arrayValue(value: unknown, key: string): unknown[] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const child = (value as Record<string, unknown>)[key];
+  return Array.isArray(child) ? child : undefined;
+}
+
+function stringValue(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const child = (value as Record<string, unknown>)[key];
+  return typeof child === "string" ? child : undefined;
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {

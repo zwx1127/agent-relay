@@ -18,7 +18,30 @@ class FakeLarkChannel implements LarkChannelClient {
   reactions: Array<{ messageId: string; emojiType: string }> = [];
   removedReactions: Array<{ messageId: string; emojiType: string }> = [];
   resources = new Map<string, Buffer>();
+  readContents = new Map<string, string>();
+  readFailures: Error[] = [];
+  readMessageIds: string[] = [];
   nextMessageId = 1;
+  rawClient = {
+    im: {
+      v1: {
+        message: {
+          get: async (input: { path: { message_id: string } }) => {
+            const messageId = input.path.message_id;
+            this.readMessageIds.push(messageId);
+            const failure = this.readFailures.shift();
+            if (failure) throw failure;
+            const content = this.readContents.get(messageId) ?? JSON.stringify(this.updated.findLast((update) => update.messageId === messageId)?.card);
+            return {
+              data: {
+                items: [{ body: { content } }],
+              },
+            };
+          },
+        },
+      },
+    },
+  };
 
   async connect(): Promise<void> {
     this.connected = true;
@@ -471,6 +494,36 @@ describe("lark adapter", () => {
     expect(logs).toContain('target_view="workspaces"');
     expect(logs).toMatch(/content_hash="[0-9a-f]{16}"/);
     expect(logs).toContain("text_len=19");
+    expect(logs).toContain("lark.card_update_verified");
+    expect(logs).toContain('post_update_target_view="workspaces"');
+    expect(logs).toContain("post_update_matches_target=true");
+    expect(channel.readMessageIds).toEqual(["om_1"]);
+  });
+
+  test("logs mismatched Lark card read-back state after update", async () => {
+    const channel = new FakeLarkChannel();
+    const logLines: string[] = [];
+    const logger = new TextLogger("info", (line) => logLines.push(line), () => new Date("2026-05-13T03:24:22.000Z"));
+    const adapter = adapterWith(channel, { logger });
+
+    await adapter.sendMessage("oc_chat", "Relay Home\nworkspace: none", {
+      disableWebPagePreview: true,
+      replyMarkup: { inline_keyboard: [[{ text: "Workspaces", callback_data: "ar:w" }]] },
+    });
+    channel.readContents.set("om_1", JSON.stringify({
+      elements: [{ tag: "markdown", content: "**Relay Home**\nworkspace: none" }],
+    }));
+    await adapter.editMessageText("oc_chat", "Workspaces\n\n1. demo", {
+      messageId: "om_1",
+      disableWebPagePreview: true,
+      replyMarkup: { inline_keyboard: [[{ text: "Back", callback_data: "ar:home" }]] },
+    });
+
+    const logs = logLines.join("\n");
+    expect(logs).toContain("lark.card_update_verified");
+    expect(logs).toContain('target_view="workspaces"');
+    expect(logs).toContain('post_update_target_view="home"');
+    expect(logs).toContain("post_update_matches_target=false");
   });
 
   test("renders force reply prompts as Lark cards", async () => {
