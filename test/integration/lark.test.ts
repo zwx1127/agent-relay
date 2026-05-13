@@ -124,6 +124,22 @@ describe("lark adapter", () => {
     }]);
   });
 
+  test("ignores interactive card message echoes", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+    const received: unknown[] = [];
+
+    await adapter.start(async (message) => {
+      received.push(message);
+    });
+    await channel.handlers.message?.(normalizedMessage({
+      content: "Relay Home\nWorkspaces\nStatus\nRefresh",
+      rawContentType: "interactive",
+    }));
+
+    expect(received).toEqual([]);
+  });
+
   test("routes image messages and downloads resources", async () => {
     const channel = new FakeLarkChannel();
     channel.resources.set("img_key", Buffer.from([4, 5, 6]));

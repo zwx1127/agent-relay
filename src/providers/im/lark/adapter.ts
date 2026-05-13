@@ -294,6 +294,8 @@ export class LarkAdapter implements ImAdapter {
   }
 
   private toInboundMessage(message: NormalizedMessage): InboundMessage | undefined {
+    if (message.rawContentType === "interactive") return undefined;
+
     const imageResources = message.resources.filter((resource) => resource.type === "image");
     if (imageResources.length > 0) {
       return {

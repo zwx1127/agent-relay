@@ -91,6 +91,17 @@ export class WorkspaceFlow {
       selected: workspace.name === selected,
     })), page.pageIndex, page.totalPages), workspacesKeyboard(page.items, selected, page.pageIndex, page.totalPages));
     this.trackControlMessage(message.conversationId, result);
+    this.deps.logger.info("router.workspaces_rendered", {
+      conversation_id: message.conversationId,
+      message_id: message.messageId,
+      selected_workspace: selected,
+      page_index: page.pageIndex,
+      total_pages: page.totalPages,
+      workspace_count: workspaces.length,
+      render_method: result.method,
+      rendered_message_id: result.messageId,
+      console_message_id: this.deps.store.getConsoleMessageId(message.conversationId),
+    });
   }
 
   async renderWorkspaceIntroCallback(message: CallbackMessage, token: string, pageIndex: number): Promise<void> {
