@@ -24,6 +24,8 @@ export class FakeImAdapter {
   downloads = new Map<string, ArrayBuffer>();
   nextMessageId = 100;
   sendMessageDelayMs = 0;
+  editMessageWaits: Promise<void>[] = [];
+  editStarted: Array<{ conversationId: ConversationId; text: string; options: EditMessageTextOptions }> = [];
   failSendMessage?: Error;
   failEditMessage?: Error;
   failDeleteMessage?: Error;
@@ -52,6 +54,9 @@ export class FakeImAdapter {
 
   async editMessageText(conversationId: ConversationId, text: string, options: EditMessageTextOptions): Promise<void> {
     if (this.failEditMessage) throw this.failEditMessage;
+    this.editStarted.push({ conversationId, text, options });
+    const wait = this.editMessageWaits.shift();
+    if (wait) await wait;
     this.edited.push({ conversationId, text, options });
   }
 

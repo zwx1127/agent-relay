@@ -36,6 +36,7 @@ import { MediaRelayService } from "./media-service.ts";
 import { CodexPromptFlow } from "./codex-prompt-flow.ts";
 import { ThreadCommandService } from "./thread-command-service.ts";
 import { WorkspaceFlow } from "./workspace-flow.ts";
+import { ConversationQueue } from "./conversation-queue.ts";
 
 export class RelayController {
   private readonly logger: Logger;
@@ -47,6 +48,7 @@ export class RelayController {
   private readonly mediaRelay: MediaRelayService;
   private readonly codexPromptFlow: CodexPromptFlow;
   private readonly threadCommands: ThreadCommandService;
+  private readonly conversationQueue = new ConversationQueue();
 
   constructor(private readonly deps: RelayControllerDeps) {
     this.logger = deps.logger ?? noopLogger;
@@ -166,6 +168,10 @@ export class RelayController {
   }
 
   async handle(message: InboundMessage): Promise<void> {
+    await this.conversationQueue.run(message.conversationId, () => this.handleSerial(message));
+  }
+
+  private async handleSerial(message: InboundMessage): Promise<void> {
     if (message.kind === "callback_query") {
       await this.handleCallback(message);
       return;
@@ -238,6 +244,15 @@ export class RelayController {
   }
 
   async handleAgentOutput(session: AgentOutputEvent): Promise<void> {
+    const conversationId = this.conversationIdForSessionKey(session.sessionKey);
+    if (conversationId !== undefined) {
+      await this.conversationQueue.run(conversationId, () => this.handleAgentOutputSerial(session));
+      return;
+    }
+    await this.handleAgentOutputSerial(session);
+  }
+
+  private async handleAgentOutputSerial(session: AgentOutputEvent): Promise<void> {
     if (session.type === "image") {
       await this.finalizeSessionOutput(session.sessionKey);
       await this.mediaRelay.sendAgentImageOutput(session);
@@ -288,6 +303,15 @@ export class RelayController {
   }
 
   async handleAgentExit(sessionKeyValue: string, exitText: string): Promise<void> {
+    const conversationId = this.conversationIdForSessionKey(sessionKeyValue);
+    if (conversationId !== undefined) {
+      await this.conversationQueue.run(conversationId, () => this.handleAgentExitSerial(sessionKeyValue, exitText));
+      return;
+    }
+    await this.handleAgentExitSerial(sessionKeyValue, exitText);
+  }
+
+  private async handleAgentExitSerial(sessionKeyValue: string, exitText: string): Promise<void> {
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) {
       this.logger.warn("router.agent_exit_invalid_session", { session_key: sessionKeyValue });
@@ -665,6 +689,10 @@ export class RelayController {
   private hasTaskCreatedAfter(conversationId: ConversationId, workspaceName: string, timestamp: number): boolean {
     return this.deps.store.listTasks(conversationId, workspaceName, undefined, 1)
       .some((task) => task.createdAt > timestamp);
+  }
+
+  private conversationIdForSessionKey(sessionKeyValue: string): ConversationId | undefined {
+    return parseSessionKey(sessionKeyValue)?.conversationId;
   }
 
   private readonly lastUserMessageIds = new Map<string, MessageId>();

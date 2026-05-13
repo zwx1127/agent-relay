@@ -1473,6 +1473,50 @@ describe("relay controller", () => {
     expect(adapter.edited.at(-1)?.text).not.toContain("Stale Relay Home");
   });
 
+  test("Relay control callbacks are serialized per conversation", async () => {
+    const { router, adapter, root } = fixture();
+    mkdirSync(join(root, "demo"));
+    await router.handle(textMessage("/relay"));
+    const homeMessageId = adapter.sent.at(-1)?.messageId;
+    const releaseFirstEdit = deferred<void>();
+    adapter.editMessageWaits.push(releaseFirstEdit.promise);
+
+    const first = router.handle(callbackMessage("ar:w", 7, "cb-workspaces", homeMessageId));
+    await waitUntil(() => adapter.editStarted.length === 1);
+    const second = router.handle(callbackMessage("ar:s", 7, "cb-refresh", homeMessageId));
+    await sleep(10);
+
+    expect(adapter.editStarted).toHaveLength(1);
+    expect(adapter.answered).toEqual([]);
+
+    releaseFirstEdit.resolve();
+    await Promise.all([first, second]);
+
+    expect(adapter.editStarted).toHaveLength(2);
+    expect(adapter.edited[0]?.text).toContain("Workspaces");
+    expect(adapter.edited[1]?.text).toContain("Relay Home");
+    expect(adapter.answered.map((answer) => answer.callbackQueryId)).toEqual(["cb-workspaces", "cb-refresh"]);
+  });
+
+  test("Relay control queues do not block different conversations", async () => {
+    const { router, adapter } = fixture();
+    await router.handle(textMessage("/relay", 7, undefined, "1"));
+    const firstHomeMessageId = adapter.sent.at(-1)?.messageId;
+    await router.handle(textMessage("/relay", 7, undefined, "2"));
+    const secondHomeMessageId = adapter.sent.at(-1)?.messageId;
+    const releaseFirstEdit = deferred<void>();
+    adapter.editMessageWaits.push(releaseFirstEdit.promise);
+
+    const first = router.handle(callbackMessage("ar:s", 7, "cb-first", firstHomeMessageId, "1"));
+    await waitUntil(() => adapter.editStarted.length === 1);
+    const second = router.handle(callbackMessage("ar:s", 7, "cb-second", secondHomeMessageId, "2"));
+    await waitUntil(() => adapter.edited.some((edit) => edit.conversationId === "2"));
+
+    expect(adapter.editStarted.map((edit) => edit.conversationId)).toEqual(["1", "2"]);
+    releaseFirstEdit.resolve();
+    await Promise.all([first, second]);
+  });
+
   test("new workspace reply refreshes source workspace list without opening Relay Home", async () => {
     const { router, store, adapter, agent, root } = fixture();
     mkdirSync(join(root, "existing"));
@@ -2111,8 +2155,8 @@ describe("relay controller", () => {
   });
 });
 
-function textMessage(text: string, userId = 7, replyToMessageId?: number) {
-  return { kind: "message" as const, id: "1", messageId: "1", conversationId: "1", userId, text, replyToMessageId };
+function textMessage(text: string, userId = 7, replyToMessageId?: number, conversationId = "1") {
+  return { kind: "message" as const, id: "1", messageId: "1", conversationId, userId, text, replyToMessageId };
 }
 
 function mediaMessage(caption?: string, userId = 7) {
@@ -2130,14 +2174,32 @@ function mediaMessage(caption?: string, userId = 7) {
   };
 }
 
-function callbackMessage(data: string, userId = 7, callbackQueryId = "cb1", messageId: MessageId = 42) {
+function callbackMessage(data: string, userId = 7, callbackQueryId = "cb1", messageId: MessageId = 42, conversationId = "1") {
   return {
     kind: "callback_query" as const,
     id: callbackQueryId,
-    conversationId: "1",
+    conversationId,
     userId,
     callbackQueryId,
     messageId,
     data,
   };
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T | PromiseLike<T>) => void; reject: (error: unknown) => void } {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) throw new Error("condition timed out");
+    await sleep(1);
+  }
 }
