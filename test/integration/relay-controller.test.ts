@@ -1334,6 +1334,22 @@ describe("relay controller", () => {
     expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-refresh", text: undefined });
   });
 
+  test("callback logs include source card and current control card ids", async () => {
+    const { router, adapter, logLines, root } = fixture();
+    mkdirSync(join(root, "demo"));
+
+    await router.handle(textMessage("/relay"));
+    const currentMessageId = adapter.sent.at(-1)?.messageId;
+    await router.handle(callbackMessage("ar:w", 7, "cb-workspaces", currentMessageId));
+
+    const logs = logLines.join("\n");
+    expect(logs).toContain("router.callback_received");
+    expect(logs).toContain('callback_query_id="cb-workspaces"');
+    expect(logs).toContain(`message_id=${currentMessageId}`);
+    expect(logs).toContain(`console_message_id="${currentMessageId}"`);
+    expect(logs).toContain("current_control_card=true");
+  });
+
   test("Relay Home refresh fallback stores the new home message id", async () => {
     const { router, adapter, store } = fixture();
 

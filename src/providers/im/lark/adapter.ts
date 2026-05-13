@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as lark from "@larksuiteoapi/node-sdk";
 import type { ConversationId, MessageId } from "../../../domain/ids.ts";
 import { noopLogger, type Logger } from "../../../domain/logger.ts";
@@ -39,6 +40,12 @@ type LarkEventHandlers = {
   reconnecting?: () => void;
   reconnected?: () => void;
 };
+
+interface CardUpdateDiagnostics {
+  targetView: string;
+  contentHash: string;
+  textLength: number;
+}
 
 const DEFAULT_CARD_UPDATE_TIMEOUT_MS = 10_000;
 const DEFAULT_CARD_ACTION_DEDUP_TTL_MS = 500;
@@ -152,7 +159,7 @@ export class LarkAdapter implements ImAdapter {
     const messageText = text.length > 0 ? text : "(empty)";
     if (shouldSendCard(options) || this.cardMessageIds.has(String(options.messageId))) {
       const messageId = String(options.messageId);
-      await this.updateCardMessage(messageId, createLarkCard(messageText, options));
+      await this.updateCardMessage(messageId, createLarkCard(messageText, options), cardUpdateDiagnostics(messageText, options));
       this.cardMessageIds.add(messageId);
       return;
     }
@@ -252,19 +259,36 @@ export class LarkAdapter implements ImAdapter {
     }
   }
 
-  private async updateCardMessage(messageId: string, card: object): Promise<void> {
+  private async updateCardMessage(messageId: string, card: object, diagnostics: CardUpdateDiagnostics): Promise<void> {
     const previous = this.cardUpdateQueues.get(messageId) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(() => withTimeout(
-      this.updateCardWithRetry(messageId, card),
-      this.cardUpdateTimeoutMs,
-      `Lark card update timed out after ${this.cardUpdateTimeoutMs}ms`,
-    ));
+    const current = previous.catch(() => undefined).then(async () => {
+      this.logger.info("lark.card_update_started", {
+        message_id: messageId,
+        target_view: diagnostics.targetView,
+        content_hash: diagnostics.contentHash,
+        text_len: diagnostics.textLength,
+      });
+      await withTimeout(
+        this.updateCardWithRetry(messageId, card),
+        this.cardUpdateTimeoutMs,
+        `Lark card update timed out after ${this.cardUpdateTimeoutMs}ms`,
+      );
+      this.logger.info("lark.card_update_succeeded", {
+        message_id: messageId,
+        target_view: diagnostics.targetView,
+        content_hash: diagnostics.contentHash,
+        text_len: diagnostics.textLength,
+      });
+    });
     this.cardUpdateQueues.set(messageId, current);
     try {
       await current;
     } catch (error) {
       this.logger.warn("lark.card_update_failed", {
         message_id: messageId,
+        target_view: diagnostics.targetView,
+        content_hash: diagnostics.contentHash,
+        text_len: diagnostics.textLength,
         error: error instanceof Error ? error : new Error(String(error)),
       });
       throw error;
@@ -360,6 +384,38 @@ export function larkChannelOptions(options: Pick<LarkAdapterOptions, "appId" | "
 
 function shouldSendCard(options: SendMessageOptions): boolean {
   return Boolean(options.replyMarkup || options.forceReply || options.entities?.length || options.disableWebPagePreview);
+}
+
+function cardUpdateDiagnostics(text: string, options: SendMessageOptions): CardUpdateDiagnostics {
+  return {
+    targetView: cardTargetView(text),
+    contentHash: contentHash({
+      text,
+      forceReply: Boolean(options.forceReply),
+      inputFieldPlaceholder: options.inputFieldPlaceholder,
+      disableWebPagePreview: Boolean(options.disableWebPagePreview),
+      replyMarkup: options.replyMarkup,
+      entities: options.entities,
+    }),
+    textLength: text.length,
+  };
+}
+
+function cardTargetView(text: string): string {
+  const firstLine = text.split(/\r?\n/, 1)[0]?.trim().toLowerCase() ?? "";
+  if (firstLine === "relay home") return "home";
+  if (firstLine === "workspaces") return "workspaces";
+  if (firstLine === "workspace") return "workspace_intro";
+  if (firstLine === "selecting workspace.") return "workspace_selecting";
+  if (firstLine === "deleting workspace.") return "workspace_deleting";
+  if (firstLine === "delete workspace?") return "workspace_delete_confirm";
+  if (firstLine === "stopping session.") return "session_stopping";
+  if (firstLine === "stale relay home.") return "stale_home";
+  return "other";
+}
+
+function contentHash(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {

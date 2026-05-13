@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as lark from "@larksuiteoapi/node-sdk";
+import { TextLogger } from "../../src/domain/logger.ts";
 import { LarkAdapter, larkChannelOptions, larkDomainForSdk, type LarkChannelClient } from "../../src/providers/im/lark/adapter.ts";
 import type { CardActionEvent, NormalizedMessage, SendInput, SendOptions } from "@larksuiteoapi/node-sdk";
 
@@ -445,6 +446,31 @@ describe("lark adapter", () => {
 
     expect(channel.updated.at(-1)).toMatchObject({ messageId: "om_1" });
     expectNoLarkCardFooter(channel.updated.at(-1)!.card);
+  });
+
+  test("logs Lark card update target view and content hash", async () => {
+    const channel = new FakeLarkChannel();
+    const logLines: string[] = [];
+    const logger = new TextLogger("info", (line) => logLines.push(line), () => new Date("2026-05-13T03:24:22.000Z"));
+    const adapter = adapterWith(channel, { logger });
+
+    await adapter.sendMessage("oc_chat", "Relay Home\nworkspace: none", {
+      disableWebPagePreview: true,
+      replyMarkup: { inline_keyboard: [[{ text: "Workspaces", callback_data: "ar:w" }]] },
+    });
+    await adapter.editMessageText("oc_chat", "Workspaces\n\n1. demo", {
+      messageId: "om_1",
+      disableWebPagePreview: true,
+      replyMarkup: { inline_keyboard: [[{ text: "Back", callback_data: "ar:home" }]] },
+    });
+
+    const logs = logLines.join("\n");
+    expect(logs).toContain("lark.card_update_started");
+    expect(logs).toContain("lark.card_update_succeeded");
+    expect(logs).toContain('message_id="om_1"');
+    expect(logs).toContain('target_view="workspaces"');
+    expect(logs).toMatch(/content_hash="[0-9a-f]{16}"/);
+    expect(logs).toContain("text_len=19");
   });
 
   test("renders force reply prompts as Lark cards", async () => {

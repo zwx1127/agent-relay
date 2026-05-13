@@ -329,10 +329,14 @@ export class RelayController {
   }
 
   private async handleCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
+    const consoleMessageId = this.deps.store.getConsoleMessageId(message.conversationId);
     this.logger.info("router.callback_received", {
       conversation_id: message.conversationId,
       user_id: message.userId,
       callback_query_id: message.callbackQueryId,
+      message_id: message.messageId,
+      console_message_id: consoleMessageId,
+      current_control_card: Boolean(message.messageId && consoleMessageId && String(message.messageId) === String(consoleMessageId)),
       data: message.data,
     });
 
