@@ -444,7 +444,7 @@ describe("lark adapter", () => {
     expect(channel.removedReactions).toEqual([{ messageId: "om_1", emojiType: "DONE" }]);
   });
 
-  test("splits inline keyboard rows into mobile-friendly Lark button rows", async () => {
+  test("preserves Telegram inline keyboard rows in Lark button layout", async () => {
     const channel = new FakeLarkChannel();
     const adapter = adapterWith(channel);
 
@@ -472,7 +472,7 @@ describe("lark adapter", () => {
     });
 
     const rows = larkButtonRows(expectLarkCard(channel.sent[0]?.input));
-    expect(rows.map((row) => row.length)).toEqual([1, 2, 2, 1, 2, 2]);
+    expect(rows.map((row) => row.length)).toEqual([1, 2, 3, 4]);
     expect(rows.flat().map((button) => button.text?.content)).toEqual([
       "Refresh",
       "Approve",

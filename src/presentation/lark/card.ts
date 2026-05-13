@@ -31,9 +31,7 @@ export function createLarkCard(text: string, options: LarkCardOptions = {}): obj
 
   for (const row of options.replyMarkup?.inline_keyboard ?? []) {
     if (row.length === 0) continue;
-    for (const group of buttonRowGroups(row)) {
-      elements.push(buttonRowElement(group, callbackNonce));
-    }
+    elements.push(buttonRowElement(row, callbackNonce));
   }
 
   return {
@@ -89,14 +87,6 @@ function buttonRowElement(row: InlineKeyboardButton[], callbackNonce: string): o
       elements: [buttonElement(button, callbackNonce)],
     })),
   };
-}
-
-function buttonRowGroups(row: InlineKeyboardButton[]): InlineKeyboardButton[][] {
-  const groups: InlineKeyboardButton[][] = [];
-  for (let index = 0; index < row.length; index += 2) {
-    groups.push(row.slice(index, index + 2));
-  }
-  return groups;
 }
 
 function cardCallbackNonce(): string {
