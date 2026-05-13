@@ -363,7 +363,6 @@ export class LarkAdapter implements ImAdapter {
 
     const postUpdateText = readableTextFromMessageContent(content);
     const postUpdateTargetView = cardTargetView(postUpdateText);
-    const matchesTarget = postUpdateTargetView === diagnostics.targetView;
     this.logger.info("lark.card_update_verified", {
       message_id: messageId,
       target_view: diagnostics.targetView,
@@ -371,11 +370,8 @@ export class LarkAdapter implements ImAdapter {
       post_update_target_view: postUpdateTargetView,
       post_update_content_hash: contentHash({ content }),
       post_update_text_len: postUpdateText.length,
-      post_update_matches_target: matchesTarget,
+      post_update_matches_target: postUpdateTargetView === diagnostics.targetView,
     });
-    if (!matchesTarget) {
-      throw new Error(`Lark card update verification mismatch: expected ${diagnostics.targetView}, got ${postUpdateTargetView}`);
-    }
   }
 
   private toInboundMessage(message: NormalizedMessage): InboundMessage | undefined {

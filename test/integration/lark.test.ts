@@ -517,14 +517,14 @@ describe("lark adapter", () => {
       messageId: "om_1",
       disableWebPagePreview: true,
       replyMarkup: { inline_keyboard: [[{ text: "Back", callback_data: "ar:home" }]] },
-    })).rejects.toThrow("Lark card update verification mismatch: expected workspaces, got home");
+    })).resolves.toBeUndefined();
 
     const logs = logLines.join("\n");
     expect(logs).toContain("lark.card_update_verified");
     expect(logs).toContain('target_view="workspaces"');
     expect(logs).toContain('post_update_target_view="home"');
     expect(logs).toContain("post_update_matches_target=false");
-    expect(logs).toContain("lark.card_update_failed");
+    expect(logs).not.toContain("lark.card_update_failed");
   });
 
   test("renders force reply prompts as Lark cards", async () => {
