@@ -198,7 +198,7 @@ describe("lark adapter", () => {
 
   test("routes card button actions as callback queries", async () => {
     const channel = new FakeLarkChannel();
-    const adapter = adapterWith(channel);
+    const adapter = adapterWith(channel, { cardActionDispatchDelayMs: 0 });
     const received: unknown[] = [];
 
     await adapter.start(async (message) => {
@@ -225,7 +225,7 @@ describe("lark adapter", () => {
 
   test("releases card action SDK handler before async relay handling completes", async () => {
     const channel = new FakeLarkChannel();
-    const adapter = adapterWith(channel);
+    const adapter = adapterWith(channel, { cardActionDispatchDelayMs: 0 });
     const release = deferred<void>();
     let completed = false;
 
@@ -251,7 +251,7 @@ describe("lark adapter", () => {
     const channel = new FakeLarkChannel();
     const logLines: string[] = [];
     const logger = new TextLogger("info", (line) => logLines.push(line), () => new Date("2026-05-13T03:24:22.000Z"));
-    const adapter = adapterWith(channel, { logger });
+    const adapter = adapterWith(channel, { logger, cardActionDispatchDelayMs: 0 });
 
     await adapter.start(async () => {
       throw new Error("callback failed");
@@ -268,8 +268,68 @@ describe("lark adapter", () => {
     expect(logs).toContain("lark.card_action_dispatched");
     expect(logs).toContain('callback_data="ar:s"');
     expect(logs).toContain('callback_nonce="nonce-1"');
+    expect(logs).toContain("dispatch_delay_ms=0");
     expect(logs).toContain("lark.card_action_handler_failed");
     expect(logs).toContain('error="callback failed"');
+  });
+
+  test("delays card action relay handling after SDK handler returns", async () => {
+    const channel = new FakeLarkChannel();
+    const logLines: string[] = [];
+    const logger = new TextLogger("info", (line) => logLines.push(line), () => new Date("2026-05-13T03:24:22.000Z"));
+    const adapter = adapterWith(channel, { logger, cardActionDispatchDelayMs: 30 });
+    const received: unknown[] = [];
+
+    await adapter.start(async (message) => {
+      received.push(message);
+    });
+    const handling = channel.handlers.cardAction?.({
+      messageId: "om_card",
+      chatId: "oc_chat",
+      operator: { openId: "ou_user" },
+      action: { tag: "button", value: { callback_nonce: "nonce-1", callback_data: "ar:s" } },
+    } satisfies CardActionEvent);
+    if (!handling) throw new Error("expected card action handler");
+
+    await handling;
+    expect(received).toEqual([]);
+    expect(logLines.join("\n")).toContain("dispatch_delay_ms=30");
+    await waitUntil(() => received.length === 1);
+  });
+
+  test("dispatches representative relay callback buttons through the same Lark action path", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel, { cardActionDispatchDelayMs: 0 });
+    const received: string[] = [];
+    const callbacks = [
+      "ar:s",
+      "ar:status",
+      "ar:home",
+      "ar:n:0",
+      "ar:uh:workspace",
+      "ar:wd?:workspace",
+      "ar:wd!:workspace",
+      "ar:a:approval:y",
+      "ar:q:question:0",
+      "ar:cmd:plan:token:implement",
+      "ar:cmd:goal:token:replace",
+      "ar:p:page:1",
+    ];
+
+    await adapter.start(async (message) => {
+      if (message.kind === "callback_query") received.push(message.data);
+    });
+    for (const data of callbacks) {
+      await channel.handlers.cardAction?.({
+        messageId: "om_card",
+        chatId: "oc_chat",
+        operator: { openId: "ou_user" },
+        action: { tag: "button", value: { callback_nonce: `nonce-${data}`, callback_data: data } },
+      } satisfies CardActionEvent);
+    }
+    await waitUntil(() => received.length === callbacks.length);
+
+    expect(received).toEqual(callbacks);
   });
 
   test("uses fresh callback nonces when cards are re-rendered", async () => {

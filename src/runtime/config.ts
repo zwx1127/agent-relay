@@ -16,6 +16,7 @@ export interface AppConfig {
   larkAppId?: string;
   larkAppSecret?: string;
   larkDomain: string;
+  larkCardActionDispatchDelayMs: number;
   workspaceRoot: string;
   sqlitePath: string;
   codexBin: string;
@@ -162,6 +163,7 @@ export function loadConfig(env?: Env): AppConfig {
       larkAppSecret: requireEnv(effectiveEnv, "LARK_APP_SECRET"),
     } : {}),
     larkDomain: parseLarkDomain(effectiveEnv.LARK_DOMAIN?.trim() || "feishu"),
+    larkCardActionDispatchDelayMs: parseNonNegativeIntegerEnv(effectiveEnv, "LARK_CARD_ACTION_DISPATCH_DELAY_MS", 150),
     workspaceRoot: requireEnv(effectiveEnv, "WORKSPACE_ROOT"),
     sqlitePath: effectiveEnv.SQLITE_PATH?.trim() || ".data/agent-relay.sqlite",
     codexBin: effectiveEnv.CODEX_BIN?.trim() || "codex",

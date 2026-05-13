@@ -36,6 +36,7 @@ function fixture(logLevel: LogLevel = "info"): { router: RelayController; store:
     telegramRetryInitialDelayMs: 500,
     telegramRetryMaxDelayMs: 10000,
     larkDomain: "lark",
+    larkCardActionDispatchDelayMs: 150,
     workspaceRoot: root,
     sqlitePath: ":memory:",
     codexBin: "codex",

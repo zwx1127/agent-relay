@@ -31,6 +31,7 @@ describe("config", () => {
     expect(config.imProvider).toBe("telegram");
     expect(config.agentProvider).toBe("codex");
     expect(config.larkDomain).toBe("feishu");
+    expect(config.larkCardActionDispatchDelayMs).toBe(150);
     expect(config.allowedUserIds.has("10")).toBe(true);
   });
 
@@ -56,6 +57,7 @@ describe("config", () => {
     expect(config.larkAppId).toBe("cli_a");
     expect(config.larkAppSecret).toBe("secret");
     expect(config.larkDomain).toBe("feishu");
+    expect(config.larkCardActionDispatchDelayMs).toBe(150);
     expect(config.telegramBotToken).toBeUndefined();
   });
 
@@ -72,6 +74,35 @@ describe("config", () => {
     expect(loadConfig({ ...baseEnv, LARK_DOMAIN: "lark" }).larkDomain).toBe("lark");
     expect(loadConfig({ ...baseEnv, LARK_DOMAIN: "https://open.example.com" }).larkDomain).toBe("https://open.example.com");
     expect(loadConfig({ ...baseEnv, LARK_DOMAIN: "https://open.example.com/" }).larkDomain).toBe("https://open.example.com");
+  });
+
+  test("loads lark card action dispatch delay", () => {
+    const baseEnv = {
+      IM_PROVIDER: "lark",
+      LARK_APP_ID: "cli_a",
+      LARK_APP_SECRET: "secret",
+      ALLOWED_USER_IDS: "ou_user",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+    };
+
+    expect(loadConfig(baseEnv).larkCardActionDispatchDelayMs).toBe(150);
+    expect(loadConfig({ ...baseEnv, LARK_CARD_ACTION_DISPATCH_DELAY_MS: "0" }).larkCardActionDispatchDelayMs).toBe(0);
+    expect(loadConfig({ ...baseEnv, LARK_CARD_ACTION_DISPATCH_DELAY_MS: "250" }).larkCardActionDispatchDelayMs).toBe(250);
+  });
+
+  test("rejects invalid lark card action dispatch delay", () => {
+    const baseEnv = {
+      IM_PROVIDER: "lark",
+      LARK_APP_ID: "cli_a",
+      LARK_APP_SECRET: "secret",
+      ALLOWED_USER_IDS: "ou_user",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+    };
+
+    expect(() => loadConfig({ ...baseEnv, LARK_CARD_ACTION_DISPATCH_DELAY_MS: "" })).toThrow("LARK_CARD_ACTION_DISPATCH_DELAY_MS");
+    expect(() => loadConfig({ ...baseEnv, LARK_CARD_ACTION_DISPATCH_DELAY_MS: "-1" })).toThrow("LARK_CARD_ACTION_DISPATCH_DELAY_MS");
+    expect(() => loadConfig({ ...baseEnv, LARK_CARD_ACTION_DISPATCH_DELAY_MS: "1.5" })).toThrow("LARK_CARD_ACTION_DISPATCH_DELAY_MS");
+    expect(() => loadConfig({ ...baseEnv, LARK_CARD_ACTION_DISPATCH_DELAY_MS: "nope" })).toThrow("LARK_CARD_ACTION_DISPATCH_DELAY_MS");
   });
 
   test("rejects invalid and deprecated IM provider settings", () => {

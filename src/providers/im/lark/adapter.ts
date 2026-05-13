@@ -31,6 +31,7 @@ export interface LarkAdapterOptions {
   channel?: LarkChannelClient;
   cardUpdateTimeoutMs?: number;
   cardActionDedupTtlMs?: number;
+  cardActionDispatchDelayMs?: number;
 }
 
 type LarkEventHandlers = {
@@ -64,6 +65,7 @@ type LarkRawClient = {
 
 const DEFAULT_CARD_UPDATE_TIMEOUT_MS = 10_000;
 const DEFAULT_CARD_ACTION_DEDUP_TTL_MS = 500;
+const DEFAULT_CARD_ACTION_DISPATCH_DELAY_MS = 150;
 const CARD_UPDATE_MAX_ATTEMPTS = 3;
 const CARD_UPDATE_RETRY_DELAY_MS = 250;
 
@@ -100,6 +102,7 @@ export class LarkAdapter implements ImAdapter {
   private readonly cardUpdateQueues = new Map<string, Promise<void>>();
   private readonly reactionIds = new Map<string, string>();
   private readonly cardUpdateTimeoutMs: number;
+  private readonly cardActionDispatchDelayMs: number;
 
   static create(options: Omit<LarkAdapterOptions, "channel">): LarkAdapter {
     return new LarkAdapter({
@@ -112,6 +115,7 @@ export class LarkAdapter implements ImAdapter {
     this.channel = options.channel ?? lark.createLarkChannel(larkChannelOptions(options));
     this.logger = options.logger ?? noopLogger;
     this.cardUpdateTimeoutMs = options.cardUpdateTimeoutMs ?? DEFAULT_CARD_UPDATE_TIMEOUT_MS;
+    this.cardActionDispatchDelayMs = options.cardActionDispatchDelayMs ?? DEFAULT_CARD_ACTION_DISPATCH_DELAY_MS;
   }
 
   async start(onMessage: (message: InboundMessage) => Promise<void>): Promise<void> {
@@ -269,6 +273,7 @@ export class LarkAdapter implements ImAdapter {
       action_tag: event.action.tag,
       callback_data: data,
       callback_nonce: callbackNonceFromActionValue(event.action.value),
+      dispatch_delay_ms: this.cardActionDispatchDelayMs,
     });
     setTimeout(() => {
       void onMessage(inbound).catch((error) => {
@@ -280,7 +285,7 @@ export class LarkAdapter implements ImAdapter {
           error: error instanceof Error ? error : new Error(String(error)),
         });
       });
-    }, 0);
+    }, this.cardActionDispatchDelayMs);
   }
 
   private async updateCardMessage(messageId: string, card: object, diagnostics: CardUpdateDiagnostics): Promise<void> {

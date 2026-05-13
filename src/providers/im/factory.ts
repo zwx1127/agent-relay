@@ -21,6 +21,7 @@ export function createImAdapter(config: AppConfig, logger: Logger = noopLogger):
         appId: config.larkAppId,
         appSecret: config.larkAppSecret,
         domain: config.larkDomain,
+        cardActionDispatchDelayMs: config.larkCardActionDispatchDelayMs,
         logger,
       });
   }
