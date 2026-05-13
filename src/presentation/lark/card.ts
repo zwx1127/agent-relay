@@ -37,6 +37,7 @@ export function createLarkCard(text: string, options: LarkCardOptions = {}): obj
   return {
     config: {
       wide_screen_mode: true,
+      update_multi: true,
     },
     elements,
   };

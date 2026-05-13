@@ -513,17 +513,18 @@ describe("lark adapter", () => {
     channel.readContents.set("om_1", JSON.stringify({
       elements: [{ tag: "markdown", content: "**Relay Home**\nworkspace: none" }],
     }));
-    await adapter.editMessageText("oc_chat", "Workspaces\n\n1. demo", {
+    await expect(adapter.editMessageText("oc_chat", "Workspaces\n\n1. demo", {
       messageId: "om_1",
       disableWebPagePreview: true,
       replyMarkup: { inline_keyboard: [[{ text: "Back", callback_data: "ar:home" }]] },
-    });
+    })).rejects.toThrow("Lark card update verification mismatch: expected workspaces, got home");
 
     const logs = logLines.join("\n");
     expect(logs).toContain("lark.card_update_verified");
     expect(logs).toContain('target_view="workspaces"');
     expect(logs).toContain('post_update_target_view="home"');
     expect(logs).toContain("post_update_matches_target=false");
+    expect(logs).toContain("lark.card_update_failed");
   });
 
   test("renders force reply prompts as Lark cards", async () => {
@@ -557,8 +558,8 @@ function expectNoLarkCardFooter(card: object): void {
 }
 
 function expectLarkCardShape(card: object): void {
-  const value = card as { config?: { wide_screen_mode?: boolean }; elements?: unknown };
-  expect(value.config).toEqual({ wide_screen_mode: true });
+  const value = card as { config?: { wide_screen_mode?: boolean; update_multi?: boolean }; elements?: unknown };
+  expect(value.config).toEqual({ wide_screen_mode: true, update_multi: true });
   expect(Array.isArray(value.elements)).toBe(true);
 }
 

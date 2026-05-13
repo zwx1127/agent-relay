@@ -338,29 +338,9 @@ export class LarkAdapter implements ImAdapter {
       return;
     }
 
+    let content: string | undefined;
     try {
-      const result = await getMessage(messageId);
-      const content = messageContentFromGetResult(result);
-      if (!content) {
-        this.logger.warn("lark.card_update_verify_unavailable", {
-          message_id: messageId,
-          target_view: diagnostics.targetView,
-          content_hash: diagnostics.contentHash,
-          reason: "message_content_missing",
-        });
-        return;
-      }
-      const postUpdateText = readableTextFromMessageContent(content);
-      const postUpdateTargetView = cardTargetView(postUpdateText);
-      this.logger.info("lark.card_update_verified", {
-        message_id: messageId,
-        target_view: diagnostics.targetView,
-        content_hash: diagnostics.contentHash,
-        post_update_target_view: postUpdateTargetView,
-        post_update_content_hash: contentHash({ content }),
-        post_update_text_len: postUpdateText.length,
-        post_update_matches_target: postUpdateTargetView === diagnostics.targetView,
-      });
+      content = messageContentFromGetResult(await getMessage(messageId));
     } catch (error) {
       this.logger.warn("lark.card_update_verify_failed", {
         message_id: messageId,
@@ -368,6 +348,33 @@ export class LarkAdapter implements ImAdapter {
         content_hash: diagnostics.contentHash,
         error: error instanceof Error ? error : new Error(String(error)),
       });
+      return;
+    }
+
+    if (!content) {
+      this.logger.warn("lark.card_update_verify_unavailable", {
+        message_id: messageId,
+        target_view: diagnostics.targetView,
+        content_hash: diagnostics.contentHash,
+        reason: "message_content_missing",
+      });
+      return;
+    }
+
+    const postUpdateText = readableTextFromMessageContent(content);
+    const postUpdateTargetView = cardTargetView(postUpdateText);
+    const matchesTarget = postUpdateTargetView === diagnostics.targetView;
+    this.logger.info("lark.card_update_verified", {
+      message_id: messageId,
+      target_view: diagnostics.targetView,
+      content_hash: diagnostics.contentHash,
+      post_update_target_view: postUpdateTargetView,
+      post_update_content_hash: contentHash({ content }),
+      post_update_text_len: postUpdateText.length,
+      post_update_matches_target: matchesTarget,
+    });
+    if (!matchesTarget) {
+      throw new Error(`Lark card update verification mismatch: expected ${diagnostics.targetView}, got ${postUpdateTargetView}`);
     }
   }
 
