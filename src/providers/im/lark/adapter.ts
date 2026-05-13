@@ -47,6 +47,11 @@ interface CardUpdateDiagnostics {
   textLength: number;
 }
 
+interface CardReadbackDiagnostics {
+  text: string;
+  shape: string;
+}
+
 type LarkRawClient = {
   im?: {
     v1?: {
@@ -361,16 +366,20 @@ export class LarkAdapter implements ImAdapter {
       return;
     }
 
-    const postUpdateText = readableTextFromMessageContent(content);
-    const postUpdateTargetView = cardTargetView(postUpdateText);
+    const readback = readableTextFromMessageContent(content);
+    const postUpdateTargetView = cardTargetView(readback.text);
     this.logger.info("lark.card_update_verified", {
       message_id: messageId,
       target_view: diagnostics.targetView,
       content_hash: diagnostics.contentHash,
       post_update_target_view: postUpdateTargetView,
       post_update_content_hash: contentHash({ content }),
-      post_update_text_len: postUpdateText.length,
+      post_update_text_len: readback.text.length,
       post_update_matches_target: postUpdateTargetView === diagnostics.targetView,
+      post_update_content_shape: readback.shape,
+      post_update_first_line: firstLinePreview(readback.text),
+      post_update_contains_target_title: containsViewTitle(readback.text, diagnostics.targetView),
+      post_update_contains_home_title: containsViewTitle(readback.text, "home"),
     });
   }
 
@@ -460,15 +469,32 @@ function messageContentFromGetResult(result: unknown): string | undefined {
   return content && content.trim().length > 0 ? content : undefined;
 }
 
-function readableTextFromMessageContent(content: string): string {
+function readableTextFromMessageContent(content: string): CardReadbackDiagnostics {
   const parsed = safeJsonParse(content);
-  if (!parsed || typeof parsed !== "object") return content;
+  if (!parsed || typeof parsed !== "object") return { text: content, shape: "plain" };
   const cardText = readableTextFromCard(parsed);
-  return cardText.length > 0 ? cardText : content;
+  return cardText.text.length > 0 ? cardText : { text: content, shape: "unknown_json" };
 }
 
-function readableTextFromCard(card: object): string {
-  const elements = Array.isArray((card as { elements?: unknown }).elements) ? (card as { elements: unknown[] }).elements : [];
+function readableTextFromCard(card: object): CardReadbackDiagnostics {
+  const topLevelElements = arrayValue(card, "elements");
+  if (topLevelElements) {
+    const text = readableTextFromElements(topLevelElements);
+    if (text.length > 0) return { text, shape: "elements" };
+  }
+
+  const bodyElements = arrayValue(recordValue(card, "body"), "elements");
+  if (bodyElements) {
+    const text = readableTextFromElements(bodyElements);
+    if (text.length > 0) return { text, shape: "body.elements" };
+  }
+
+  const recursiveLines: string[] = [];
+  collectCardTextRecursive(card, recursiveLines);
+  return { text: dedupeLines(recursiveLines).join("\n").trim(), shape: recursiveLines.length > 0 ? "recursive" : "unknown_json" };
+}
+
+function readableTextFromElements(elements: unknown[]): string {
   const lines: string[] = [];
   for (const element of elements) {
     if (!element || typeof element !== "object") continue;
@@ -484,7 +510,38 @@ function readableTextFromCard(card: object): string {
       if (content) lines.push(content);
     }
   }
-  return lines.join("\n").trim();
+  return dedupeLines(lines).join("\n").trim();
+}
+
+function collectCardTextRecursive(value: unknown, lines: string[], seen = new Set<unknown>()): void {
+  if (!value || typeof value !== "object" || seen.has(value)) return;
+  seen.add(value);
+  const record = value as Record<string, unknown>;
+  if (record.tag === "markdown" && typeof record.content === "string") {
+    lines.push(stripBasicMarkdown(record.content));
+  }
+  const text = recordValue(record, "text");
+  const textContent = stringValue(text, "content");
+  if (textContent) lines.push(textContent);
+  for (const child of Object.values(record)) {
+    if (Array.isArray(child)) {
+      for (const item of child) collectCardTextRecursive(item, lines, seen);
+    } else {
+      collectCardTextRecursive(child, lines, seen);
+    }
+  }
+}
+
+function dedupeLines(lines: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const line of lines) {
+    const normalized = line.trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
 }
 
 function cardUpdateDiagnostics(text: string, options: SendMessageOptions): CardUpdateDiagnostics {
@@ -513,6 +570,19 @@ function cardTargetView(text: string): string {
   if (firstLine === "stopping session.") return "session_stopping";
   if (firstLine === "stale relay home.") return "stale_home";
   return "other";
+}
+
+function firstLinePreview(text: string): string {
+  const firstLine = stripBasicMarkdown(text.split(/\r?\n/, 1)[0] ?? "").trim();
+  return firstLine.length > 120 ? `${firstLine.slice(0, 117)}...` : firstLine;
+}
+
+function containsViewTitle(text: string, targetView: string): boolean {
+  const normalizedLines = text.split(/\r?\n/).map((line) => stripBasicMarkdown(line).trim().toLowerCase());
+  if (targetView === "home") return normalizedLines.includes("relay home");
+  if (targetView === "workspaces") return normalizedLines.includes("workspaces");
+  if (targetView === "workspace_intro") return normalizedLines.includes("workspace");
+  return normalizedLines.includes(targetView.replace(/_/g, " "));
 }
 
 function contentHash(value: unknown): string {

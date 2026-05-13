@@ -497,7 +497,65 @@ describe("lark adapter", () => {
     expect(logs).toContain("lark.card_update_verified");
     expect(logs).toContain('post_update_target_view="workspaces"');
     expect(logs).toContain("post_update_matches_target=true");
+    expect(logs).toContain('post_update_content_shape="elements"');
+    expect(logs).toContain('post_update_first_line="Workspaces"');
+    expect(logs).toContain("post_update_contains_target_title=true");
+    expect(logs).toContain("post_update_contains_home_title=false");
     expect(channel.readMessageIds).toEqual(["om_1"]);
+  });
+
+  test("recognizes body elements in Lark card read-back state", async () => {
+    const channel = new FakeLarkChannel();
+    const logLines: string[] = [];
+    const logger = new TextLogger("info", (line) => logLines.push(line), () => new Date("2026-05-13T03:24:22.000Z"));
+    const adapter = adapterWith(channel, { logger });
+
+    await adapter.sendMessage("oc_chat", "Relay Home\nworkspace: none", {
+      disableWebPagePreview: true,
+      replyMarkup: { inline_keyboard: [[{ text: "Workspaces", callback_data: "ar:w" }]] },
+    });
+    channel.readContents.set("om_1", JSON.stringify({
+      body: {
+        elements: [{ tag: "markdown", content: "**Workspaces**\n\n1. demo" }],
+      },
+    }));
+    await adapter.editMessageText("oc_chat", "Workspaces\n\n1. demo", {
+      messageId: "om_1",
+      disableWebPagePreview: true,
+      replyMarkup: { inline_keyboard: [[{ text: "Back", callback_data: "ar:home" }]] },
+    });
+
+    const logs = logLines.join("\n");
+    expect(logs).toContain('post_update_target_view="workspaces"');
+    expect(logs).toContain('post_update_content_shape="body.elements"');
+    expect(logs).toContain('post_update_first_line="Workspaces"');
+  });
+
+  test("recognizes nested markdown in Lark card read-back state", async () => {
+    const channel = new FakeLarkChannel();
+    const logLines: string[] = [];
+    const logger = new TextLogger("info", (line) => logLines.push(line), () => new Date("2026-05-13T03:24:22.000Z"));
+    const adapter = adapterWith(channel, { logger });
+
+    await adapter.sendMessage("oc_chat", "Relay Home\nworkspace: none", {
+      disableWebPagePreview: true,
+      replyMarkup: { inline_keyboard: [[{ text: "Workspaces", callback_data: "ar:w" }]] },
+    });
+    channel.readContents.set("om_1", JSON.stringify({
+      card: {
+        modules: [{ inner: { tag: "markdown", content: "**Workspaces**\n\n1. demo" } }],
+      },
+    }));
+    await adapter.editMessageText("oc_chat", "Workspaces\n\n1. demo", {
+      messageId: "om_1",
+      disableWebPagePreview: true,
+      replyMarkup: { inline_keyboard: [[{ text: "Back", callback_data: "ar:home" }]] },
+    });
+
+    const logs = logLines.join("\n");
+    expect(logs).toContain('post_update_target_view="workspaces"');
+    expect(logs).toContain('post_update_content_shape="recursive"');
+    expect(logs).toContain('post_update_first_line="Workspaces"');
   });
 
   test("logs mismatched Lark card read-back state after update", async () => {
@@ -524,6 +582,9 @@ describe("lark adapter", () => {
     expect(logs).toContain('target_view="workspaces"');
     expect(logs).toContain('post_update_target_view="home"');
     expect(logs).toContain("post_update_matches_target=false");
+    expect(logs).toContain('post_update_first_line="Relay Home"');
+    expect(logs).toContain("post_update_contains_target_title=false");
+    expect(logs).toContain("post_update_contains_home_title=true");
     expect(logs).not.toContain("lark.card_update_failed");
   });
 
