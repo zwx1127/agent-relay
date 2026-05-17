@@ -1842,6 +1842,36 @@ describe("relay controller", () => {
     expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
   });
 
+  test("direct text during pending Codex question shows notice instead of starting another turn", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("ask mode"));
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "codex:1:demo",
+      requestId: 772,
+      questions: [{
+        id: "phase",
+        header: "Phase",
+        question: "Pick one.",
+        options: [{ label: "brief", description: "Define the brief" }, { label: "game-design", description: "Design the game" }],
+      }],
+    });
+    const prompt = adapter.sent.at(-1)!;
+
+    await router.handle(textMessage("game-design"));
+
+    expect(agent.sent).toEqual([sentPrompt("ask mode")]);
+    expect(agent.responses).toEqual([]);
+    expect(store.getPendingPrompt("1", prompt.messageId!)).toBeDefined();
+    expect(adapter.sent.at(-1)?.text).toContain("Codex is waiting for your answer.");
+    expect(adapter.sent.at(-1)?.text).toContain("Direct messages are not submitted as answers");
+  });
+
   test("plan option question confirms selected answer before responding", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");

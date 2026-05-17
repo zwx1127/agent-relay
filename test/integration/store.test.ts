@@ -90,17 +90,28 @@ describe("store", () => {
       conversationId: "123",
       promptMessageId: "10",
       kind: "codex_approval",
-      createdAt: 3,
+      createdAt: 4,
       sessionKey: "123:demo",
+      expiresAt: 10,
+    });
+    store.setPendingPrompt({
+      conversationId: "123",
+      promptMessageId: "12",
+      kind: "codex_user_input",
+      createdAt: 5,
+      sessionKey: "123:demo",
+      expiresAt: 4,
     });
     store.setPendingPrompt({
       conversationId: "123",
       promptMessageId: "11",
       kind: "relay_command",
-      createdAt: 3,
+      createdAt: 6,
       sessionKey: "123:demo",
     });
-    expect(store.deletePendingPromptsForSession("123:demo", ["codex_user_input", "codex_approval"])).toBe(2);
+    expect(store.latestPendingPrompt(123, ["codex_user_input", "codex_approval"], 6)?.promptMessageId).toBe("10");
+    expect(store.latestPendingPrompt(123, ["relay_command"], 6)?.promptMessageId).toBe("11");
+    expect(store.deletePendingPromptsForSession("123:demo", ["codex_user_input", "codex_approval"])).toBe(3);
     expect(store.getPendingPrompt(123, 9)).toBeUndefined();
     expect(store.getPendingPrompt(123, 10)).toBeUndefined();
     expect(store.getPendingPrompt(123, 11)?.kind).toBe("relay_command");

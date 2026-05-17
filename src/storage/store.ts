@@ -26,6 +26,7 @@ export interface RelayStore {
   latestTranscriptEvent(conversationId: ConversationId, workspaceName: string, role: TranscriptRole): TranscriptEvent | undefined;
   setPendingPrompt(prompt: PendingPrompt): void;
   getPendingPrompt(conversationId: ConversationId, promptMessageId: MessageId): PendingPrompt | undefined;
+  latestPendingPrompt(conversationId: ConversationId, kinds?: PendingPrompt["kind"][], now?: number): PendingPrompt | undefined;
   deletePendingPrompt(conversationId: ConversationId, promptMessageId: MessageId): void;
   deletePendingPromptsForSession(sessionKey: string, kinds?: PendingPrompt["kind"][]): number;
   setPagedOutput(output: PagedOutput): void;

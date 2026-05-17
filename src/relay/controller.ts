@@ -15,6 +15,7 @@ import type {
 } from "../ports/im.ts";
 import type {
   HomeStatusMode,
+  PendingPrompt,
   TaskStatus,
   WorkspaceRecord,
 } from "./types.ts";
@@ -208,21 +209,28 @@ export class RelayController {
     }
 
     try {
-      const pending = message.replyToMessageId
-        ? this.deps.store.getPendingPrompt(message.conversationId, message.replyToMessageId)
-        : undefined;
-      if (pending?.kind === "workspace_name") {
-        await this.workspaceFlow.createWorkspaceFromPrompt(message.conversationId, message.replyToMessageId!, text);
-      } else if (pending?.kind === "codex_user_input") {
-        await this.codexPromptFlow.answerFreeText(message.conversationId, message.replyToMessageId!, text);
-      } else if (pending?.kind === "relay_command") {
-        await this.threadCommands.answerRelayCommandPrompt(message.conversationId, message.replyToMessageId!, text);
-      } else if (command === "/relay") {
+      if (command === "/relay") {
         await this.renderConsole(message.conversationId, { forceNewMessage: true });
       } else if (command && await this.slashCommands.handle(message, command, text)) {
         return;
       } else {
-        await this.submitTask(message.conversationId, text, message.messageId);
+        const pending = message.replyToMessageId
+          ? this.deps.store.getPendingPrompt(message.conversationId, message.replyToMessageId)
+          : undefined;
+        if (pending?.kind === "workspace_name") {
+          await this.workspaceFlow.createWorkspaceFromPrompt(message.conversationId, message.replyToMessageId!, text);
+        } else if (pending?.kind === "codex_user_input") {
+          await this.codexPromptFlow.answerFreeText(message.conversationId, message.replyToMessageId!, text);
+        } else if (pending?.kind === "relay_command") {
+          await this.threadCommands.answerRelayCommandPrompt(message.conversationId, message.replyToMessageId!, text);
+        } else {
+          const codexPending = this.deps.store.latestPendingPrompt(message.conversationId, ["codex_user_input", "codex_approval"]);
+          if (codexPending) {
+            await this.sendPendingCodexPromptNotice(message.conversationId, codexPending);
+            return;
+          }
+          await this.submitTask(message.conversationId, text, message.messageId);
+        }
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -241,6 +249,26 @@ export class RelayController {
       );
       this.appendSystem(message.conversationId, `Error: ${detail}\n`);
     }
+  }
+
+  private async sendPendingCodexPromptNotice(conversationId: ConversationId, pending: PendingPrompt): Promise<void> {
+    if (pending.kind === "codex_approval") {
+      await this.sendRendered(
+        conversationId,
+        messageWithTitle(
+          "Codex is waiting for approval.",
+          "Use the approval buttons before sending another instruction. Direct messages are not submitted while approval is pending; send /interrupt to stop the blocked turn.",
+        ),
+      );
+      return;
+    }
+    await this.sendRendered(
+      conversationId,
+      messageWithTitle(
+        "Codex is waiting for your answer.",
+        "Open the latest question card or reply to it. Direct messages are not submitted as answers; send /interrupt if the question expired.",
+      ),
+    );
   }
 
   async handleAgentOutput(session: AgentOutputEvent): Promise<void> {

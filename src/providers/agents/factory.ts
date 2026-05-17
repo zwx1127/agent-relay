@@ -2,6 +2,7 @@ import type { AppConfig } from "../../runtime/config.ts";
 import { CodexDriver } from "./codex/driver.ts";
 import { noopLogger, type Logger } from "../../domain/logger.ts";
 import type { AgentDriver, AgentExitHandler, AgentOutputHandler } from "../../ports/agent.ts";
+import { relayInteractionInstructions } from "../../relay/control/skills.ts";
 
 export interface AgentFactoryOptions {
   controlEnv?: Record<string, string>;
@@ -20,7 +21,7 @@ export function createAgentDriver(config: AppConfig, options: AgentFactoryOption
           codexBin: config.codexBin,
           sandbox: config.codexSandbox,
           approval: config.codexApproval,
-          developerInstructions: [config.codexDeveloperInstructions, options.controlInstructions].filter(Boolean).join("\n\n") || undefined,
+          developerInstructions: composeCodexDeveloperInstructions(config.codexDeveloperInstructions, options.controlInstructions),
           baseInstructions: config.codexBaseInstructions,
           env: options.controlEnv,
         },
@@ -29,4 +30,8 @@ export function createAgentDriver(config: AppConfig, options: AgentFactoryOption
         logger,
       );
   }
+}
+
+export function composeCodexDeveloperInstructions(userInstructions?: string, controlInstructions?: string): string {
+  return [userInstructions, relayInteractionInstructions(), controlInstructions].filter(Boolean).join("\n\n");
 }

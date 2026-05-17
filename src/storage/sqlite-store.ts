@@ -288,6 +288,20 @@ export class SQLiteStore implements RelayStore {
     return row ? rowToPendingPrompt(row) : undefined;
   }
 
+  latestPendingPrompt(conversationId: ConversationId, kinds: PendingPrompt["kind"][] = [], now = Date.now()): PendingPrompt | undefined {
+    const kindFilter = kinds.length > 0 ? `AND kind IN (${kinds.map(() => "?").join(", ")})` : "";
+    const row = this.db.query<PendingPromptRow, any>(`
+      SELECT conversation_id, prompt_message_id, kind, created_at, session_key, payload_json, expires_at
+      FROM pending_prompts
+      WHERE conversation_id = ?
+        ${kindFilter}
+        AND (expires_at IS NULL OR expires_at > ?)
+      ORDER BY created_at DESC, prompt_message_id DESC
+      LIMIT 1
+    `).get(String(conversationId), ...kinds, now);
+    return row ? rowToPendingPrompt(row) : undefined;
+  }
+
   deletePendingPrompt(conversationId: ConversationId, promptMessageId: MessageId): void {
     this.db.query("DELETE FROM pending_prompts WHERE conversation_id = ? AND prompt_message_id = ?").run(String(conversationId), String(promptMessageId));
   }

@@ -1,3 +1,13 @@
+export function relayInteractionInstructions(): string {
+  return [
+    "## Agent Relay Interaction Rules",
+    "",
+    "When you need the user to choose a phase, provide missing intent, answer a blocking question, or resolve a skill workflow gate, call the `request_user_input` tool.",
+    "Do not rely on plain assistant text such as \"reply with brief or game-design\" for required choices.",
+    "If the same required choice is still unresolved, keep the turn blocked on the existing user-input request instead of repeatedly starting new work from the thread goal.",
+  ].join("\n");
+}
+
 export function relayCapabilityInstructions(helperPath: string, capabilityInstructions?: string): string {
   return [
     "## Agent Relay Capabilities",
