@@ -425,6 +425,67 @@ describe("relay controller", () => {
     expect(adapter.edited.at(-1)?.text).toContain("Goal updated.");
   });
 
+  test("/goal action can start Plan Mode from the saved goal", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/goal design a game"));
+    const prompt = adapter.sent.at(-1)!;
+    const plan = prompt.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Plan first");
+    expect(plan?.callback_data).toMatch(/^ar:cmd:goal:/);
+
+    await router.handle(callbackMessage(plan!.callback_data, 7, "cb-goal-plan", prompt.messageId));
+
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+    expect(agent.sent).toEqual([sentPrompt("design a game", "plan")]);
+    expect(adapter.edited.at(-1)?.text).toContain("Planning goal.");
+  });
+
+  test("/goal action can run the next step in default mode", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    store.setCollaborationMode("codex:1:demo", "plan");
+
+    await router.handle(textMessage("/goal ship feature"));
+    const prompt = adapter.sent.at(-1)!;
+    const run = prompt.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Run next step");
+    expect(run?.callback_data).toMatch(/^ar:cmd:goal:/);
+
+    await router.handle(callbackMessage(run!.callback_data, 7, "cb-goal-run", prompt.messageId));
+
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
+    expect(agent.sent).toEqual([sentPrompt("Continue working toward this goal:\n\nship feature")]);
+    expect(adapter.edited.at(-1)?.text).toContain("Running next step.");
+  });
+
+  test("/goal action can pause the saved goal without starting a turn", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/goal ship feature"));
+    const prompt = adapter.sent.at(-1)!;
+    const pause = prompt.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Pause goal");
+    expect(pause?.callback_data).toMatch(/^ar:cmd:goal:/);
+
+    await router.handle(callbackMessage(pause!.callback_data, 7, "cb-goal-pause", prompt.messageId));
+
+    expect(agent.goalSets).toEqual([
+      { key: "codex:1:demo", goal: { objective: "ship feature", status: "active", tokenBudget: null } },
+      { key: "codex:1:demo", goal: { status: "paused" } },
+    ]);
+    expect(agent.sent).toEqual([]);
+    expect(adapter.edited.at(-1)?.text).toContain("Status: paused");
+  });
+
   test("/goal can run while a Codex turn is active", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");

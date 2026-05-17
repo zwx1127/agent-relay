@@ -7,7 +7,8 @@ describe("agent factory", () => {
 
     expect(instructions).toContain("user instructions");
     expect(instructions).toContain("request_user_input");
-    expect(instructions).toContain("Do not rely on plain assistant text");
+    expect(instructions).toContain("Outside Plan Mode, do not call");
+    expect(instructions).toContain("do not rely on plain assistant text");
     expect(instructions).toContain("control instructions");
   });
 });

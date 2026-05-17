@@ -17,7 +17,7 @@ import type { PendingPrompt, TaskStatus, WorkspaceRecord } from "./types.ts";
 import { CODEX_PROMPT_TTL_MS, LIST_PAGE_SIZE } from "./ui/constants.ts";
 import { shortToken } from "./ui/callback-data.ts";
 import { commandArgs, parseReviewTarget } from "./ui/commands.ts";
-import { goalReplaceKeyboard, planReadyKeyboard, resumeKeyboard } from "./ui/keyboards.ts";
+import { goalActionKeyboard, goalReplaceKeyboard, planReadyKeyboard, resumeKeyboard } from "./ui/keyboards.ts";
 import {
   formatBackgroundTerminalsMessage,
   formatGoalClearedMessage,
@@ -223,7 +223,7 @@ export class ThreadCommandService {
     }
 
     const goal = await this.deps.agent.setThreadGoal(key, { objective: normalized, status: "active", tokenBudget: null });
-    await this.deps.sendRendered(conversationId, formatGoalUpdatedMessage(goal));
+    await this.sendGoalActionPrompt(conversationId, key, goal);
   }
 
   private async promptGoalReplace(conversationId: ConversationId, key: string, current: AgentThreadGoal, objective: string): Promise<void> {
@@ -470,6 +470,10 @@ export class ThreadCommandService {
       this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
       return;
     }
+    if (action === "plan" || action === "run" || action === "pause") {
+      await this.goalActionFromCallback(message, pending, key, action);
+      return;
+    }
     if (action !== "replace") {
       await this.deps.renderStrictCallbackPage(message, messageWithTitle("Goal unchanged."), { inline_keyboard: [] });
       this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
@@ -481,7 +485,90 @@ export class ThreadCommandService {
     await this.deps.renderStrictCallbackPage(message, messageWithTitle("Updating goal."), { inline_keyboard: [] });
     this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
     const goal = await this.deps.agent.setThreadGoal(key, { objective, status: "active", tokenBudget: null });
-    await this.deps.renderCallbackPage(message, formatGoalUpdatedMessage(goal), { inline_keyboard: [] });
+    await this.renderGoalActionPromptFromCallback(message, key, goal);
+  }
+
+  private async goalActionFromCallback(
+    message: CallbackMessage,
+    pending: PendingPrompt,
+    key: string,
+    action: "plan" | "run" | "pause",
+  ): Promise<void> {
+    if (!this.deps.agent.getThreadGoal || !this.deps.agent.setThreadGoal) throw new Error("Agent driver does not support thread goals.");
+    const status = this.deps.agent.getStatus(key);
+    if (!status?.running) {
+      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Goal action expired.", "The Codex session is no longer running."), { inline_keyboard: [] });
+      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+      return;
+    }
+    const goal = await this.deps.agent.getThreadGoal(key);
+    if (!goal) {
+      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Goal action expired.", "No goal is currently set."), { inline_keyboard: [] });
+      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+      return;
+    }
+
+    if (action === "pause") {
+      const paused = await this.deps.agent.setThreadGoal(key, { status: "paused" });
+      await this.deps.renderStrictCallbackPage(message, formatGoalUpdatedMessage(paused), { inline_keyboard: [] });
+      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+      return;
+    }
+
+    if (this.sessionBusy(status) || this.deps.hasTaskCreatedAfter(message.conversationId, status.workspaceName, pending.createdAt)) {
+      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Goal action expired.", "A newer turn is already active or has been submitted."), { inline_keyboard: [] });
+      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+      return;
+    }
+
+    this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+    if (action === "plan") {
+      this.deps.store.setCollaborationMode(key, "plan");
+      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Planning goal.", goal.objective), { inline_keyboard: [] });
+      await this.deps.submitTask(message.conversationId, goal.objective, message.messageId, "immediate");
+      return;
+    }
+
+    this.deps.store.setCollaborationMode(key, "default");
+    await this.deps.renderStrictCallbackPage(message, messageWithTitle("Running next step.", goal.objective), { inline_keyboard: [] });
+    await this.deps.submitTask(message.conversationId, `Continue working toward this goal:\n\n${goal.objective}`, message.messageId, "immediate");
+  }
+
+  private async sendGoalActionPrompt(conversationId: ConversationId, key: string, goal: AgentThreadGoal): Promise<void> {
+    const token = shortToken();
+    const result = await this.deps.sendRendered(conversationId, formatGoalUpdatedMessage(goal), {
+      replyMarkup: goalActionKeyboard(token),
+      disableWebPagePreview: true,
+    });
+    if (!result.messageId) return;
+    this.deps.store.setPendingPrompt({
+      conversationId,
+      promptMessageId: result.messageId,
+      kind: "relay_command",
+      createdAt: Date.now(),
+      sessionKey: key,
+      payloadJson: JSON.stringify({ command: "goal", token }),
+      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
+    });
+  }
+
+  private async renderGoalActionPromptFromCallback(
+    message: CallbackMessage,
+    key: string,
+    goal: AgentThreadGoal,
+  ): Promise<void> {
+    const token = shortToken();
+    const result = await this.deps.renderCallbackPage(message, formatGoalUpdatedMessage(goal), goalActionKeyboard(token));
+    if (!result.messageId) return;
+    this.deps.store.setPendingPrompt({
+      conversationId: message.conversationId,
+      promptMessageId: result.messageId,
+      kind: "relay_command",
+      createdAt: Date.now(),
+      sessionKey: key,
+      payloadJson: JSON.stringify({ command: "goal", token }),
+      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
+    });
   }
 
   private async dismissPlanReadyPrompt(message: CallbackMessage): Promise<void> {

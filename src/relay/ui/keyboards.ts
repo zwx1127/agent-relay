@@ -43,6 +43,18 @@ export function goalReplaceKeyboard(token: string): InlineKeyboardMarkup {
   };
 }
 
+export function goalActionKeyboard(token: string): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [
+      [
+        { text: "Plan first", callback_data: `ar:cmd:goal:${token}:plan` },
+        { text: "Run next step", callback_data: `ar:cmd:goal:${token}:run` },
+      ],
+      [{ text: "Pause goal", callback_data: `ar:cmd:goal:${token}:pause` }],
+    ],
+  };
+}
+
 export function approvalKeyboard(token: string): InlineKeyboardMarkup {
   return {
     inline_keyboard: [[
