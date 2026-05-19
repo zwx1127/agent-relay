@@ -160,6 +160,7 @@ export class RelayController {
       codexQuestion: (message, payload) => this.codexPromptFlow.answerOptionCallback(message, payload),
       pagedOutput: (message, payload) => this.renderPagedOutputCallback(message, payload),
       command: (message, payload) => this.threadCommands.handleCommandCallback(message, payload),
+      fileBrowser: (message, payload) => this.workspaceFlow.renderFileBrowserCallback(message, payload),
       stop: (message) => this.workspaceFlow.stopFromCallback(message),
       workspaceIntro: (message, token, pageIndex) => this.workspaceFlow.renderWorkspaceIntroCallback(message, token, pageIndex),
       confirmDeleteWorkspace: (message, token) => this.workspaceFlow.confirmDeleteWorkspaceCallback(message, token),

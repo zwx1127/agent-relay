@@ -1589,44 +1589,92 @@ describe("relay controller", () => {
     expect(existsSync(join(root, "demo", ".git"))).toBe(true);
   });
 
-  test("workspace name button opens README intro and returns to workspace list", async () => {
+  test("workspace name button opens tracked files and text preview", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
-    mkdirSync(path);
+    mkdirSync(join(path, "src"), { recursive: true });
     writeFileSync(join(path, "README.md"), "# Demo\n\nProject summary from README.\n\nMore details.");
+    writeFileSync(join(path, "src", "index.ts"), "export const value = 1;\n");
+    writeFileSync(join(path, "secret.txt"), "untracked");
+    gitInitAndAdd(path, ["README.md", "src/index.ts"]);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
 
     await router.handle(callbackMessage("ar:w"));
-    const introButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wi:0:"));
-    expect(introButton?.text).toBe("demo");
+    const filesButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wi:0:"));
+    expect(filesButton?.text).toBe("demo");
 
-    await router.handle(callbackMessage(introButton!.callback_data, 7, "cb-intro", adapter.edited.at(-1)?.options.messageId));
+    await router.handle(callbackMessage(filesButton!.callback_data, 7, "cb-files", adapter.edited.at(-1)?.options.messageId));
 
-    expect(adapter.edited.at(-1)?.text).toContain("Workspace");
+    expect(adapter.edited.at(-1)?.text).toContain("Files");
+    expect(adapter.edited.at(-1)?.text).toContain("Workspace: demo");
+    expect(adapter.edited.at(-1)?.text).toContain("Path: /");
+    expect(adapter.edited.at(-1)?.text).toContain("[dir] src/");
+    expect(adapter.edited.at(-1)?.text).toContain("[file] README.md");
+    expect(adapter.edited.at(-1)?.text).not.toContain("secret.txt");
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.at(-1)?.map((button) => button.text)).toEqual(["Back", "Select", "Delete"]);
+
+    const readmeButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "README.md");
+    await router.handle(callbackMessage(readmeButton!.callback_data, 7, "cb-file", adapter.edited.at(-1)?.options.messageId));
+
+    expect(adapter.edited.at(-1)?.text).toContain("File");
     expect(adapter.edited.at(-1)?.text).toContain("demo");
-    expect(adapter.edited.at(-1)?.text).toContain(path);
+    expect(adapter.edited.at(-1)?.text).toContain("Path: /README.md");
     expect(adapter.edited.at(-1)?.text).toContain("Project summary from README.");
-    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Back", "Select", "Delete"]);
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Back"]);
+
+    const backToDirButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Back");
+    await router.handle(callbackMessage(backToDirButton!.callback_data, 7, "cb-file-back", adapter.edited.at(-1)?.options.messageId));
+
+    expect(adapter.edited.at(-1)?.text).toContain("Files");
 
     const backButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:wl:0");
-    await router.handle(callbackMessage(backButton!.callback_data, 7, "cb-intro-back", adapter.edited.at(-1)?.options.messageId));
+    await router.handle(callbackMessage(backButton!.callback_data, 7, "cb-files-back", adapter.edited.at(-1)?.options.messageId));
 
     expect(adapter.edited.at(-1)?.text).toContain("Workspaces");
     expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.find((row) => row.at(0)?.text === "demo")?.map((button) => button.text)).toEqual(["demo", "Select", "Delete"]);
   });
 
-  test("workspace intro shows fallback when README is missing", async () => {
+  test("workspace files show a clear error for non-git workspaces", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
 
     await router.handle(callbackMessage("ar:w"));
-    const introButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wi:0:"));
+    const filesButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wi:0:"));
 
-    await router.handle(callbackMessage(introButton!.callback_data, 7, "cb-intro", adapter.edited.at(-1)?.options.messageId));
+    await router.handle(callbackMessage(filesButton!.callback_data, 7, "cb-files-error", adapter.edited.at(-1)?.options.messageId));
 
-    expect(adapter.edited.at(-1)?.text).toContain("No README found.");
+    expect(adapter.edited.at(-1)?.text).toContain("Error:");
+    expect(adapter.edited.at(-1)?.text).toContain("Unable to list tracked files");
+  });
+
+  test("workspace file preview pages long text and returns to directory", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    writeFileSync(join(path, "long.txt"), Array.from({ length: 900 }, (_, index) => `line ${index}`).join("\n"));
+    gitInitAndAdd(path, ["long.txt"]);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+
+    await router.handle(callbackMessage("ar:w"));
+    const filesButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wi:0:"));
+    await router.handle(callbackMessage(filesButton!.callback_data, 7, "cb-files", adapter.edited.at(-1)?.options.messageId));
+    const longButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "long.txt");
+
+    await router.handle(callbackMessage(longButton!.callback_data, 7, "cb-long", adapter.edited.at(-1)?.options.messageId));
+
+    expect(adapter.edited.at(-1)?.text).toContain("Page 1/");
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.at(0)?.map((button) => button.text)).toEqual(["First", "Prev", "Next", "Last"]);
+
+    const nextButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Next");
+    await router.handle(callbackMessage(nextButton!.callback_data, 7, "cb-next-file-page", adapter.edited.at(-1)?.options.messageId));
+
+    expect(adapter.edited.at(-1)?.text).toContain("Page 2/");
+    const backButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Back");
+    await router.handle(callbackMessage(backButton!.callback_data, 7, "cb-long-back", adapter.edited.at(-1)?.options.messageId));
+    expect(adapter.edited.at(-1)?.text).toContain("Files");
+    expect(adapter.edited.at(-1)?.text).toContain("[file] long.txt");
   });
 
   test("workspace management back returns to Relay Home", async () => {
@@ -2327,6 +2375,22 @@ function callbackMessage(data: string, userId = 7, callbackQueryId = "cb1", mess
     messageId,
     data,
   };
+}
+
+function gitInitAndAdd(cwd: string, paths: string[]): void {
+  runGit(cwd, ["init"]);
+  runGit(cwd, ["add", ...paths]);
+}
+
+function runGit(cwd: string, args: string[]): void {
+  const proc = Bun.spawnSync(["git", ...args], {
+    cwd,
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  if (proc.exitCode !== 0) {
+    throw new Error(new TextDecoder().decode(proc.stderr).trim() || `git ${args.join(" ")} failed`);
+  }
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T | PromiseLike<T>) => void; reject: (error: unknown) => void } {

@@ -1,5 +1,4 @@
-import { readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import type { AppConfig } from "../runtime/config.ts";
 import type { AgentDriver, AgentSessionStatus } from "../ports/agent.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
@@ -12,16 +11,14 @@ import type { WorkspaceRecord } from "./types.ts";
 import type { StatusView } from "./ui/status-view.ts";
 import { workspaceCallbackToken } from "./ui/callback-data.ts";
 import { confirmMessage, formatWorkspacesMessage } from "./ui/messages.ts";
-import { consoleKeyboard, deleteWorkspaceConfirmKeyboard, workspaceIntroKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
+import { consoleKeyboard, deleteWorkspaceConfirmKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
 import { paginateWorkspaces } from "./ui/pagination.ts";
 import { parsePromptPayload } from "./ui/prompt-state.ts";
-import { code, messageWithTitle, textMessage, bold } from "./ui/text-parts.ts";
+import { code, messageWithTitle, textMessage } from "./ui/text-parts.ts";
 import { formatHomeMessage } from "./ui/status-message.ts";
 import { renderTelegramText, type RenderedTelegramText } from "../presentation/telegram/text.ts";
 import type { RenderCallbackPageResult } from "./controller-types.ts";
-
-const WORKSPACE_INTRO_FILES = ["README.md", "README", "README.markdown", "README.txt"];
-const WORKSPACE_INTRO_MAX_CHARS = 2400;
+import { WorkspaceFileBrowser } from "./workspace-files.ts";
 
 type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
 
@@ -41,7 +38,18 @@ export interface WorkspaceFlowDeps {
 }
 
 export class WorkspaceFlow {
-  constructor(private readonly deps: WorkspaceFlowDeps) {}
+  private readonly fileBrowser: WorkspaceFileBrowser;
+
+  constructor(private readonly deps: WorkspaceFlowDeps) {
+    this.fileBrowser = new WorkspaceFileBrowser({
+      store: deps.store,
+      logger: deps.logger,
+      workspaceNameForToken: (token) => this.workspaceNameForToken(token),
+      requireWorkspace: (name) => this.requireWorkspace(name),
+      currentWorkspace: (conversationId) => this.currentWorkspace(conversationId),
+      renderCallbackPage: (message, body, replyMarkup) => this.deps.renderCallbackPage(message, body, replyMarkup),
+    });
+  }
 
   currentWorkspace(conversationId: ConversationId): WorkspaceRecord | undefined {
     const binding = this.deps.store.getBinding(conversationId);
@@ -105,13 +113,11 @@ export class WorkspaceFlow {
   }
 
   async renderWorkspaceIntroCallback(message: CallbackMessage, token: string, pageIndex: number): Promise<void> {
-    const name = await this.workspaceNameForToken(token);
-    const workspace = this.requireWorkspace(name);
-    const selected = this.currentWorkspace(message.conversationId)?.name === workspace.name;
-    const safePageIndex = Number.isFinite(pageIndex) && pageIndex >= 0 ? Math.floor(pageIndex) : 0;
-    const intro = await this.readWorkspaceIntro(workspace);
-    const result = await this.deps.renderCallbackPage(message, formatWorkspaceIntroMessage(workspace, intro), workspaceIntroKeyboard(workspace, selected, safePageIndex));
-    this.trackControlMessage(message.conversationId, result);
+    await this.fileBrowser.openWorkspaceRoot(message, token, pageIndex);
+  }
+
+  async renderFileBrowserCallback(message: CallbackMessage, payload: string): Promise<void> {
+    await this.fileBrowser.handleCallback(message, payload);
   }
 
   async selectWorkspaceFromToken(message: CallbackMessage, token: string): Promise<void> {
@@ -264,54 +270,6 @@ export class WorkspaceFlow {
     if (result.messageId) this.deps.store.setConsoleMessageId(conversationId, result.messageId);
   }
 
-  private async readWorkspaceIntro(workspace: WorkspaceRecord): Promise<string> {
-    for (const fileName of WORKSPACE_INTRO_FILES) {
-      try {
-        const text = await readFile(join(workspace.path, fileName), "utf8");
-        return workspaceIntroExcerpt(text);
-      } catch (error) {
-        if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") continue;
-        this.deps.logger.warn("router.workspace_intro_read_failed", {
-          workspace: workspace.name,
-          path: join(workspace.path, fileName),
-          error: error instanceof Error ? error : new Error(String(error)),
-        });
-      }
-    }
-    return "No README found.";
-  }
-}
-
-function formatWorkspaceIntroMessage(workspace: WorkspaceRecord, intro: string): RenderedTelegramText {
-  return renderTelegramText([
-    bold("Workspace"),
-    "\n\nName: ",
-    code(workspace.name),
-    "\nPath: ",
-    code(workspace.path),
-    "\n\n",
-    bold("README"),
-    "\n\n",
-    intro,
-  ]);
-}
-
-function workspaceIntroExcerpt(text: string): string {
-  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
-  if (!normalized) return "README is empty.";
-  if (normalized.length <= WORKSPACE_INTRO_MAX_CHARS) return normalized;
-  const window = normalized.slice(0, WORKSPACE_INTRO_MAX_CHARS);
-  const candidates = [
-    { index: window.lastIndexOf("\n\n"), minRatio: 0.45, width: 2 },
-    { index: window.lastIndexOf("\n"), minRatio: 0.6, width: 1 },
-    { index: window.lastIndexOf(" "), minRatio: 0.7, width: 1 },
-  ];
-  for (const candidate of candidates) {
-    if (candidate.index > Math.floor(WORKSPACE_INTRO_MAX_CHARS * candidate.minRatio)) {
-      return `${normalized.slice(0, candidate.index + candidate.width).trimEnd()}\n\n...`;
-    }
-  }
-  return `${window.trimEnd()}\n\n...`;
 }
 
 function normalizePageIndex(value: unknown): number {

@@ -17,6 +17,7 @@ export interface CallbackHandlers {
   codexQuestion(message: CallbackMessage, payload: string): Promise<CallbackResult>;
   pagedOutput(message: CallbackMessage, payload: string): Promise<CallbackResult>;
   command(message: CallbackMessage, payload: string): Promise<CallbackResult>;
+  fileBrowser(message: CallbackMessage, payload: string): Promise<CallbackResult>;
   stop(message: CallbackMessage): Promise<CallbackResult>;
   workspaceIntro(message: CallbackMessage, token: string, pageIndex: number): Promise<CallbackResult>;
   confirmDeleteWorkspace(message: CallbackMessage, token: string): Promise<CallbackResult>;
@@ -61,6 +62,9 @@ export class CallbackRouter {
     }
     if (payload.startsWith("cmd:")) {
       return callbackText(await this.handlers.command(message, payload));
+    }
+    if (payload.startsWith("f:")) {
+      return callbackText(await this.handlers.fileBrowser(message, payload));
     }
     if (payload.startsWith("wl:")) {
       return callbackText(await this.handlers.workspaces(message, Number(payload.slice("wl:".length))));

@@ -46,6 +46,7 @@ export function isConsolePayload(payload: string): boolean {
     || payload.startsWith("n:")
     || payload === "status"
     || payload === "stop"
+    || payload.startsWith("f:")
     || payload.startsWith("wl:")
     || payload.startsWith("wi:")
     || payload.startsWith("wd?:")
