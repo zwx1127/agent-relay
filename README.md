@@ -8,7 +8,7 @@ The project is built with Bun, TypeScript, SQLite, a provider-neutral router, an
 
 - Remote Telegram or Lark control for local Codex app-server sessions.
 - Per-conversation workspace selection under a configured `WORKSPACE_ROOT`.
-- Remote browsing and preview of git-tracked text files in selected workspaces.
+- Remote browsing and preview of `.gitignore`-filtered text files in selected workspaces.
 - Inline handling for Codex questions, approvals, Plan mode flows, thread resume, fork, rename, and compaction.
 - IM image input and Codex-generated image output support with workspace-local media storage.
 - Provider-oriented architecture for adding more IM, agent, and persistence backends.
@@ -127,7 +127,7 @@ Send `/relay` to open Relay Home. Relay Home shows the selected workspace, Codex
 
 Relay Home actions:
 
-- `Workspaces`: open the workspace management view. It lists first-level directories under `WORKSPACE_ROOT`, keeps `Back`, `New`, and `Refresh` actions fixed at the bottom, and supports browsing a workspace's files, selecting a workspace, or deleting one after confirmation. Clicking a workspace name opens a git-tracked file browser for that workspace; the adjacent `Select` button chooses it for Codex. `Back` returns to Relay Home. `New` asks for a workspace name with an input placeholder, then sends a short confirmation and refreshes the workspace list in place.
+- `Workspaces`: open the workspace management view. It lists first-level directories under `WORKSPACE_ROOT`, keeps `Back`, `New`, and `Refresh` actions fixed at the bottom, and supports browsing a workspace's files, selecting a workspace, or deleting one after confirmation. Clicking a workspace name opens a `.gitignore`-filtered file browser for that workspace; the adjacent `Select` button chooses it for Codex. `Back` returns to Relay Home. `New` asks for a workspace name with an input placeholder, then sends a short confirmation and refreshes the workspace list in place.
 - `Details` / `Compact`: toggle compact and detailed status views for the conversation.
 - `Refresh`: redraw the current Relay Home message.
 - `Stop`: interrupt the current workspace session and clear the conversation's workspace selection.
@@ -168,7 +168,7 @@ Codex questions with predefined options are shown with inline buttons. In Plan m
 
 Assistant output is rendered as Telegram text entities rather than HTML parse mode. Common Markdown is supported, including headings, lists, task lists, blockquotes, emphasis, inline code, code blocks, and HTTP/HTTPS links. Long output is stored and shown as paged Telegram messages.
 
-Workspace file browsing is read-only. It lists only files tracked by git, groups them into navigable directories, and previews regular UTF-8 text files up to 256 KiB. Binary files, symlinks, untracked files, oversized files, and non-git workspaces are rejected with an inline error.
+Workspace file browsing is read-only. It lists files not excluded by workspace `.gitignore` rules, groups them into navigable directories, and previews regular UTF-8 text files up to 256 KiB. The internal `.git/` directory is hidden. Binary files, symlinks, ignored files, oversized files, and invalid paths are rejected with an inline error.
 
 ## Lark Usage
 
@@ -213,7 +213,7 @@ The helper calls `POST /v1/capabilities/send_image` with `{ path, cwd, sessionKe
 - The relay starts one agent provider process and creates or resumes one agent thread per `conversation + workspace`.
 - SQLite stores workspaces, conversation bindings, Codex thread IDs, Plan mode state, Relay Home UI state, prompt/task state, transcript events, approval metadata, paged assistant output, and schema migration metadata.
 - Runtime logs go to stdout. `debug` logs include raw IM messages, Codex input text, and Codex output chunks.
-- Workspace file browsing is limited to git-tracked regular files inside the selected workspace and previews UTF-8 text only.
+- Workspace file browsing is limited to `.gitignore`-visible regular files inside the selected workspace and previews UTF-8 text only.
 
 ## Provider Architecture
 

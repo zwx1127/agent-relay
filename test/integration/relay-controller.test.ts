@@ -1589,14 +1589,14 @@ describe("relay controller", () => {
     expect(existsSync(join(root, "demo", ".git"))).toBe(true);
   });
 
-  test("workspace name button opens tracked files and text preview", async () => {
+  test("workspace name button opens gitignore-filtered files and text preview", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(join(path, "src"), { recursive: true });
+    writeFileSync(join(path, ".gitignore"), "secret.txt\n");
     writeFileSync(join(path, "README.md"), "# Demo\n\nProject summary from README.\n\nMore details.");
     writeFileSync(join(path, "src", "index.ts"), "export const value = 1;\n");
-    writeFileSync(join(path, "secret.txt"), "untracked");
-    gitInitAndAdd(path, ["README.md", "src/index.ts"]);
+    writeFileSync(join(path, "secret.txt"), "ignored");
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
 
     await router.handle(callbackMessage("ar:w"));
@@ -1634,19 +1634,20 @@ describe("relay controller", () => {
     expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.find((row) => row.at(0)?.text === "demo")?.map((button) => button.text)).toEqual(["demo", "Select", "Delete"]);
   });
 
-  test("workspace files show a clear error for non-git workspaces", async () => {
+  test("workspace files browse non-git workspaces", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
+    writeFileSync(join(path, "note.txt"), "plain workspace");
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
 
     await router.handle(callbackMessage("ar:w"));
     const filesButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data.startsWith("ar:wi:0:"));
 
-    await router.handle(callbackMessage(filesButton!.callback_data, 7, "cb-files-error", adapter.edited.at(-1)?.options.messageId));
+    await router.handle(callbackMessage(filesButton!.callback_data, 7, "cb-files", adapter.edited.at(-1)?.options.messageId));
 
-    expect(adapter.edited.at(-1)?.text).toContain("Error:");
-    expect(adapter.edited.at(-1)?.text).toContain("Unable to list tracked files");
+    expect(adapter.edited.at(-1)?.text).toContain("Files");
+    expect(adapter.edited.at(-1)?.text).toContain("[file] note.txt");
   });
 
   test("workspace file preview pages long text and returns to directory", async () => {
@@ -1654,7 +1655,6 @@ describe("relay controller", () => {
     const path = join(root, "demo");
     mkdirSync(path);
     writeFileSync(join(path, "long.txt"), Array.from({ length: 900 }, (_, index) => `line ${index}`).join("\n"));
-    gitInitAndAdd(path, ["long.txt"]);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
 
     await router.handle(callbackMessage("ar:w"));
@@ -2375,22 +2375,6 @@ function callbackMessage(data: string, userId = 7, callbackQueryId = "cb1", mess
     messageId,
     data,
   };
-}
-
-function gitInitAndAdd(cwd: string, paths: string[]): void {
-  runGit(cwd, ["init"]);
-  runGit(cwd, ["add", ...paths]);
-}
-
-function runGit(cwd: string, args: string[]): void {
-  const proc = Bun.spawnSync(["git", ...args], {
-    cwd,
-    stdout: "ignore",
-    stderr: "pipe",
-  });
-  if (proc.exitCode !== 0) {
-    throw new Error(new TextDecoder().decode(proc.stderr).trim() || `git ${args.join(" ")} failed`);
-  }
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T | PromiseLike<T>) => void; reject: (error: unknown) => void } {

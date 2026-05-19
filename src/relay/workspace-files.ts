@@ -1,4 +1,5 @@
-import { lstat, readFile } from "node:fs/promises";
+import ignore from "ignore";
+import { lstat, readFile, readdir } from "node:fs/promises";
 import { join, posix, relative, resolve, isAbsolute } from "node:path";
 import type { ConversationId } from "../domain/ids.ts";
 import type { Logger } from "../domain/logger.ts";
@@ -16,6 +17,12 @@ import { bold, code, messageWithTitle } from "./ui/text-parts.ts";
 const MAX_TEXT_FILE_BYTES = 256 * 1024;
 
 type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
+type IgnoreMatcher = ReturnType<typeof ignore>;
+
+interface IgnoreScope {
+  baseDir: string;
+  matcher: IgnoreMatcher;
+}
 
 export interface WorkspaceFileBrowserDeps {
   store: RelayStore;
@@ -86,8 +93,8 @@ export class WorkspaceFileBrowser {
       case "d":
       case "o": {
         const index = Number(value);
-        const trackedFiles = await listTrackedWorkspaceFiles(workspace.path);
-        const entries = directoryEntries(trackedFiles, state.dir);
+        const visibleFiles = await listVisibleWorkspaceFiles(workspace.path);
+        const entries = directoryEntries(visibleFiles, state.dir);
         const entry = Number.isInteger(index) ? entries[index] : undefined;
         if (!entry || entry.kind !== (action === "d" ? "directory" : "file")) {
           await this.deps.renderCallbackPage(message, messageWithTitle("File entry unavailable."), directoryKeyboard(state, [], 0, 1, workspace, this.isSelected(message.conversationId, workspace)));
@@ -113,8 +120,8 @@ export class WorkspaceFileBrowser {
   }
 
   private async renderDirectory(message: CallbackMessage, workspace: WorkspaceRecord, state: FileBrowserState, rawPageIndex: number): Promise<void> {
-    const trackedFiles = await listTrackedWorkspaceFiles(workspace.path);
-    const entries = directoryEntries(trackedFiles, state.dir);
+    const visibleFiles = await listVisibleWorkspaceFiles(workspace.path);
+    const entries = directoryEntries(visibleFiles, state.dir);
     const totalPages = Math.max(1, Math.ceil(entries.length / LIST_PAGE_SIZE));
     const pageIndex = clampPage(rawPageIndex, totalPages);
     const pageEntries = entries.slice(pageIndex * LIST_PAGE_SIZE, pageIndex * LIST_PAGE_SIZE + LIST_PAGE_SIZE);
@@ -138,8 +145,8 @@ export class WorkspaceFileBrowser {
 
   private async renderFile(message: CallbackMessage, workspace: WorkspaceRecord, state: FileBrowserState, rawPageIndex: number): Promise<void> {
     if (!state.filePath) throw new Error("File path is missing.");
-    const trackedFiles = await listTrackedWorkspaceFiles(workspace.path);
-    const text = await readTrackedTextFile(workspace.path, state.filePath, trackedFiles);
+    const visibleFiles = await listVisibleWorkspaceFiles(workspace.path);
+    const text = await readVisibleTextFile(workspace.path, state.filePath, visibleFiles);
     const rendered = formatFileMessage(workspace, state.filePath, text);
     const pages = splitRenderedForTelegram(rendered, PAGE_MAX_CHARS);
     const pageIndex = clampPage(rawPageIndex, pages.length);
@@ -188,34 +195,75 @@ export class WorkspaceFileBrowser {
   }
 }
 
-export async function listTrackedWorkspaceFiles(workspacePath: string): Promise<string[]> {
-  const proc = Bun.spawn(["git", "ls-files", "-z"], {
-    cwd: workspacePath,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    proc.exited,
-    proc.stdout ? new Response(proc.stdout).text() : Promise.resolve(""),
-    proc.stderr ? new Response(proc.stderr).text() : Promise.resolve(""),
-  ]);
-  if (exitCode !== 0) {
-    const detail = stderr.trim();
-    throw new Error(detail ? `Unable to list tracked files: ${detail}` : "Unable to list tracked files. Ensure the workspace is a git repository.");
-  }
-  return stdout
-    .split("\0")
-    .filter(Boolean)
-    .map((path) => normalizeBrowserPath(path))
-    .sort((left, right) => left.localeCompare(right));
+export async function listVisibleWorkspaceFiles(workspacePath: string): Promise<string[]> {
+  const root = resolve(workspacePath);
+  const files: string[] = [];
+  await collectVisibleFiles(root, "", [], files);
+  return files.sort((left, right) => left.localeCompare(right));
 }
 
-export function directoryEntries(trackedFiles: string[], dir: string): WorkspaceFileEntry[] {
+async function collectVisibleFiles(root: string, dir: string, parentScopes: IgnoreScope[], files: string[]): Promise<void> {
+  const absoluteDir = dir ? resolveInsideWorkspace(root, dir) : root;
+  const scopes = await scopesForDirectory(absoluteDir, dir, parentScopes);
+  let entries;
+  try {
+    entries = await readdir(absoluteDir, { withFileTypes: true });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Unable to list files: ${detail}`);
+  }
+
+  for (const entry of entries) {
+    const path = normalizeBrowserPath(dir ? `${dir}/${entry.name}` : entry.name);
+    const isDirectory = entry.isDirectory();
+    if (isDirectory && entry.name === ".git") continue;
+    if (isIgnored(scopes, path, isDirectory)) continue;
+    if (isDirectory) {
+      await collectVisibleFiles(root, path, scopes, files);
+    } else {
+      files.push(path);
+    }
+  }
+}
+
+async function scopesForDirectory(absoluteDir: string, dir: string, parentScopes: IgnoreScope[]): Promise<IgnoreScope[]> {
+  const matcher = await readGitignore(join(absoluteDir, ".gitignore"));
+  return matcher ? [...parentScopes, { baseDir: dir, matcher }] : parentScopes;
+}
+
+async function readGitignore(path: string): Promise<IgnoreMatcher | undefined> {
+  try {
+    const stat = await lstat(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+    const matcher = ignore();
+    matcher.add(await readFile(path, "utf8"));
+    return matcher;
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+    if (code === "ENOENT" || code === "ENOTDIR") return undefined;
+    throw error;
+  }
+}
+
+function isIgnored(scopes: IgnoreScope[], path: string, isDirectory: boolean): boolean {
+  const candidate = isDirectory ? `${path}/` : path;
+  let ignored = false;
+  for (const scope of scopes) {
+    const relativePath = relativeToDirectory(candidate, scope.baseDir);
+    if (!relativePath) continue;
+    const result = scope.matcher.test(relativePath);
+    if (result.ignored) ignored = true;
+    if (result.unignored) ignored = false;
+  }
+  return ignored;
+}
+
+export function directoryEntries(visibleFiles: string[], dir: string): WorkspaceFileEntry[] {
   const normalizedDir = normalizeDirectoryPath(dir);
   const directoryPaths = new Map<string, WorkspaceFileEntry>();
   const fileEntries: WorkspaceFileEntry[] = [];
 
-  for (const filePath of trackedFiles.map((path) => normalizeBrowserPath(path))) {
+  for (const filePath of visibleFiles.map((path) => normalizeBrowserPath(path))) {
     const rest = relativeToDirectory(filePath, normalizedDir);
     if (rest === undefined || rest.length === 0) continue;
     const [first, ...remaining] = rest.split("/");
@@ -234,9 +282,9 @@ export function directoryEntries(trackedFiles: string[], dir: string): Workspace
   ];
 }
 
-export async function readTrackedTextFile(workspacePath: string, browserPath: string, trackedFiles: string[]): Promise<string> {
+export async function readVisibleTextFile(workspacePath: string, browserPath: string, visibleFiles: string[]): Promise<string> {
   const normalizedPath = normalizeBrowserPath(browserPath);
-  if (!trackedFiles.includes(normalizedPath)) throw new Error("File is not tracked by git.");
+  if (!visibleFiles.includes(normalizedPath)) throw new Error("File is ignored or unavailable.");
   const absolutePath = resolveInsideWorkspace(workspacePath, normalizedPath);
   const stat = await lstat(absolutePath);
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("File is not a regular file.");
@@ -260,7 +308,7 @@ function formatDirectoryMessage(workspace: WorkspaceRecord, dir: string, entries
     `\nPage ${pageIndex + 1}/${totalPages}`,
   ];
   if (totalEntries === 0) {
-    parts.push("\n\nNo tracked files here.");
+    parts.push("\n\nNo files here.");
   } else {
     for (const entry of entries) {
       parts.push("\n", entry.kind === "directory" ? "[dir] " : "[file] ", code(entry.kind === "directory" ? `${entry.name}/` : entry.name));
