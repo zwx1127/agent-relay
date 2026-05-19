@@ -23,17 +23,13 @@ import type {
 } from "../../../ports/agent.ts";
 import { applySessionMetadata, applyThreadMetadata, approvalCopy, approvalKindForMethod, asRecord, collaborationModePayload, getString, getThreadId, getTurnId, imageOutputEvent, isNoActiveTurnToInterruptError, isNoActiveTurnToSteerError, reviewTargetPayload, summarizeUnknown, toModelSummary, toQuestion, toThreadGoal, toThreadSummary, toTokenBreakdown, updateActiveTurnFromResult, userInputPayload } from "./protocol.ts";
 import { codexAppServerSpawnCommand, formatCodexSpawnError, type CodexSpawnCommand } from "./spawn.ts";
+import { BackgroundTerminalTracker } from "./background-terminals.ts";
+import { CodexRpcClient, type JsonRpcMessage, type JsonRpcNotification, type JsonRpcRequest, type JsonRpcResponse } from "./rpc.ts";
+import { RecentStderrBuffer } from "./stderr-buffer.ts";
 
 interface RunningSession {
   status: AgentSessionStatus;
-  backgroundTerminals: Map<string, BackgroundTerminalRecord>;
-}
-
-interface BackgroundTerminalRecord {
-  key: string;
-  callId: string;
-  commandDisplay: string;
-  recentChunks: string[];
+  backgroundTerminals: BackgroundTerminalTracker;
 }
 
 export interface CodexDriverOptions {
@@ -44,33 +40,6 @@ export interface CodexDriverOptions {
   baseInstructions?: string;
   env?: Record<string, string>;
 }
-
-interface JsonRpcRequest {
-  id: number;
-  method: string;
-  params?: unknown;
-}
-
-interface JsonRpcResponse {
-  id: number | string;
-  result?: unknown;
-  error?: { code: number; message: string; data?: unknown };
-}
-
-interface JsonRpcNotification {
-  method: string;
-  params?: unknown;
-}
-
-type PendingRpc = {
-  resolve: (value: unknown) => void;
-  reject: (error: Error) => void;
-  method: string;
-  timer: Timer;
-};
-
-const MAX_RECENT_STDERR_LINES = 20;
-const MAX_RECENT_STDERR_CHARS = 8 * 1024;
 
 export class CodexDriver implements AgentDriver {
   readonly providerId = "codex";
@@ -91,14 +60,13 @@ export class CodexDriver implements AgentDriver {
 
   private readonly sessions = new Map<string, RunningSession>();
   private readonly threadToSession = new Map<string, string>();
-  private readonly pending = new Map<number | string, PendingRpc>();
   private readonly inputQueues = new Map<string, Promise<{ turnId?: string }>>();
+  private readonly rpc = new CodexRpcClient((message, options) => this.writeMessage(message, options));
+  private readonly recentServerStderr = new RecentStderrBuffer();
   private proc?: ChildProcessWithoutNullStreams;
-  private nextRequestId = 1;
   private ready?: Promise<void>;
   private stopping = false;
   private appServerCommand?: CodexSpawnCommand;
-  private recentServerStderr: string[] = [];
 
   constructor(
     private readonly options: CodexDriverOptions,
@@ -157,7 +125,7 @@ export class CodexDriver implements AgentDriver {
     status.threadId = threadId;
     applySessionMetadata(status, result);
     this.threadToSession.set(threadId, key);
-    this.sessions.set(key, { status, backgroundTerminals: new Map() });
+    this.sessions.set(key, { status, backgroundTerminals: new BackgroundTerminalTracker() });
 
     this.logger.info("codex.session_started", {
       session_key: key,
@@ -309,7 +277,7 @@ export class CodexDriver implements AgentDriver {
   }
 
   async respond(sessionKey: string, requestId: string | number, result: unknown): Promise<void> {
-    await this.writeMessage({ id: requestId, result });
+    await this.rpc.respond(requestId, result);
     const running = this.sessions.get(sessionKey);
     if (running) {
       running.status.waitingForApproval = false;
@@ -400,10 +368,7 @@ export class CodexDriver implements AgentDriver {
 
   async listBackgroundTerminals(key: string): Promise<AgentBackgroundTerminalSummary[]> {
     const running = this.requireRunningSession(key);
-    return Array.from(running.backgroundTerminals.values()).map((terminal) => ({
-      commandDisplay: terminal.commandDisplay,
-      recentChunks: [...terminal.recentChunks],
-    }));
+    return running.backgroundTerminals.list();
   }
 
   async listThreads(options: AgentThreadListOptions): Promise<AgentThreadSummary[]> {
@@ -441,7 +406,7 @@ export class CodexDriver implements AgentDriver {
     const env = { ...process.env, ...this.options.env };
     const command = codexAppServerSpawnCommand(this.options.codexBin, env);
     this.appServerCommand = command;
-    this.recentServerStderr = [];
+    this.recentServerStderr.clear();
     try {
       this.proc = spawn(command.command, command.args, {
         env,
@@ -496,7 +461,9 @@ export class CodexDriver implements AgentDriver {
     }
 
     if ("id" in message && ("result" in message || "error" in message) && !("method" in message)) {
-      this.handleResponse(message as JsonRpcResponse);
+      this.rpc.handleResponse(message as JsonRpcResponse, (id) => {
+        this.logger.debug("codex.unmatched_response", { id });
+      });
       return;
     }
     if ("id" in message && "method" in message) {
@@ -505,21 +472,6 @@ export class CodexDriver implements AgentDriver {
     }
     if ("method" in message) {
       void this.handleNotification(message as JsonRpcNotification);
-    }
-  }
-
-  private handleResponse(message: JsonRpcResponse): void {
-    const pending = this.pending.get(message.id);
-    if (!pending) {
-      this.logger.debug("codex.unmatched_response", { id: message.id });
-      return;
-    }
-    this.pending.delete(message.id);
-    clearTimeout(pending.timer);
-    if (message.error) {
-      pending.reject(new Error(`Codex ${pending.method} failed: ${message.error.message}`));
-    } else {
-      pending.resolve(message.result);
     }
   }
 
@@ -558,18 +510,18 @@ export class CodexDriver implements AgentDriver {
     }
 
     if (message.method === "item/started") {
-      this.trackCommandExecutionStarted(running, params);
+      running.backgroundTerminals.started(params);
       return;
     }
 
     if (message.method === "item/commandExecution/outputDelta") {
-      this.trackCommandExecutionOutput(running, params);
+      running.backgroundTerminals.output(params);
       return;
     }
 
     if (message.method === "item/completed") {
       const item = asRecord(params?.item);
-      if (item?.type === "commandExecution") this.trackCommandExecutionCompleted(running, item);
+      if (item?.type === "commandExecution") running.backgroundTerminals.completed(item);
       if (item?.type === "exitedReviewMode" && typeof item.review === "string" && item.review) {
         await this.onOutput({ type: "message", sessionKey: key, chunk: item.review, turnId: getTurnId(params), itemId: getString(item, "id") });
       }
@@ -656,7 +608,7 @@ export class CodexDriver implements AgentDriver {
         : undefined;
     const key = threadId ? this.threadToSession.get(threadId) : undefined;
     if (!key) {
-      await this.writeMessage({ id: message.id, error: { code: -32000, message: "Unknown thread." } });
+      await this.rpc.rejectRequest(message.id, -32000, "Unknown thread.");
       return;
     }
 
@@ -695,72 +647,11 @@ export class CodexDriver implements AgentDriver {
       return;
     }
 
-    await this.writeMessage({ id: message.id, error: { code: -32601, message: `Unsupported server request: ${message.method}` } });
-  }
-
-  private trackCommandExecutionStarted(running: RunningSession, params: Record<string, unknown> | undefined): void {
-    const item = asRecord(params?.item);
-    if (item?.type !== "commandExecution") return;
-    if (getString(item, "source") !== "unifiedExecStartup") return;
-    const callId = getString(item, "id");
-    if (!callId) return;
-    const processId = getString(item, "processId") ?? getString(item, "process_id");
-    const key = processId ?? callId;
-    const command = commandExecutionDisplay(item);
-    const existing = running.backgroundTerminals.get(key);
-    if (existing) {
-      existing.callId = callId;
-      existing.commandDisplay = command;
-      existing.recentChunks = [];
-    } else {
-      running.backgroundTerminals.set(key, { key, callId, commandDisplay: command, recentChunks: [] });
-    }
-  }
-
-  private trackCommandExecutionOutput(running: RunningSession, params: Record<string, unknown> | undefined): void {
-    const callId = getString(params, "itemId") ?? getString(params, "item_id") ?? getString(params, "callId") ?? getString(params, "processId") ?? getString(params, "id");
-    if (!callId) return;
-    const terminal = Array.from(running.backgroundTerminals.values()).find((process) => process.callId === callId);
-    if (!terminal) return;
-    const delta = getString(params, "delta");
-    if (!delta) return;
-    for (const line of delta.split(/\r?\n/).map((value) => value.trimEnd()).filter(Boolean)) {
-      terminal.recentChunks.push(line);
-    }
-    const maxRecentChunks = 3;
-    if (terminal.recentChunks.length > maxRecentChunks) {
-      terminal.recentChunks.splice(0, terminal.recentChunks.length - maxRecentChunks);
-    }
-  }
-
-  private trackCommandExecutionCompleted(running: RunningSession, item: Record<string, unknown>): void {
-    const callId = getString(item, "id");
-    const processId = getString(item, "processId") ?? getString(item, "process_id");
-    const keys = [processId, callId].filter((key): key is string => Boolean(key));
-    for (const key of keys) running.backgroundTerminals.delete(key);
-    if (callId) {
-      for (const [key, terminal] of running.backgroundTerminals.entries()) {
-        if (terminal.callId === callId) running.backgroundTerminals.delete(key);
-      }
-    }
+    await this.rpc.rejectRequest(message.id, -32601, `Unsupported server request: ${message.method}`);
   }
 
   private async request(method: string, params?: unknown, options: { ensureWritable?: boolean } = {}): Promise<unknown> {
-    const id = this.nextRequestId++;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (!this.pending.has(id)) return;
-        this.pending.delete(id);
-        reject(new Error(`Codex ${method} timed out.`));
-      }, 120_000);
-      this.pending.set(id, { resolve, reject, method, timer });
-      void this.writeMessage({ id, method, params }, { ensureWritable: options.ensureWritable }).catch((error) => {
-        const pending = this.pending.get(id);
-        if (pending) clearTimeout(pending.timer);
-        this.pending.delete(id);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      });
-    });
+    return await this.rpc.request(method, params, options);
   }
 
   private requireRunningSession(key: string): RunningSession {
@@ -772,7 +663,7 @@ export class CodexDriver implements AgentDriver {
     return running;
   }
 
-  private async writeMessage(message: JsonRpcRequest | JsonRpcResponse | { id: string | number; result?: unknown; error?: unknown }, options: { ensureWritable?: boolean } = {}): Promise<void> {
+  private async writeMessage(message: JsonRpcMessage, options: { ensureWritable?: boolean } = {}): Promise<void> {
     if (options.ensureWritable !== false) await this.ensureWritable();
     if (!this.proc) throw new Error("Codex app-server is not running.");
     this.proc!.stdin.write(`${JSON.stringify(message)}\n`);
@@ -789,7 +680,7 @@ export class CodexDriver implements AgentDriver {
     if (this.stopping) return;
     const recentStderr = this.recentServerStderrText();
     this.logger.warn("codex.app_server_exited", { exit_code: exitCode, signal_code: signalCode, recent_stderr: recentStderr || undefined });
-    this.rejectPending(this.appServerExitError(exitCode, signalCode));
+    this.rpc.rejectPending(this.appServerExitError(exitCode, signalCode));
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
     this.threadToSession.clear();
@@ -808,25 +699,17 @@ export class CodexDriver implements AgentDriver {
       codex_bin: this.options.codexBin,
       error: wrapped,
     });
-    this.rejectPending(wrapped);
+    this.rpc.rejectPending(wrapped);
     this.proc = undefined;
     this.ready = undefined;
   }
 
   private recordServerStderr(line: string): void {
     this.recentServerStderr.push(line);
-    if (this.recentServerStderr.length > MAX_RECENT_STDERR_LINES) {
-      this.recentServerStderr.splice(0, this.recentServerStderr.length - MAX_RECENT_STDERR_LINES);
-    }
-    let totalChars = this.recentServerStderr.reduce((total, value) => total + value.length + 1, 0);
-    while (totalChars > MAX_RECENT_STDERR_CHARS && this.recentServerStderr.length > 1) {
-      const removed = this.recentServerStderr.shift();
-      totalChars -= (removed?.length ?? 0) + 1;
-    }
   }
 
   private recentServerStderrText(): string {
-    return this.recentServerStderr.join("\n").trim();
+    return this.recentServerStderr.text();
   }
 
   private appServerExitError(exitCode: number | null, signalCode: NodeJS.Signals | null): Error {
@@ -844,27 +727,4 @@ export class CodexDriver implements AgentDriver {
     return new Error(details.join(" "));
   }
 
-  private rejectPending(error: Error): void {
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(error);
-    }
-    this.pending.clear();
-  }
-}
-
-function commandExecutionDisplay(item: Record<string, unknown>): string {
-  const command = getString(item, "command") ?? "(command unavailable)";
-  const bashLoginShell = /^bash\s+-lc\s+(.+)$/s.exec(command.trim());
-  return unquoteShellArgument(bashLoginShell?.[1] ?? command).trim() || command;
-}
-
-function unquoteShellArgument(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.length < 2) return trimmed;
-  const quote = trimmed[0];
-  if ((quote !== "'" && quote !== "\"") || trimmed.at(-1) !== quote) return trimmed;
-  const inner = trimmed.slice(1, -1);
-  if (quote === "'") return inner.replace(/'\\''/g, "'");
-  return inner.replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
 }

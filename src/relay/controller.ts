@@ -8,7 +8,6 @@ import type {
   AgentSessionStatus,
 } from "../ports/agent.ts";
 import type {
-  EditMessageTextOptions,
   InboundMessage,
   InlineKeyboardMarkup,
   SendMessageOptions,
@@ -19,14 +18,13 @@ import type {
   TaskStatus,
   WorkspaceRecord,
 } from "./types.ts";
-import { isRealDirectory } from "../domain/workspace.ts";
 import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
 import { noopLogger, type Logger, type LogFields } from "../domain/logger.ts";
 import { UI_BUTTON } from "./ui/constants.ts";
 import { consoleKeyboard } from "./ui/keyboards.ts";
 import { formatErrorMessage } from "./ui/messages.ts";
-import { formatHomeMessage, statusViewFromParts } from "./ui/status-message.ts";
-import { ensureRendered, messageWithTitle, textMessage } from "./ui/text-parts.ts";
+import { formatHomeMessage } from "./ui/status-message.ts";
+import { messageWithTitle, textMessage } from "./ui/text-parts.ts";
 import type { StatusView } from "./ui/status-view.ts";
 import type { RelayControllerDeps, RenderCallbackPageResult } from "./controller-types.ts";
 import { SlashCommandRouter } from "./command-router.ts";
@@ -38,6 +36,8 @@ import { CodexPromptFlow } from "./codex-prompt-flow.ts";
 import { ThreadCommandService } from "./thread-command-service.ts";
 import { WorkspaceFlow } from "./workspace-flow.ts";
 import { ConversationQueue } from "./conversation-queue.ts";
+import { RelayMessageRenderer } from "./rendering.ts";
+import { RelaySessionService } from "./session-service.ts";
 
 export class RelayController {
   private readonly logger: Logger;
@@ -49,10 +49,13 @@ export class RelayController {
   private readonly mediaRelay: MediaRelayService;
   private readonly codexPromptFlow: CodexPromptFlow;
   private readonly threadCommands: ThreadCommandService;
+  private readonly renderer: RelayMessageRenderer;
+  private readonly sessionService: RelaySessionService;
   private readonly conversationQueue = new ConversationQueue();
 
   constructor(private readonly deps: RelayControllerDeps) {
     this.logger = deps.logger ?? noopLogger;
+    this.renderer = new RelayMessageRenderer(deps.adapter, this.logger);
     this.outputStreamer = new OutputStreamer({
       store: deps.store,
       logger: this.logger,
@@ -87,6 +90,12 @@ export class RelayController {
       editRendered: (conversationId, rendered, options) => this.editRendered(conversationId, rendered, options),
       renderCallbackPage: (message, body, replyMarkup) => this.renderCallbackPage(message, body, replyMarkup),
       renderStrictCallbackPage: (message, body, replyMarkup) => this.renderStrictCallbackPage(message, body, replyMarkup),
+    });
+    this.sessionService = new RelaySessionService({
+      store: deps.store,
+      agent: deps.agent,
+      logger: this.logger,
+      currentWorkspace: (conversationId) => this.workspaceFlow.currentWorkspace(conversationId),
     });
     this.mediaRelay = new MediaRelayService({
       config: deps.config,
@@ -468,26 +477,7 @@ export class RelayController {
     body: string | RenderedTelegramText,
     replyMarkup: InlineKeyboardMarkup,
   ): Promise<RenderCallbackPageResult> {
-    const rendered = ensureRendered(body);
-    if (!message.messageId) {
-      const result = await this.sendRendered(message.conversationId, rendered, { replyMarkup });
-      return { method: "send", messageId: result.messageId };
-    }
-    try {
-      await this.editRendered(message.conversationId, rendered, {
-        messageId: message.messageId,
-        replyMarkup,
-      });
-      return { method: "edit", messageId: message.messageId };
-    } catch (error) {
-      this.logger.warn("router.callback_edit_fallback", {
-        conversation_id: message.conversationId,
-        message_id: message.messageId,
-        error: error instanceof Error ? error : new Error(String(error)),
-      });
-      const result = await this.sendRendered(message.conversationId, rendered, { replyMarkup });
-      return { method: "send", messageId: result.messageId };
-    }
+    return await this.renderer.renderCallbackPage(message, body, replyMarkup);
   }
 
   private async renderStrictCallbackPage(
@@ -495,13 +485,7 @@ export class RelayController {
     body: string | RenderedTelegramText,
     replyMarkup: InlineKeyboardMarkup,
   ): Promise<RenderCallbackPageResult> {
-    const rendered = ensureRendered(body);
-    if (!message.messageId) throw new Error("Callback message is missing.");
-    await this.editRendered(message.conversationId, rendered, {
-      messageId: message.messageId,
-      replyMarkup,
-    });
-    return { method: "edit", messageId: message.messageId };
+    return await this.renderer.renderStrictCallbackPage(message, body, replyMarkup);
   }
 
   private async tryRenderCallbackPage(
@@ -510,35 +494,15 @@ export class RelayController {
     replyMarkup: InlineKeyboardMarkup,
     failureEvent: string,
   ): Promise<void> {
-    try {
-      await this.renderCallbackPage(message, body, replyMarkup);
-    } catch (error) {
-      this.logger.warn(failureEvent, {
-        conversation_id: message.conversationId,
-        callback_query_id: message.callbackQueryId,
-        error: error instanceof Error ? error : new Error(String(error)),
-      });
-    }
+    await this.renderer.tryRenderCallbackPage(message, body, replyMarkup, failureEvent);
   }
 
   private async answerCallback(callbackQueryId: string, text?: string): Promise<void> {
-    if (!this.deps.adapter.answerCallbackQuery) return;
-    try {
-      await this.deps.adapter.answerCallbackQuery(callbackQueryId, text);
-    } catch (error) {
-      this.logger.warn("router.callback_answer_failed", {
-        callback_query_id: callbackQueryId,
-        error: error instanceof Error ? error : new Error(String(error)),
-      });
-    }
+    await this.renderer.answerCallback(callbackQueryId, text);
   }
 
   private async sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: Omit<SendMessageOptions, "entities" | "parseMode"> = {}): Promise<{ messageId?: MessageId }> {
-    return await this.deps.adapter.sendMessage(conversationId, rendered.text, {
-      ...options,
-      entities: rendered.entities,
-      disableWebPagePreview: options.disableWebPagePreview ?? true,
-    });
+    return await this.renderer.sendRendered(conversationId, rendered, options);
   }
 
   private async trySendRendered(
@@ -548,28 +512,15 @@ export class RelayController {
     fields: LogFields = {},
     options: Omit<SendMessageOptions, "entities" | "parseMode"> = {},
   ): Promise<void> {
-    try {
-      await this.sendRendered(conversationId, rendered, options);
-    } catch (error) {
-      this.logger.warn(failureEvent, {
-        conversation_id: conversationId,
-        ...fields,
-        error: error instanceof Error ? error : new Error(String(error)),
-      });
-    }
+    await this.renderer.trySendRendered(conversationId, rendered, failureEvent, fields, options);
   }
 
   private async editRendered(
     conversationId: ConversationId,
     rendered: RenderedTelegramText,
-    options: Omit<EditMessageTextOptions, "entities" | "parseMode">,
+    options: Parameters<RelayMessageRenderer["editRendered"]>[2],
   ): Promise<void> {
-    if (!this.deps.adapter.editMessageText) throw new Error("IM adapter cannot edit messages.");
-    await this.deps.adapter.editMessageText(conversationId, rendered.text, {
-      ...options,
-      entities: rendered.entities,
-      disableWebPagePreview: options.disableWebPagePreview ?? true,
-    });
+    await this.renderer.editRendered(conversationId, rendered, options);
   }
 
   private consoleKeyboard(conversationId: ConversationId): InlineKeyboardMarkup {
@@ -619,42 +570,7 @@ export class RelayController {
     threadId?: string,
     options: { resumePrevious?: boolean } = {},
   ): Promise<AgentSessionStatus> {
-    if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
-    const key = sessionKey(conversationId, workspace.name);
-    const existing = this.deps.agent.getStatus(key);
-    if (existing?.running && !threadId) return existing;
-
-    const resumePrevious = options.resumePrevious ?? true;
-    const previous = threadId || !resumePrevious ? undefined : this.deps.store.getSession(key);
-    const resumeThreadId = threadId ?? previous?.thread_id ?? undefined;
-    this.logger.info("router.session_starting", { conversation_id: conversationId, workspace: workspace.name, session_key: key, thread_id: resumeThreadId });
-    let status: AgentSessionStatus;
-    try {
-      status = await this.deps.agent.start({
-        conversationId,
-        workspaceName: workspace.name,
-        workspacePath: workspace.path,
-        threadId: resumeThreadId,
-      });
-    } catch (error) {
-      if (threadId || !previous?.thread_id || !isMissingCodexThreadError(error)) throw error;
-      this.logger.warn("router.session_auto_resume_failed_starting_fresh", {
-        conversation_id: conversationId,
-        workspace: workspace.name,
-        session_key: key,
-        thread_id: previous.thread_id,
-        error: error instanceof Error ? error : new Error(String(error)),
-      });
-      this.deps.store.clearSessionThreadId(key);
-      status = await this.deps.agent.start({
-        conversationId,
-        workspaceName: workspace.name,
-        workspacePath: workspace.path,
-      });
-    }
-    this.deps.store.markSessionStarted(key, conversationId, workspace.name, Date.now(), status.threadId);
-    this.logger.info("router.session_started", { conversation_id: conversationId, workspace: workspace.name, session_key: key, thread_id: status.threadId });
-    return status;
+    return await this.sessionService.ensureStarted(conversationId, workspace, threadId, options);
   }
 
   private async markActiveTask(sessionKeyValue: string, status: "blocked" | "running", turnId?: string): Promise<void> {
@@ -696,32 +612,15 @@ export class RelayController {
   }
 
   private appendSystem(conversationId: ConversationId, text: string): void {
-    const workspace = this.currentWorkspace(conversationId);
-    if (!workspace) return;
-    this.deps.store.appendTranscript({ conversationId, workspaceName: workspace.name, role: "system", text, createdAt: Date.now() });
+    this.sessionService.appendSystem(conversationId, text);
   }
 
   private statusView(conversationId: ConversationId): StatusView {
-    const workspace = this.currentWorkspace(conversationId);
-    if (!workspace) return {};
-    const status = this.deps.agent.getStatus(sessionKey(conversationId, workspace.name));
-    const recentOutput = this.deps.store.latestTranscriptEvent(conversationId, workspace.name, "agent");
-    const recentError = this.deps.store.latestTranscriptEvent(conversationId, workspace.name, "system");
-    return statusViewFromParts(
-      workspace,
-      status,
-      recentOutput?.createdAt,
-      recentError?.text,
-      this.deps.store.countTasks(conversationId, workspace.name, ["waiting"]),
-      this.deps.store.countTasks(conversationId, workspace.name, ["queued"]),
-      this.deps.store.countTasks(conversationId, workspace.name, ["blocked"]),
-      this.deps.store.activeTask(conversationId, workspace.name),
-    );
+    return this.sessionService.statusView(conversationId);
   }
 
   private hasTaskCreatedAfter(conversationId: ConversationId, workspaceName: string, timestamp: number): boolean {
-    return this.deps.store.listTasks(conversationId, workspaceName, undefined, 1)
-      .some((task) => task.createdAt > timestamp);
+    return this.sessionService.hasTaskCreatedAfter(conversationId, workspaceName, timestamp);
   }
 
   private conversationIdForSessionKey(sessionKeyValue: string): ConversationId | undefined {
@@ -746,9 +645,4 @@ export class RelayController {
   private async renderPagedOutputCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
     await this.outputStreamer.renderPagedOutputCallback(message, payload);
   }
-}
-
-function isMissingCodexThreadError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.toLowerCase().includes("no rollout found");
 }
