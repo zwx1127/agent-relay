@@ -17,6 +17,7 @@ export interface SlashCommandHandlers {
   interrupt(conversationId: ConversationId, args: string): Promise<void>;
   ps(conversationId: ConversationId): Promise<void>;
   stop(conversationId: ConversationId): Promise<void>;
+  unknown(conversationId: ConversationId, command: string): Promise<void>;
 }
 
 export class SlashCommandRouter {
@@ -66,7 +67,8 @@ export class SlashCommandRouter {
         await this.handlers.stop(message.conversationId);
         return true;
       default:
-        return false;
+        await this.handlers.unknown(message.conversationId, command);
+        return true;
     }
   }
 }

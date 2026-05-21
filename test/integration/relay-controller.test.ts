@@ -119,7 +119,7 @@ describe("relay controller", () => {
     expect(logLines.join("\n")).toContain('message_text="secret prompt"');
   });
 
-  test("unknown slash text is forwarded as a Codex prompt", async () => {
+  test("unknown slash text sends an unknown-command notice", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -128,9 +128,9 @@ describe("relay controller", () => {
 
     await router.handle(textMessage("/unknown"));
 
-    expect(agent.sent).toEqual([sentPrompt("/unknown")]);
-    expect(adapter.sent).toEqual([]);
-    expect(adapter.reactions).toEqual([{ conversationId: "1", messageId: "1", emoji: "✍" }]);
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toBe("Unknown command: /unknown. Send /relay to open Relay Home.");
+    expect(adapter.reactions).toEqual([]);
   });
 
   test("console no longer exposes raw tail action", async () => {
@@ -327,7 +327,7 @@ describe("relay controller", () => {
     expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toEqual(["ar:w", "ar:status", "ar:s"]);
   });
 
-  test("unsupported slash commands are forwarded as Codex prompts when a workspace is selected", async () => {
+  test("unsupported slash commands are rejected when a workspace is selected", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -340,16 +340,16 @@ describe("relay controller", () => {
     await router.handle(textMessage("/start"));
     await router.handle(textMessage("/model"));
 
-    expect(agent.sent.map((message) => message.text)).toEqual([
-      "/help",
-      "/codex",
-      "/status",
-      "/start",
-      "/model",
-    ]);
+    expect(agent.sent).toEqual([]);
     expect(agent.builtins).toEqual([]);
-    expect(adapter.sent).toEqual([]);
-    expect(adapter.reactions.map((reaction) => reaction.emoji)).toEqual(["✍", "🫡", "✍", "🫡", "✍", "🫡", "✍", "🫡", "✍"]);
+    expect(adapter.sent.map((message) => message.text)).toEqual([
+      "Unknown command: /help. Send /relay to open Relay Home.",
+      "Unknown command: /codex. Send /relay to open Relay Home.",
+      "Unknown command: /status. Send /relay to open Relay Home.",
+      "Unknown command: /start. Send /relay to open Relay Home.",
+      "Unknown command: /model. Send /relay to open Relay Home.",
+    ]);
+    expect(adapter.reactions).toEqual([]);
   });
 
   test("/review and /compact run Codex built-ins", async () => {
@@ -939,7 +939,7 @@ describe("relay controller", () => {
     ]);
   });
 
-  test("/add is forwarded literally and steers the active turn", async () => {
+  test("/add is rejected as an unknown command while a turn is active", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -950,13 +950,11 @@ describe("relay controller", () => {
 
     await router.handle(textMessage("/add include tests"));
 
-    expect(agent.sent.at(-1)).toEqual(sentPrompt("/add include tests"));
-    expect(store.getTask(1)?.status).toBe("running");
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toBe("Unknown command: /add. Send /relay to open Relay Home.");
+    expect(store.getTask(1)).toBeUndefined();
     expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(0);
-    expect(adapter.reactions).toEqual([
-      { conversationId: "1", messageId: "1", emoji: "🫡" },
-      { conversationId: "1", messageId: "1", emoji: "✍" },
-    ]);
+    expect(adapter.reactions).toEqual([]);
   });
 
   test("busy prompt failure updates the waiting message reaction", async () => {
@@ -1744,15 +1742,14 @@ describe("relay controller", () => {
     expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-back", text: undefined });
   });
 
-  test("/cd without a workspace opens Relay Home instead of creating a workspace directly", async () => {
+  test("/cd without a workspace is rejected as an unknown command", async () => {
     const { router, store, adapter, agent, root } = fixture();
 
     await router.handle(textMessage("/cd demo"));
 
     expect(store.getBinding(1)).toBeUndefined();
     expect(agent.getStatus("codex:1:demo")).toBeUndefined();
-    expect(adapter.sent.at(-1)?.text).toContain("Relay Home");
-    expect(adapter.sent.at(-1)?.text).toContain("workspace: none");
+    expect(adapter.sent.at(-1)?.text).toBe("Unknown command: /cd. Send /relay to open Relay Home.");
     expect(existsSync(join(root, "demo"))).toBe(false);
   });
 

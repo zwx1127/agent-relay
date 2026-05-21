@@ -154,6 +154,9 @@ export class RelayController {
       interrupt: (conversationId, args) => this.threadCommands.interruptCommand(conversationId, args),
       ps: (conversationId) => this.threadCommands.renderBackgroundTerminals(conversationId),
       stop: (conversationId) => this.threadCommands.cleanBackgroundTerminals(conversationId),
+      unknown: async (conversationId, command) => {
+        await this.sendRendered(conversationId, textMessage(`Unknown command: ${command}. Send /relay to open Relay Home.`));
+      },
     });
     this.callbacks = new CallbackRouter({
       isStaleConsoleCallback: (message, payload) => this.isStaleConsoleCallback(message, payload),

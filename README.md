@@ -132,7 +132,7 @@ Relay Home actions:
 - `Refresh`: redraw the current Relay Home message.
 - `Stop`: interrupt the current workspace session and clear the conversation's workspace selection.
 
-After a workspace is selected, ordinary Telegram messages are sent to Codex. Telegram photo messages are downloaded into the selected workspace and sent to Codex as image inputs; photo captions become the prompt, and photos without captions use a default inspection prompt. Telegram file/document attachments are not supported. If Codex is idle, the message starts a new turn. If a Codex turn is active, the message is sent as steering input for that turn. If no workspace is selected, ordinary text or photos open Relay Home instead.
+After a workspace is selected, ordinary Telegram messages are sent to Codex. Text messages that start with `/` are treated as Relay slash commands; unsupported commands receive an unknown-command notice instead of being forwarded to Codex. Telegram photo messages are downloaded into the selected workspace and sent to Codex as image inputs; photo captions become the prompt, and photos without captions use a default inspection prompt. Telegram file/document attachments are not supported. If Codex is idle, the message starts a new turn. If a Codex turn is active, the message is sent as steering input for that turn. If no workspace is selected, ordinary text or photos open Relay Home instead.
 
 Relay-handled slash commands after a workspace is selected:
 
@@ -160,7 +160,7 @@ Relay-handled slash commands after a workspace is selected:
 
 `/goal` uses Codex app-server thread goal APIs (`thread/goal/get`, `thread/goal/set`, and `thread/goal/clear`) and requires a Codex CLI version that supports those methods. It can run while a Codex turn is active, matching the interactive Codex CLI behavior. The reserved subcommands `pause`, `resume`, and `clear` are treated as goal actions rather than objective text. Relay does not turn goals into prompts; use `/plan <prompt>` to plan explicitly, or send an ordinary message when you want Codex to continue work.
 
-`/relay` is the only Relay command that works without a selected workspace. Unsupported slash text, including `/help`, `/status`, `/model`, and `/start`, is forwarded to Codex when a workspace is selected.
+`/relay` is the only Relay command that opens Relay Home without a selected workspace. Unsupported slash text, including `/help`, `/status`, `/model`, and `/start`, shows an unknown-command notice.
 
 When IM reactions are available, relay-owned prompt messages use status reactions: `🫡` for waiting or queued, `✍` for running, `🤔` for blocked on Codex input or approval, `😎` for done, `🤨` for interrupted, and `😱` for failed or cancelled. Telegram sends those emoji reactions directly; Lark sends platform `emoji_type` values for the same statuses.
 
@@ -221,7 +221,7 @@ The relay is organized by domain. The relay controller depends on `ImAdapter`, `
 
 The relay controller keeps the user-facing workflow together, while dedicated collaborators handle high-churn routing and streaming behavior:
 
-- `SlashCommandRouter` dispatches relay-owned slash commands and leaves unsupported commands available for the agent.
+- `SlashCommandRouter` owns slash-command text, dispatches known commands, and reports unsupported commands to the user.
 - `CallbackRouter` dispatches inline keyboard callback payloads.
 - `TaskCoordinator` owns prompt queue state, task reactions, and sending work to the agent.
 - `OutputStreamer` owns live assistant output buffering, IM message edits, and paged output callbacks.
