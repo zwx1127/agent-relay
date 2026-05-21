@@ -129,7 +129,7 @@ describe("relay controller", () => {
     await router.handle(textMessage("/unknown"));
 
     expect(agent.sent).toEqual([]);
-    expect(adapter.sent.at(-1)?.text).toBe("Unknown command: /unknown. Send /relay to open Relay Home.");
+    expect(adapter.sent.at(-1)?.text).toBe("Unknown command: /unknown. Send /help to see supported commands.");
     expect(adapter.reactions).toEqual([]);
   });
 
@@ -327,7 +327,7 @@ describe("relay controller", () => {
     expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toEqual(["ar:w", "ar:status", "ar:s"]);
   });
 
-  test("unsupported slash commands are rejected when a workspace is selected", async () => {
+  test("/help sends command usage with a selected workspace", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -335,6 +335,23 @@ describe("relay controller", () => {
     store.bindConversation(1, "demo");
 
     await router.handle(textMessage("/help"));
+
+    expect(agent.sent).toEqual([]);
+    expect(agent.builtins).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Relay commands");
+    expect(adapter.sent.at(-1)?.text).toContain("/review commit <sha> [title]");
+    expect(adapter.sent.at(-1)?.text).toContain("/interrupt all");
+    expect(adapter.sent.at(-1)?.options?.entities?.some((entity) => entity.type === "code")).toBe(true);
+    expect(adapter.reactions).toEqual([]);
+  });
+
+  test("unsupported slash commands are rejected when a workspace is selected", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
     await router.handle(textMessage("/codex"));
     await router.handle(textMessage("/status"));
     await router.handle(textMessage("/start"));
@@ -343,11 +360,10 @@ describe("relay controller", () => {
     expect(agent.sent).toEqual([]);
     expect(agent.builtins).toEqual([]);
     expect(adapter.sent.map((message) => message.text)).toEqual([
-      "Unknown command: /help. Send /relay to open Relay Home.",
-      "Unknown command: /codex. Send /relay to open Relay Home.",
-      "Unknown command: /status. Send /relay to open Relay Home.",
-      "Unknown command: /start. Send /relay to open Relay Home.",
-      "Unknown command: /model. Send /relay to open Relay Home.",
+      "Unknown command: /codex. Send /help to see supported commands.",
+      "Unknown command: /status. Send /help to see supported commands.",
+      "Unknown command: /start. Send /help to see supported commands.",
+      "Unknown command: /model. Send /help to see supported commands.",
     ]);
     expect(adapter.reactions).toEqual([]);
   });
@@ -851,6 +867,17 @@ describe("relay controller", () => {
     expect(adapter.sent.at(-1)?.text).toContain("workspace: none");
   });
 
+  test("/help without a workspace sends command usage instead of Relay Home", async () => {
+    const { router, adapter, agent } = fixture();
+
+    await router.handle(textMessage("/help"));
+
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Relay commands");
+    expect(adapter.sent.at(-1)?.text).toContain("/relay");
+    expect(adapter.sent.at(-1)?.text).not.toContain("workspace: none");
+  });
+
   test("new workspace callback uses ForceReply and reply creates binding", async () => {
     const { router, store, adapter, agent, root } = fixture();
 
@@ -951,7 +978,25 @@ describe("relay controller", () => {
     await router.handle(textMessage("/add include tests"));
 
     expect(agent.sent).toEqual([]);
-    expect(adapter.sent.at(-1)?.text).toBe("Unknown command: /add. Send /relay to open Relay Home.");
+    expect(adapter.sent.at(-1)?.text).toBe("Unknown command: /add. Send /help to see supported commands.");
+    expect(store.getTask(1)).toBeUndefined();
+    expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(0);
+    expect(adapter.reactions).toEqual([]);
+  });
+
+  test("/help during an active turn sends usage without steering Codex", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    const status = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
+    status.activeTurnId = "turn-1";
+
+    await router.handle(textMessage("/help"));
+
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Relay commands");
     expect(store.getTask(1)).toBeUndefined();
     expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(0);
     expect(adapter.reactions).toEqual([]);
@@ -1749,7 +1794,7 @@ describe("relay controller", () => {
 
     expect(store.getBinding(1)).toBeUndefined();
     expect(agent.getStatus("codex:1:demo")).toBeUndefined();
-    expect(adapter.sent.at(-1)?.text).toBe("Unknown command: /cd. Send /relay to open Relay Home.");
+    expect(adapter.sent.at(-1)?.text).toBe("Unknown command: /cd. Send /help to see supported commands.");
     expect(existsSync(join(root, "demo"))).toBe(false);
   });
 

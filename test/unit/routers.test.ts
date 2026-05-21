@@ -6,6 +6,7 @@ describe("relay routers", () => {
   test("slash command router dispatches command args", async () => {
     const calls: string[] = [];
     const router = new SlashCommandRouter({
+      help: async () => { calls.push("help"); },
       review: async (_conversationId, text) => { calls.push(`review:${text}`); },
       compact: async () => { calls.push("compact"); },
       init: async () => { calls.push("init"); },
@@ -31,12 +32,13 @@ describe("relay routers", () => {
     };
 
     expect(router.command(message.text)).toBe("/resume");
+    expect(await router.handle({ ...message, text: "/help" }, "/help", "/help")).toBe(true);
     expect(await router.handle(message, "/resume", message.text)).toBe(true);
     expect(await router.handle({ ...message, text: "/ps" }, "/ps", "/ps")).toBe(true);
     expect(await router.handle({ ...message, text: "/goal ship it" }, "/goal", "/goal ship it")).toBe(true);
     expect(await router.handle({ ...message, text: "/interrupt all" }, "/interrupt", "/interrupt all")).toBe(true);
     expect(await router.handle(message, "/unknown", message.text)).toBe(true);
-    expect(calls).toEqual(["resume:sprint work", "ps", "goal:ship it", "interrupt:all", "unknown:/unknown"]);
+    expect(calls).toEqual(["help", "resume:sprint work", "ps", "goal:ship it", "interrupt:all", "unknown:/unknown"]);
   });
 
   test("callback router dispatches prefixed payloads", async () => {

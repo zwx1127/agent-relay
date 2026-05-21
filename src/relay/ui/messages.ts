@@ -3,6 +3,35 @@ import { renderTelegramText, truncateForTelegramLabel, type RenderedTelegramText
 import { UI_BUTTON } from "./constants.ts";
 import { bold, code } from "./text-parts.ts";
 
+export function formatHelpMessage(): RenderedTelegramText {
+  return renderTelegramText([
+    bold("Relay commands"),
+    "\n\n",
+    "Use these slash commands in Relay:\n",
+    "- ", code("/help"), " - Show this command help.\n",
+    "- ", code("/relay"), " - Open Relay Home.\n",
+    "- ", code("/review"), " - Review uncommitted changes.\n",
+    "- ", code("/review branch <name>"), " - Review against a base branch.\n",
+    "- ", code("/review commit <sha> [title]"), " - Review a commit.\n",
+    "- ", code("/review <instructions>"), " - Run a custom review.\n",
+    "- ", code("/compact"), " - Start Codex thread compaction.\n",
+    "- ", code("/init"), " - Ask Codex to create AGENTS.md if missing.\n",
+    "- ", code("/new"), ", ", code("/clear"), " - Start a fresh Codex thread.\n",
+    "- ", code("/resume [search]"), " - Resume a recent Codex thread.\n",
+    "- ", code("/fork"), " - Fork the current thread.\n",
+    "- ", code("/rename <name>"), " - Rename the current thread.\n",
+    "- ", code("/plan"), " - Toggle Plan mode.\n",
+    "- ", code("/plan <prompt>"), " - Run a prompt in Plan mode.\n",
+    "- ", code("/goal"), " - Show the current goal.\n",
+    "- ", code("/goal <objective>"), " - Set the current goal.\n",
+    "- ", code("/goal pause"), ", ", code("/goal resume"), ", ", code("/goal clear"), " - Manage the goal.\n",
+    "- ", code("/interrupt"), " - Interrupt the active Codex turn.\n",
+    "- ", code("/interrupt all"), " - Interrupt the active turn and queued prompts.\n",
+    "- ", code("/ps"), " - List Codex background terminals.\n",
+    "- ", code("/stop"), " - Clean Codex background terminals for this thread.",
+  ]);
+}
+
 export function formatResumeMessage(threads: AgentThreadSummary[]): RenderedTelegramText {
   const parts: TelegramTextPart[] = [bold("Resume chat"), "\n\n"];
   for (const [index, thread] of threads.entries()) {

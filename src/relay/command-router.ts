@@ -5,6 +5,7 @@ import { commandArgs, commandName } from "./ui/commands.ts";
 type TextMessage = Extract<InboundMessage, { kind: "message" }>;
 
 export interface SlashCommandHandlers {
+  help(conversationId: ConversationId): Promise<void>;
   review(conversationId: ConversationId, text: string): Promise<void>;
   compact(conversationId: ConversationId): Promise<void>;
   init(conversationId: ConversationId, userMessageId?: MessageId): Promise<void>;
@@ -29,6 +30,9 @@ export class SlashCommandRouter {
 
   async handle(message: TextMessage, command: string, text: string): Promise<boolean> {
     switch (command) {
+      case "/help":
+        await this.handlers.help(message.conversationId);
+        return true;
       case "/review":
         await this.handlers.review(message.conversationId, text);
         return true;

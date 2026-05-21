@@ -22,7 +22,7 @@ import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
 import { noopLogger, type Logger, type LogFields } from "../domain/logger.ts";
 import { UI_BUTTON } from "./ui/constants.ts";
 import { consoleKeyboard } from "./ui/keyboards.ts";
-import { formatErrorMessage } from "./ui/messages.ts";
+import { formatErrorMessage, formatHelpMessage } from "./ui/messages.ts";
 import { formatHomeMessage } from "./ui/status-message.ts";
 import { messageWithTitle, textMessage } from "./ui/text-parts.ts";
 import type { StatusView } from "./ui/status-view.ts";
@@ -142,6 +142,9 @@ export class RelayController {
       hasTaskCreatedAfter: (conversationId, workspaceName, timestamp) => this.hasTaskCreatedAfter(conversationId, workspaceName, timestamp),
     });
     this.slashCommands = new SlashCommandRouter({
+      help: async (conversationId) => {
+        await this.sendRendered(conversationId, formatHelpMessage());
+      },
       review: (conversationId, text) => this.threadCommands.runReviewCommand(conversationId, text),
       compact: (conversationId) => this.threadCommands.runBuiltinCommand(conversationId, { type: "compact" }),
       init: (conversationId, userMessageId) => this.threadCommands.runInitCommand(conversationId, userMessageId),
@@ -155,7 +158,7 @@ export class RelayController {
       ps: (conversationId) => this.threadCommands.renderBackgroundTerminals(conversationId),
       stop: (conversationId) => this.threadCommands.cleanBackgroundTerminals(conversationId),
       unknown: async (conversationId, command) => {
-        await this.sendRendered(conversationId, textMessage(`Unknown command: ${command}. Send /relay to open Relay Home.`));
+        await this.sendRendered(conversationId, textMessage(`Unknown command: ${command}. Send /help to see supported commands.`));
       },
     });
     this.callbacks = new CallbackRouter({
