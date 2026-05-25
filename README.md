@@ -149,6 +149,7 @@ Relay-handled slash commands:
 | `/new`, `/clear` | Starts a fresh Codex thread while keeping the workspace selected. |
 | `/resume [search]` | Lists recent Codex threads for the workspace and resumes the selected one. |
 | `/fork` | Forks the current thread and switches the conversation to the fork. |
+| `/side <prompt>`, `/btw <prompt>` | Asks in an ephemeral side conversation fork and returns the answer without contaminating the main thread. Without a prompt, Relay asks for the side question via ForceReply. |
 | `/rename <name>` | Renames the current thread. Without a name, the relay asks via ForceReply. |
 | `/plan` | Toggles Plan mode for the current `conversation + workspace`. |
 | `/plan <prompt>` | Runs the prompt in Plan mode and then offers Implement or Continue buttons. Implement exits Plan mode and starts normal coding. |

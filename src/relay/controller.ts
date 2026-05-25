@@ -151,6 +151,7 @@ export class RelayController {
       newThread: (conversationId) => this.threadCommands.startFreshThread(conversationId),
       resume: (conversationId, searchTerm) => this.threadCommands.renderResumePicker(conversationId, searchTerm),
       fork: (conversationId) => this.threadCommands.forkCurrentThread(conversationId),
+      side: (conversationId, prompt, userMessageId) => this.threadCommands.sideConversationCommand(conversationId, prompt, userMessageId),
       rename: (conversationId, name) => this.threadCommands.renameCommand(conversationId, name),
       plan: (conversationId, prompt, userMessageId) => this.threadCommands.planCommand(conversationId, prompt, userMessageId),
       goal: (conversationId, args) => this.threadCommands.goalCommand(conversationId, args),

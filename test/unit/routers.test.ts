@@ -13,6 +13,7 @@ describe("relay routers", () => {
       newThread: async () => { calls.push("new"); },
       resume: async (_conversationId, searchTerm) => { calls.push(`resume:${searchTerm}`); },
       fork: async () => { calls.push("fork"); },
+      side: async (_conversationId, prompt) => { calls.push(`side:${prompt}`); },
       rename: async (_conversationId, name) => { calls.push(`rename:${name}`); },
       plan: async (_conversationId, prompt) => { calls.push(`plan:${prompt}`); },
       goal: async (_conversationId, args) => { calls.push(`goal:${args}`); },
@@ -34,11 +35,13 @@ describe("relay routers", () => {
     expect(router.command(message.text)).toBe("/resume");
     expect(await router.handle({ ...message, text: "/help" }, "/help", "/help")).toBe(true);
     expect(await router.handle(message, "/resume", message.text)).toBe(true);
+    expect(await router.handle({ ...message, text: "/btw quick question" }, "/btw", "/btw quick question")).toBe(true);
+    expect(await router.handle({ ...message, text: "/side other question" }, "/side", "/side other question")).toBe(true);
     expect(await router.handle({ ...message, text: "/ps" }, "/ps", "/ps")).toBe(true);
     expect(await router.handle({ ...message, text: "/goal ship it" }, "/goal", "/goal ship it")).toBe(true);
     expect(await router.handle({ ...message, text: "/interrupt all" }, "/interrupt", "/interrupt all")).toBe(true);
     expect(await router.handle(message, "/unknown", message.text)).toBe(true);
-    expect(calls).toEqual(["help", "resume:sprint work", "ps", "goal:ship it", "interrupt:all", "unknown:/unknown"]);
+    expect(calls).toEqual(["help", "resume:sprint work", "side:quick question", "side:other question", "ps", "goal:ship it", "interrupt:all", "unknown:/unknown"]);
   });
 
   test("callback router dispatches prefixed payloads", async () => {

@@ -580,6 +580,30 @@ describe("relay controller", () => {
     expect(adapter.sent.map((message) => message.text)).toEqual(["Forked chat.\n\nThread: Forked", "Renamed chat.\n\nShip it", "Background terminals stopped."]);
   });
 
+  test("/side and /btw run ephemeral side conversations without submitting main tasks", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/side where is config?"));
+    await router.handle(textMessage("/btw what changed?"));
+    await router.handle(textMessage("/side"));
+
+    expect(agent.sent).toEqual([]);
+    expect(agent.sideConversations).toEqual([
+      { key: "codex:1:demo", text: "where is config?" },
+      { key: "codex:1:demo", text: "what changed?" },
+    ]);
+    expect(adapter.sent.map((message) => message.text)).toEqual([
+      "Side conversation\n\nside: where is config?",
+      "Side conversation\n\nside: what changed?",
+      "Reply with the side question.",
+    ]);
+    expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
+  });
+
   test("/ps lists only Codex background terminals tracked by the driver", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");

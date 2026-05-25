@@ -87,6 +87,7 @@ export class FakeAgent implements AgentDriver {
   responses: Array<{ key: string; requestId: string | number; result: unknown }> = [];
   builtins: Array<{ key: string; command: AgentBuiltinCommand }> = [];
   forks: string[] = [];
+  sideConversations: Array<{ key: string; text: string }> = [];
   renames: Array<{ key: string; name: string }> = [];
   goalGets: string[] = [];
   goalSets: Array<{ key: string; goal: AgentThreadGoalSetOptions }> = [];
@@ -210,6 +211,11 @@ export class FakeAgent implements AgentDriver {
       status.threadName = "Forked";
     }
     return { threadId: "fork-thread", threadName: "Forked" };
+  }
+
+  async sideConversation(key: string, text: string): Promise<{ message: string; threadId?: string; turnId?: string }> {
+    this.sideConversations.push({ key, text });
+    return { message: `side: ${text}`, threadId: "side-thread", turnId: "side-turn" };
   }
 
   async renameThread(key: string, name: string): Promise<void> {

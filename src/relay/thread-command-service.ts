@@ -141,6 +141,50 @@ export class ThreadCommandService {
     this.deps.logger.info("router.thread_forked", { conversation_id: conversationId, workspace: workspace.name, thread_id: result.threadId });
   }
 
+  async sideConversationCommand(conversationId: ConversationId, prompt: string, userMessageId?: MessageId): Promise<void> {
+    const normalized = prompt.trim();
+    if (!normalized) {
+      this.deps.requireCurrentWorkspace(conversationId);
+      const result = await this.deps.sendRendered(conversationId, textMessage("Reply with the side question."), {
+        forceReply: true,
+        disableWebPagePreview: true,
+      });
+      if (!result.messageId) throw new Error("IM adapter did not return a side conversation prompt message id.");
+      this.deps.store.setPendingPrompt({
+        conversationId,
+        promptMessageId: result.messageId,
+        kind: "relay_command",
+        createdAt: Date.now(),
+        payloadJson: JSON.stringify({ command: "side" }),
+        expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
+      });
+      return;
+    }
+
+    await this.runSideConversation(conversationId, normalized, userMessageId);
+  }
+
+  private async runSideConversation(conversationId: ConversationId, prompt: string, userMessageId?: MessageId): Promise<void> {
+    if (!prompt.trim()) {
+      await this.deps.sendRendered(conversationId, messageWithTitle("Side conversation cancelled.", "No question was provided."));
+      return;
+    }
+    const workspace = this.deps.requireCurrentWorkspace(conversationId);
+    const status = await this.deps.ensureAgentStarted(conversationId, workspace);
+    const key = sessionKey(conversationId, workspace.name);
+    if (!status.threadId) {
+      await this.deps.sendRendered(conversationId, messageWithTitle("Side conversation unavailable.", "Send a normal message first, then try /side again."));
+      return;
+    }
+    if (!this.deps.agent.sideConversation) throw new Error("Agent driver cannot start side conversations.");
+    this.deps.logger.info("router.side_conversation_started", { conversation_id: conversationId, workspace: workspace.name, session_key: key });
+    const result = await this.deps.agent.sideConversation(key, prompt);
+    await this.deps.sendRendered(conversationId, messageWithTitle("Side conversation", result.message), {
+      ...(userMessageId ? { replyToMessageId: userMessageId } : {}),
+      disableWebPagePreview: true,
+    });
+  }
+
   async renameCommand(conversationId: ConversationId, name: string): Promise<void> {
     if (name.trim()) {
       await this.renameCurrentThread(conversationId, name.trim());
@@ -539,6 +583,10 @@ export class ThreadCommandService {
     this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
     if (data.command === "rename") {
       await this.renameCurrentThread(conversationId, text.trim());
+      return;
+    }
+    if (data.command === "side") {
+      await this.runSideConversation(conversationId, text.trim(), promptMessageId);
       return;
     }
     await this.deps.sendRendered(conversationId, textMessage("Command prompt expired."));

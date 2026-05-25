@@ -19,6 +19,7 @@ export function formatHelpMessage(): RenderedTelegramText {
     "- ", code("/new"), ", ", code("/clear"), " - Start a fresh Codex thread.\n",
     "- ", code("/resume [search]"), " - Resume a recent Codex thread.\n",
     "- ", code("/fork"), " - Fork the current thread.\n",
+    "- ", code("/side <prompt>"), ", ", code("/btw <prompt>"), " - Ask in an ephemeral side conversation.\n",
     "- ", code("/rename <name>"), " - Rename the current thread.\n",
     "- ", code("/plan"), " - Toggle Plan mode.\n",
     "- ", code("/plan <prompt>"), " - Run a prompt in Plan mode.\n",

@@ -330,6 +330,43 @@ setTimeout(() => process.exit(1), 20);
     await driver.stop(status.sessionKey);
   });
 
+  test("runs side conversations in an ephemeral fork without switching the main thread", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request", developerInstructions: "developer text" },
+      (event) => {
+        events.push(event);
+      },
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: "/tmp/demo" });
+    const result = await driver.sideConversation(status.sessionKey, "side question");
+
+    const messages = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const fork = messages.find((message) => message.method === "thread/fork" && message.params.ephemeral);
+    const injected = messages.find((message) => message.method === "thread/inject_items");
+    const turnStart = messages.find((message) => message.method === "turn/start" && message.params.threadId === "side-thread");
+    expect(fork.params).toMatchObject({
+      threadId: "thread-1",
+      cwd: "/tmp/demo",
+      ephemeral: true,
+      excludeTurns: true,
+    });
+    expect(typeof fork.params.developerInstructions).toBe("string");
+    expect(fork.params.developerInstructions.includes("You are in a side conversation, not the main thread.")).toBe(true);
+    expect(fork.params.developerInstructions.includes("developer text")).toBe(true);
+    expect(injected.params.threadId).toBe("side-thread");
+    expect(JSON.stringify(injected.params.items)).toContain("Side conversation boundary.");
+    expect(turnStart.params.input[0].text).toBe("side question");
+    expect(messages.find((message) => message.method === "thread/unsubscribe").params).toEqual({ threadId: "side-thread" });
+    expect(result).toEqual({ message: "side answer", threadId: "side-thread", turnId: "turn-1" });
+    expect(driver.getStatus(status.sessionKey)?.threadId).toBe("thread-1");
+    expect(events).toEqual([]);
+    await driver.stop(status.sessionKey);
+  });
+
   test("emits plan deltas and completed review items as visible output", async () => {
     const fake = fakeCodexBin();
     const events: AgentOutputEvent[] = [];
@@ -476,6 +513,7 @@ rl.on("line", (line) => {
     send({ id: msg.id, result: { thread: { id: "thread-1", name: "Initial thread", status: { type: "idle" } }, model: "gpt-5.2", modelProvider: "openai", reasoningEffort: "medium", approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: { type: "workspaceWrite" } } });
   } else if (msg.method === "turn/start") {
     const turnId = "turn-" + (++turnCount);
+    const threadId = msg.params.threadId;
     const inputText = msg.params.input[0].text;
     const startTurn = () => send({ id: msg.id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });
     if (inputText === "slow active") {
@@ -484,31 +522,34 @@ rl.on("line", (line) => {
       startTurn();
     }
     if (inputText === "status please") {
-      send({ method: "thread/name/updated", params: { threadId: "thread-1", threadName: "Demo thread" } });
-      send({ method: "thread/status/changed", params: { threadId: "thread-1", status: { type: "active", activeFlags: ["waitingOnApproval"] } } });
-      send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-1", turnId, tokenUsage: { last: { totalTokens: 7 }, total: { totalTokens: 42 }, modelContextWindow: 100 } } });
+      send({ method: "thread/name/updated", params: { threadId, threadName: "Demo thread" } });
+      send({ method: "thread/status/changed", params: { threadId, status: { type: "active", activeFlags: ["waitingOnApproval"] } } });
+      send({ method: "thread/tokenUsage/updated", params: { threadId, turnId, tokenUsage: { last: { totalTokens: 7 }, total: { totalTokens: 42 }, modelContextWindow: 100 } } });
     } else if (inputText === "warn please") {
-      send({ method: "warning", params: { threadId: "thread-1", message: "Under-development features enabled: goals" } });
-      send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: turnId, status: "completed", items: [] } } });
+      send({ method: "warning", params: { threadId, message: "Under-development features enabled: goals" } });
+      send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
     } else if (inputText === "ask") {
-      send({ id: 900, method: "item/tool/requestUserInput", params: { threadId: "thread-1", turnId, itemId: "item-1", questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [{ label: "Fast", description: "Quick" }] }] } });
+      send({ id: 900, method: "item/tool/requestUserInput", params: { threadId, turnId, itemId: "item-1", questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [{ label: "Fast", description: "Quick" }] }] } });
     } else if (inputText === "plan please") {
-      send({ method: "item/plan/delta", params: { threadId: "thread-1", turnId, itemId: "p1", delta: "Plan item" } });
-      send({ method: "item/completed", params: { threadId: "thread-1", turnId, item: { type: "exitedReviewMode", id: "r1", review: "Review summary" } } });
-      send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: turnId, status: "completed", items: [] } } });
+      send({ method: "item/plan/delta", params: { threadId, turnId, itemId: "p1", delta: "Plan item" } });
+      send({ method: "item/completed", params: { threadId, turnId, item: { type: "exitedReviewMode", id: "r1", review: "Review summary" } } });
+      send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
     } else if (inputText === "image output") {
-      send({ method: "rawResponseItem/completed", params: { threadId: "thread-1", turnId, item: { type: "image_generation_call", id: "img1", status: "completed", revised_prompt: "revised", result: "aW1hZ2U=" } } });
-      send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: turnId, status: "completed", items: [] } } });
+      send({ method: "rawResponseItem/completed", params: { threadId, turnId, item: { type: "image_generation_call", id: "img1", status: "completed", revised_prompt: "revised", result: "aW1hZ2U=" } } });
+      send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
     } else if (inputText === "background terminal") {
-      send({ method: "item/started", params: { threadId: "thread-1", turnId, item: { type: "commandExecution", id: "bg1", command: "bash -lc 'npm run dev'", processId: "proc1", source: "unifiedExecStartup", commandActions: [] } } });
-      send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", turnId, itemId: "bg1", delta: "ready\\nline2\\nline3\\nline4\\n" } });
-      send({ method: "item/started", params: { threadId: "thread-1", turnId, item: { type: "commandExecution", id: "local1", command: "git status", source: "userShell", commandActions: [] } } });
+      send({ method: "item/started", params: { threadId, turnId, item: { type: "commandExecution", id: "bg1", command: "bash -lc 'npm run dev'", processId: "proc1", source: "unifiedExecStartup", commandActions: [] } } });
+      send({ method: "item/commandExecution/outputDelta", params: { threadId, turnId, itemId: "bg1", delta: "ready\\nline2\\nline3\\nline4\\n" } });
+      send({ method: "item/started", params: { threadId, turnId, item: { type: "commandExecution", id: "local1", command: "git status", source: "userShell", commandActions: [] } } });
+    } else if (inputText === "side question") {
+      send({ method: "item/agentMessage/delta", params: { threadId, turnId, itemId: "side-message", delta: "side answer" } });
+      send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
     } else if (inputText !== "slow active") {
-      send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId, itemId: "m1", delta: "hello " } });
-      send({ method: "item/commandExecution/outputDelta", params: { threadId: "thread-1", turnId, itemId: "c1", delta: "raw stdout" } });
-      send({ method: "item/commandExecution/terminalInteraction", params: { threadId: "thread-1", turnId, itemId: "t1", processId: "p1", stdin: "raw stdin" } });
-      send({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId, itemId: "m1", delta: "world" } });
-      send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: turnId, status: "completed", items: [] } } });
+      send({ method: "item/agentMessage/delta", params: { threadId, turnId, itemId: "m1", delta: "hello " } });
+      send({ method: "item/commandExecution/outputDelta", params: { threadId, turnId, itemId: "c1", delta: "raw stdout" } });
+      send({ method: "item/commandExecution/terminalInteraction", params: { threadId, turnId, itemId: "t1", processId: "p1", stdin: "raw stdin" } });
+      send({ method: "item/agentMessage/delta", params: { threadId, turnId, itemId: "m1", delta: "world" } });
+      send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
     }
   } else if (msg.method === "turn/steer") {
     const inputText = msg.params.input[0].text;
@@ -532,7 +573,12 @@ rl.on("line", (line) => {
   } else if (msg.method === "thread/goal/clear") {
     send({ id: msg.id, result: { cleared: true } });
   } else if (msg.method === "thread/fork") {
-    send({ id: msg.id, result: { thread: { id: "fork-thread", name: "Forked thread", status: { type: "idle" } }, model: "gpt-5.2", modelProvider: "openai", reasoningEffort: "medium", approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: { type: "workspaceWrite" } } });
+    const threadId = msg.params.ephemeral ? "side-thread" : "fork-thread";
+    send({ id: msg.id, result: { thread: { id: threadId, name: msg.params.ephemeral ? "Side thread" : "Forked thread", status: { type: "idle" }, ephemeral: Boolean(msg.params.ephemeral) }, model: "gpt-5.2", modelProvider: "openai", reasoningEffort: "medium", approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: { type: "workspaceWrite" } } });
+  } else if (msg.method === "thread/inject_items") {
+    send({ id: msg.id, result: {} });
+  } else if (msg.method === "thread/unsubscribe") {
+    send({ id: msg.id, result: {} });
   } else if (msg.method === "thread/name/set") {
     send({ id: msg.id, result: {} });
   } else if (msg.method === "thread/backgroundTerminals/clean") {

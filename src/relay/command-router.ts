@@ -12,6 +12,7 @@ export interface SlashCommandHandlers {
   newThread(conversationId: ConversationId): Promise<void>;
   resume(conversationId: ConversationId, searchTerm: string): Promise<void>;
   fork(conversationId: ConversationId): Promise<void>;
+  side(conversationId: ConversationId, prompt: string, userMessageId?: MessageId): Promise<void>;
   rename(conversationId: ConversationId, name: string): Promise<void>;
   plan(conversationId: ConversationId, prompt: string, userMessageId?: MessageId): Promise<void>;
   goal(conversationId: ConversationId, args: string): Promise<void>;
@@ -51,6 +52,10 @@ export class SlashCommandRouter {
         return true;
       case "/fork":
         await this.handlers.fork(message.conversationId);
+        return true;
+      case "/side":
+      case "/btw":
+        await this.handlers.side(message.conversationId, commandArgs(text), message.messageId);
         return true;
       case "/rename":
         await this.handlers.rename(message.conversationId, commandArgs(text));

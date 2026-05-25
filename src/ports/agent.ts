@@ -131,6 +131,7 @@ export interface AgentDriver {
   setThreadGoal?(sessionKey: string, goal: AgentThreadGoalSetOptions): Promise<AgentThreadGoal>;
   clearThreadGoal?(sessionKey: string): Promise<boolean>;
   forkThread?(sessionKey: string): Promise<AgentThreadSwitchResult>;
+  sideConversation?(sessionKey: string, text: string): Promise<AgentSideConversationResult>;
   renameThread?(sessionKey: string, name: string): Promise<void>;
   cleanBackgroundTerminals?(sessionKey: string): Promise<void>;
   listBackgroundTerminals?(sessionKey: string): Promise<AgentBackgroundTerminalSummary[]>;
@@ -143,6 +144,7 @@ export interface AgentDriverCapabilities {
   approvals: boolean;
   builtinCommands: boolean;
   threadFork: boolean;
+  sideConversation: boolean;
   threadRename: boolean;
   threadGoals: boolean;
   threadList: boolean;
@@ -218,6 +220,12 @@ export interface AgentThreadGoalSetOptions {
 export interface AgentThreadSwitchResult {
   threadId: string;
   threadName?: string;
+}
+
+export interface AgentSideConversationResult {
+  message: string;
+  threadId?: string;
+  turnId?: string;
 }
 
 export interface AgentBackgroundTerminalSummary {
