@@ -2,6 +2,8 @@ import type { Database } from "bun:sqlite";
 import type { Logger } from "../domain/logger.ts";
 
 export function migrateSQLiteSchema(db: Database, logger: Logger): void {
+  // Tables are created at their earliest baseline shape first; additive columns
+  // below keep existing local databases compatible across relay upgrades.
   db.run(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
@@ -96,12 +98,16 @@ export function migrateSQLiteSchema(db: Database, logger: Logger): void {
 }
 
 function addColumnIfMissing(db: Database, table: string, column: string, definition: string): void {
+  // SQLite lacks `ADD COLUMN IF NOT EXISTS` on some bundled versions, so inspect
+  // table metadata before applying additive migrations.
   const rows = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
   if (rows.some((row) => row.name === column)) return;
   db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 function recordMigration(db: Database, version: number, name: string): void {
+  // The current migrations are idempotent DDL; this marker records that the
+  // baseline schema has been observed without replaying destructive changes.
   db.query(`
     INSERT INTO schema_migrations (version, name, applied_at)
     VALUES (?, ?, ?)

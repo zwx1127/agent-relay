@@ -30,6 +30,8 @@ export function getTurnStatus(value: unknown): string | undefined {
 
 export function applySessionMetadata(status: AgentSessionStatus, result: unknown): void {
   const record = asRecord(result);
+  // App-server response shapes are intentionally treated as loose records so the
+  // relay can tolerate minor protocol additions without breaking session startup.
   applyThreadMetadata(status, asRecord(record?.thread));
   status.model = getString(record, "model") ?? status.model;
   status.modelProvider = getString(record, "modelProvider") ?? status.modelProvider;
@@ -129,6 +131,9 @@ export function reviewTargetPayload(target: AgentReviewTarget): unknown {
 }
 
 export function collaborationModePayload(status: AgentSessionStatus, mode: AgentCollaborationMode): unknown {
+  // Codex expects a complete settings object for collaboration mode changes.
+  // Relay reuses the current session metadata and lets Codex fill unavailable
+  // optional settings with its defaults.
   return {
     mode,
     settings: {
@@ -157,6 +162,7 @@ export function getNumber(record: Record<string, unknown>, key: string): number 
 
 export function userInputPayload(text: string, images: AgentImageInput[] | undefined): unknown[] {
   const input: unknown[] = [{ type: "text", text, text_elements: [] }];
+  // Captions stay in the text prompt; Codex localImage items only need paths.
   for (const image of images ?? []) {
     input.push({ type: "localImage", path: image.path });
   }
@@ -172,6 +178,8 @@ export function imageOutputEvent(sessionKey: string, item: Record<string, unknow
   turnId?: string;
   itemId?: string;
 } {
+  // Image output has existed under both saved-path and inline-result shapes.
+  // Normalize either shape before the relay stores and sends the file.
   const savedPath = getString(item, "savedPath");
   const result = getString(item, "result");
   const revisedPrompt = getString(item, "revisedPrompt") ?? getString(item, "revised_prompt");
@@ -240,6 +248,7 @@ export function toQuestion(value: unknown): AgentUserInputQuestion | undefined {
 }
 
 export function approvalKindForMethod(method: string): AgentApprovalKind | undefined {
+  // Keep legacy method names while newer app-server builds migrate to item/*.
   switch (method) {
     case "item/commandExecution/requestApproval":
       return "command";

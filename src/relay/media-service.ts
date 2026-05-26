@@ -21,6 +21,7 @@ import { extensionFromTelegramPath, imageBlobFromPath, saveGeneratedImage, saveR
 interface MediaGroupState {
   conversationId: ConversationId;
   messages: MediaInboundMessage[];
+  /** Reset on every album message so the group is submitted after a quiet window. */
   timer?: Timer;
 }
 
@@ -84,6 +85,8 @@ export class MediaRelayService {
     if (existing?.timer) clearTimeout(existing.timer);
     const state = existing ?? { conversationId: message.conversationId, messages: [] };
     state.messages.push(message);
+    // Telegram/Lark album items arrive as separate updates. A short quiet window
+    // lets the relay submit them to Codex as one prompt with multiple images.
     state.timer = setTimeout(() => {
       this.mediaGroups.delete(key);
       void this.submitMediaMessages(state.conversationId, state.messages)
@@ -102,6 +105,8 @@ export class MediaRelayService {
     const status = await this.deps.ensureAgentStarted(conversationId, workspace);
     if (await this.deps.sendWaitingPromptNotice(conversationId, status)) return;
 
+    // Preserve provider message order so image references in captions match the
+    // order of localImage inputs sent to Codex.
     const sorted = [...messages].sort((a, b) => Number(a.messageId) - Number(b.messageId));
     const prompt = sorted.map((item) => item.caption?.trim()).find(Boolean) ?? DEFAULT_IMAGE_PROMPT;
     const images: AgentImageInput[] = [];
@@ -152,6 +157,8 @@ export class MediaRelayService {
     const workspace = this.deps.currentWorkspace(parsed.conversationId);
     if (!workspace || workspace.name !== parsed.workspaceName) return;
     try {
+      // All outbound images are copied under the selected workspace before being
+      // sent so the relay enforces one media location and size policy.
       const path = event.path ? await this.copyOutgoingImage(workspace.path, event.path) : event.data ? await saveGeneratedImage(workspace.path, event.data) : undefined;
       if (!path) throw new Error("Codex image output did not include image data.");
       await this.sendStoredImage(parsed.conversationId, parsed.workspaceName, path, event.caption, this.deps.lastUserMessageId(event.sessionKey));
@@ -200,6 +207,8 @@ export class MediaRelayService {
       return { sessionKey: input.sessionKey, workspace };
     }
 
+    // Capability helper calls usually identify a session by cwd. Accept that only
+    // when it maps to exactly one running workspace to avoid cross-chat leaks.
     const cwd = input.cwd ? resolve(input.cwd) : undefined;
     const matches = this.deps.store.listRunningSessions()
       .flatMap((session) => {
@@ -218,6 +227,8 @@ export class MediaRelayService {
   private async validateDebugImagePath(path: string, workspacePath: string): Promise<void> {
     if (!isAbsolute(path)) throw new Error("Image path must be absolute.");
     const resolvedPath = resolve(path);
+    // The control API is local-only, but still treats workspace containment as
+    // the authorization boundary for agent-produced debug images.
     if (!pathContains(workspacePath, resolvedPath)) throw new Error("Image path must stay inside the selected workspace.");
     const extension = extname(resolvedPath).toLowerCase();
     if (![".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(extension)) {

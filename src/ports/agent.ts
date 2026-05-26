@@ -10,6 +10,12 @@ export type AgentOutputEvent =
   | AgentUserInputRequestEvent
   | AgentApprovalRequestEvent;
 
+/**
+ * Streaming text output from an agent turn.
+ *
+ * `type` is optional for compatibility with older Codex app-server message
+ * notifications that only carried a chunk payload.
+ */
 export interface AgentMessageOutputEvent {
   type?: "message";
   sessionKey: string;
@@ -44,7 +50,9 @@ export interface AgentUserInputQuestion {
   id: string;
   header: string;
   question: string;
+  /** Secret answers should be collected through provider flows that do not echo the value. */
   isSecret?: boolean;
+  /** Allows the user to provide free text instead of choosing one of `options`. */
   isOther?: boolean;
   options?: AgentUserInputOption[] | null;
 }
@@ -69,6 +77,7 @@ export interface AgentApprovalRequestEvent {
   type: "approval_request";
   sessionKey: string;
   requestId: string | number;
+  /** Raw provider method name, retained so adapters can support new approval methods before a type is added. */
   method: string;
   approvalKind: AgentApprovalKind;
   title: string;
@@ -91,9 +100,11 @@ export interface AgentSessionStatus {
   workspacePath: string;
   running: boolean;
   startedAt: number;
+  /** Agent-native thread id used for resume, fork, and side-conversation flows. */
   threadId?: string;
   threadName?: string;
   threadStatus?: string;
+  /** Present while the provider believes subsequent input should steer an in-flight turn. */
   activeTurnId?: string;
   model?: string;
   modelProvider?: string;
@@ -104,6 +115,7 @@ export interface AgentSessionStatus {
   instructionSources?: string[];
   tokenUsage?: AgentTokenUsage;
   contextWindow?: number;
+  /** These flags block normal prompt submission until the user answers or interrupts. */
   waitingForUserInput?: boolean;
   waitingForApproval?: boolean;
   recentWarning?: string;
@@ -119,6 +131,7 @@ export interface StartAgentOptions {
 
 export interface AgentDriver {
   readonly providerId?: ProviderId;
+  /** Feature flags are advisory; callers still guard each optional method before invoking it. */
   readonly capabilities?: Partial<AgentDriverCapabilities>;
   start(options: StartAgentOptions): Promise<AgentSessionStatus>;
   send(sessionKey: string, text: string, options?: AgentSendOptions): Promise<AgentSendResult>;

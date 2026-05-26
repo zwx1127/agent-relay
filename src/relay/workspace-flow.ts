@@ -65,6 +65,8 @@ export class WorkspaceFlow {
 
   requireWorkspace(name: string): WorkspaceRecord {
     validateWorkspaceName(name);
+    // Workspace records are cacheable metadata; the filesystem remains the source
+    // of truth so manually-created directories can be selected without migration.
     const workspace = this.deps.store.getWorkspace(name) ?? {
       name,
       path: resolveWorkspacePath(this.deps.config.workspaceRoot, name),
@@ -77,6 +79,8 @@ export class WorkspaceFlow {
 
   async listAvailableWorkspaces(): Promise<WorkspaceRecord[]> {
     const now = Date.now();
+    // Refresh the store from first-level real directories on every list render so
+    // external workspace creation/removal is reflected in Relay Home.
     for (const workspace of await discoverWorkspaceDirectories(this.deps.config.workspaceRoot)) {
       this.deps.store.upsertWorkspace({ ...workspace, createdAt: now });
     }
@@ -84,6 +88,8 @@ export class WorkspaceFlow {
   }
 
   async workspaceNameForToken(token: string): Promise<string> {
+    // Callback data uses short tokens to fit provider limits; resolving against
+    // the current workspace list detects stale or ambiguous buttons.
     const matches = (await this.listAvailableWorkspaces()).filter((workspace) => workspaceCallbackToken(workspace.name) === token);
     if (matches.length === 1) return matches[0]!.name;
     if (matches.length > 1) throw new Error("workspace selection token is ambiguous. Refresh workspaces and try again.");
@@ -126,6 +132,8 @@ export class WorkspaceFlow {
     await this.deps.renderStrictCallbackPage(message, messageWithTitle("Selecting workspace.", workspace.name), { inline_keyboard: [] });
     this.deps.store.bindConversation(message.conversationId, workspace.name);
     this.deps.logger.info("router.workspace_selected", { conversation_id: message.conversationId, workspace: workspace.name, path: workspace.path });
+    // Explicit workspace selection starts a fresh session binding rather than
+    // resuming the previous thread implicitly.
     await this.deps.ensureAgentStarted(message.conversationId, workspace, undefined, { resumePrevious: false });
     await this.renderHomeOnCallback(message);
   }
@@ -146,6 +154,8 @@ export class WorkspaceFlow {
     const workspace = this.requireWorkspace(name);
     await this.deps.renderStrictCallbackPage(message, messageWithTitle("Deleting workspace.", workspace.name), { inline_keyboard: [] });
     const key = sessionKey(message.conversationId, workspace.name);
+    // Finalize buffered output before stopping/deleting so the user sees the last
+    // agent text even if the workspace is removed immediately after.
     await this.deps.finalizeSessionOutput(key);
     await this.deps.agent.stop(key).catch((error) => {
       this.deps.logger.warn("router.workspace_delete_stop_failed", {
@@ -258,6 +268,8 @@ export class WorkspaceFlow {
       });
       this.deps.store.setConsoleMessageId(conversationId, sourceMessageId);
     } catch (error) {
+      // The ForceReply confirmation is already sent; failure to edit the original
+      // picker should not make workspace creation appear failed.
       this.deps.logger.warn("router.workspace_prompt_source_refresh_failed", {
         conversation_id: conversationId,
         message_id: sourceMessageId,

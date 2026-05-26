@@ -55,6 +55,8 @@ export class RelayController {
   private readonly threadCommands: ThreadCommandService;
   private readonly renderer: RelayMessageRenderer;
   private readonly sessionService: RelaySessionService;
+  // IM providers can deliver callbacks, text, and media concurrently. Serializing
+  // per conversation keeps prompt state, task state, and home-message edits ordered.
   private readonly conversationQueue = new ConversationQueue();
 
   constructor(private readonly deps: RelayControllerDeps) {
@@ -244,6 +246,9 @@ export class RelayController {
       } else if (command && await this.slashCommands.handle(message, command, text)) {
         return;
       } else {
+        // ForceReply answers are keyed by the prompt message id. Ordinary text is
+        // never treated as an answer to a Codex question unless it replies to the
+        // prompt, which avoids accidentally submitting direct messages as secrets.
         const pending = message.replyToMessageId
           ? this.deps.store.getPendingPrompt(message.conversationId, message.replyToMessageId)
           : undefined;
@@ -254,6 +259,8 @@ export class RelayController {
         } else if (pending?.kind === "relay_command") {
           await this.threadCommands.answerRelayCommandPrompt(message.conversationId, message.replyToMessageId!, text);
         } else {
+          // While Codex is blocked on an explicit question or approval, new
+          // direct prompts are held back so they do not bypass the requested gate.
           const codexPending = this.deps.store.latestPendingPrompt(message.conversationId, ["codex_user_input", "codex_approval"]);
           if (codexPending) {
             await this.sendPendingCodexPromptNotice(message.conversationId, codexPending);
@@ -316,6 +323,8 @@ export class RelayController {
 
   private async handleAgentOutputSerial(session: AgentOutputEvent): Promise<void> {
     if (session.type === "image") {
+      // Text chunks are flushed before image delivery so the IM transcript stays
+      // in the same order the agent produced it.
       await this.finalizeSessionOutput(session.sessionKey);
       await this.mediaRelay.sendAgentImageOutput(session);
       return;
@@ -327,6 +336,8 @@ export class RelayController {
       });
       await this.finalizeSessionOutput(session.sessionKey);
       await this.threadCommands.sendPlanReadyPrompt(session.sessionKey, session.turnId);
+      // Completion is the only point where a queued local task can safely start;
+      // blocked turns must wait for explicit user input or approval handling.
       await this.completeTaskAndDispatchNext(session.sessionKey, session.turnId);
       return;
     }
@@ -487,6 +498,8 @@ export class RelayController {
       return { sessionKey: input.sessionKey, conversationId: parsed.conversationId, workspaceName: parsed.workspaceName };
     }
 
+    // Helper calls normally pass cwd instead of a session key. Match it to one
+    // running workspace only; ambiguous matches require the explicit key.
     const cwd = input.cwd ? resolve(input.cwd) : undefined;
     const matches = this.deps.store.listRunningSessions()
       .flatMap((session) => {

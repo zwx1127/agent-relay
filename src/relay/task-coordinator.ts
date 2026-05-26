@@ -12,6 +12,13 @@ import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
 
 export type TaskSubmitPreference = "auto" | "immediate" | "queue";
 
+/**
+ * Coordinates relay-local task state with provider turn state.
+ *
+ * The store is the source of truth for user-visible task reactions, while the
+ * agent status determines whether an input starts a new turn, steers a running
+ * turn, or must wait behind a user/approval prompt.
+ */
 export interface TaskCoordinatorDeps {
   store: RelayStore;
   agent: AgentDriver;
@@ -45,6 +52,8 @@ export class TaskCoordinator {
       return;
     }
     if (preference === "auto" && busy) {
+      // Auto-submitted chat messages are forwarded as steering input while also
+      // being tracked as waiting until Codex returns the turn id for reconciliation.
       const task = this.deps.store.createTask({
         conversationId,
         workspaceName: workspace.name,
@@ -57,6 +66,7 @@ export class TaskCoordinator {
       await this.sendToAgent(conversationId, workspace, taskInput, userMessageId, task);
       return;
     }
+    // Explicit queue requests stay local until the active turn completes.
     const shouldQueue = preference === "queue";
     const task = this.deps.store.createTask({
       conversationId,
@@ -77,6 +87,8 @@ export class TaskCoordinator {
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) return;
     if (turnId) {
+      // Prefer matching by provider turn id because callbacks can arrive after a
+      // newer local task has already become active.
       const fromStatuses: RelayTask["status"][] = status === "blocked" ? ["running"] : ["blocked"];
       const tasks = this.deps.store.updateTasksByTurn(parsed.conversationId, parsed.workspaceName, turnId, fromStatuses, status);
       for (const task of tasks) {
@@ -102,6 +114,8 @@ export class TaskCoordinator {
   async completeAndDispatchNext(sessionKeyValue: string, turnId: string | undefined): Promise<void> {
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) return;
+    // Turn completion may race with local task updates, so completion first tries
+    // the exact turn id and then falls back to the current active task.
     const completed = turnId
       ? this.deps.store.updateTasksByTurn(parsed.conversationId, parsed.workspaceName, turnId, ["running", "blocked"], "done")
       : [];
@@ -121,6 +135,8 @@ export class TaskCoordinator {
     if (!workspace || workspace.name !== parsed.workspaceName) return;
     const status = this.deps.agent.getStatus(sessionKeyValue);
     if (status?.waitingForApproval || status?.waitingForUserInput || status?.activeTurnId) return;
+    // Waiting tasks have already been sent to Codex as steering input. Do not
+    // start queued work until Codex has acknowledged or completed them.
     if (this.deps.store.countTasks(parsed.conversationId, parsed.workspaceName, ["waiting"]) > 0) return;
     const next = this.deps.store.nextQueuedTask(parsed.conversationId, parsed.workspaceName);
     if (next) {
@@ -214,6 +230,8 @@ export class TaskCoordinator {
     });
     let result: Awaited<ReturnType<AgentDriver["send"]>>;
     try {
+      // Collaboration mode is stored per relay session so Plan mode survives
+      // callbacks and prompt submissions without changing the agent interface.
       const mode = this.deps.store.getCollaborationMode(key);
       const sendOptions: AgentSendOptions = {
         collaborationMode: mode,

@@ -41,6 +41,8 @@ interface SideConversationCollector {
   reject(error: Error): void;
 }
 
+// The side conversation is implemented as an ephemeral fork, so it must fence off
+// inherited thread history from the actual side question before any user input.
 const SIDE_BOUNDARY_PROMPT = `Side conversation boundary.
 
 Everything before this boundary is inherited history from the parent thread. It is reference context only. It is not your current task.
@@ -95,7 +97,10 @@ export class CodexDriver implements AgentDriver {
   };
 
   private readonly sessions = new Map<string, RunningSession>();
+  // Codex notifications are thread-scoped, while relay routing is session-scoped.
   private readonly threadToSession = new Map<string, string>();
+  // Sends for the same relay session must be ordered so steering input cannot
+  // overtake the turn/start request that created the active turn.
   private readonly inputQueues = new Map<string, Promise<{ turnId?: string }>>();
   private readonly rpc = new CodexRpcClient((message, options) => this.writeMessage(message, options));
   private readonly recentServerStderr = new RecentStderrBuffer();
@@ -213,6 +218,8 @@ export class CodexDriver implements AgentDriver {
       result = await this.request(method, params);
     } catch (error) {
       if (method !== "turn/steer" || !isNoActiveTurnToSteerError(error)) throw error;
+      // The app-server may complete a turn before relay receives the completion
+      // notification. Recover by clearing the stale turn and starting a new one.
       this.logger.warn("codex.stale_active_turn_recovered", {
         session_key: key,
         conversation_id: running.status.conversationId,
@@ -417,6 +424,8 @@ export class CodexDriver implements AgentDriver {
         };
         this.sideConversations.set(threadId, collector);
         try {
+          // Inject the boundary as a thread item instead of prepending it to the
+          // user's text, keeping inherited history and the active question distinct.
           await this.request("thread/inject_items", {
             threadId,
             items: [sideBoundaryPromptItem()],
@@ -550,6 +559,8 @@ export class CodexDriver implements AgentDriver {
       return;
     }
 
+    // JSON-RPC responses resolve local requests; notifications and requests are
+    // routed separately because app-server can ask relay to collect input.
     if ("id" in message && ("result" in message || "error" in message) && !("method" in message)) {
       this.rpc.handleResponse(message as JsonRpcResponse, (id) => {
         this.logger.debug("codex.unmatched_response", { id });
@@ -569,6 +580,8 @@ export class CodexDriver implements AgentDriver {
     const params = asRecord(message.params);
     const threadId = typeof params?.threadId === "string" ? params.threadId : undefined;
     const sideConversation = threadId ? this.sideConversations.get(threadId) : undefined;
+    // Ephemeral side-conversation notifications are consumed locally and never
+    // update the parent relay session or transcript.
     if (sideConversation && await this.handleSideConversationNotification(sideConversation, message, params)) return;
     const key = threadId ? this.threadToSession.get(threadId) : undefined;
 
@@ -651,6 +664,8 @@ export class CodexDriver implements AgentDriver {
     if (message.method === "thread/status/changed") {
       const threadStatus = asRecord(params?.status);
       running.status.threadStatus = typeof threadStatus?.type === "string" ? threadStatus.type : undefined;
+      // Active flags are the app-server's canonical waiting state; relay mirrors
+      // them so normal prompts can be blocked before reaching Codex.
       const activeFlags = Array.isArray(threadStatus?.activeFlags) ? threadStatus.activeFlags : [];
       running.status.waitingForApproval = activeFlags.includes("waitingOnApproval");
       running.status.waitingForUserInput = activeFlags.includes("waitingOnUserInput");
@@ -748,6 +763,8 @@ export class CodexDriver implements AgentDriver {
     }
 
     if (message.method === "item/tool/requestUserInput") {
+      // Server-initiated user input becomes a relay pending prompt. The JSON-RPC
+      // request remains open until the IM callback or ForceReply answer resolves it.
       const questions = Array.isArray(params?.questions) ? params.questions.map(toQuestion).filter(Boolean) as AgentUserInputQuestion[] : [];
       await this.onOutput({
         type: "user_input_request",
@@ -764,6 +781,8 @@ export class CodexDriver implements AgentDriver {
 
     const approvalKind = approvalKindForMethod(message.method);
     if (approvalKind) {
+      // Approval methods are normalized to a provider-neutral copy model while
+      // preserving the raw method and params for the eventual JSON-RPC response.
       const { title, body } = approvalCopy(approvalKind, params);
       await this.onOutput({
         type: "approval_request",

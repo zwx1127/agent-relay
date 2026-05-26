@@ -9,6 +9,7 @@ export interface WorkspaceRecord {
 
 export interface ConversationBinding {
   conversationId: ConversationId;
+  /** One active workspace is bound per IM conversation; agent sessions are keyed from this pair. */
   workspaceName: string;
   updatedAt: number;
 }
@@ -27,16 +28,26 @@ export type PendingPromptKind = "workspace_name" | "codex_user_input" | "codex_a
 
 export interface PendingPrompt {
   conversationId: ConversationId;
+  /** IM message that should be replied to or updated when answering this prompt. */
   promptMessageId: MessageId;
   kind: PendingPromptKind;
   createdAt: number;
+  /** Present for prompts tied to a specific Codex session and cleared when that session is reset. */
   sessionKey?: string;
+  /** Small provider-independent state payload, such as source callback ids or question metadata. */
   payloadJson?: string;
   expiresAt?: number;
 }
 
 export type HomeStatusMode = "compact" | "details";
 
+/**
+ * Task states track both queued user prompts and the active Codex turn.
+ *
+ * `waiting` means a prompt was forwarded while Codex was already busy and is
+ * expected to become the active turn once Codex accepts it. `queued` is an
+ * explicit local queue entry that has not been sent to the agent yet.
+ */
 export type TaskStatus = "waiting" | "queued" | "running" | "blocked" | "done" | "failed" | "cancelled" | "interrupted";
 
 export interface RelayTask {
@@ -48,7 +59,9 @@ export interface RelayTask {
   status: TaskStatus;
   createdAt: number;
   updatedAt: number;
+  /** Provider turn id used to reconcile completion/blocking events back to a submitted task. */
   turnId?: string;
+  /** Original IM message id, used for reactions and reply threading. */
   userMessageId?: MessageId;
   statusMessageId?: MessageId;
 }

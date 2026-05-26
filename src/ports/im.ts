@@ -12,6 +12,7 @@ export type TextEntityType =
 
 export interface TextEntity {
   type: TextEntityType;
+  /** Offsets are provider-facing UTF-16 positions, matching Telegram entity semantics. */
   offset: number;
   length: number;
   url?: string;
@@ -28,6 +29,7 @@ export interface InlineKeyboardButton {
 }
 
 export interface SendMessageOptions {
+  /** Entity rendering is preferred over parse mode when the provider supports it. */
   parseMode?: TextParseMode;
   entities?: TextEntity[];
   mentions?: OutboundMention[];
@@ -82,6 +84,7 @@ export interface OutboundMention {
 
 export interface InboundMessageContext {
   conversationType?: ConversationType;
+  /** Group messages without a direct bot mention are ignored before authorization checks. */
   mentionedBot?: boolean;
   mentionAll?: boolean;
   mentions?: InboundMention[];
@@ -95,6 +98,7 @@ export interface MediaInboundMessage extends InboundMessageContext {
   userId: UserId;
   caption?: string;
   photos: InboundMediaFile[];
+  /** Provider-native album/group id; messages with the same id are buffered briefly and submitted together. */
   mediaGroupId?: string;
   replyToMessageId?: MessageId;
   date?: number;
@@ -136,6 +140,7 @@ export interface ImAdapterCapabilities {
 
 export interface ImAdapter {
   readonly providerId: ProviderId;
+  /** Capabilities describe provider support; optional methods are still checked at call sites. */
   readonly capabilities: ImAdapterCapabilities;
   start(onMessage: (message: InboundMessage) => Promise<void>): Promise<void>;
   stop?(): void;

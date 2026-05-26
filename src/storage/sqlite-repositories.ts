@@ -50,6 +50,8 @@ export class WorkspaceRepository {
 
   delete(name: string): void {
     this.db.transaction(() => {
+      // Keep chat bindings from pointing at a workspace that has been removed
+      // from the relay catalog.
       this.db.query("DELETE FROM chat_bindings WHERE workspace_name = ?").run(name);
       this.db.query("DELETE FROM workspaces WHERE name = ?").run(name);
     })();
@@ -92,6 +94,8 @@ export class SessionRepository {
         status = 'running',
         started_at = excluded.started_at,
         stopped_at = NULL,
+        -- Reusing a session without an explicit thread id should preserve the
+        -- last known thread for resume/status flows.
         thread_id = COALESCE(excluded.thread_id, agent_sessions.thread_id)
     `).run({ $sessionKey: sessionKey, $conversationId: String(conversationId), $workspaceName: workspaceName, $startedAt: startedAt, $threadId: threadId ?? null });
     this.logger.info("store.session_marked_started", { session_key: sessionKey, conversation_id: conversationId, workspace: workspaceName });
@@ -203,6 +207,8 @@ export class PromptRepository {
   }
 
   latest(conversationId: ConversationId, kinds: PendingPrompt["kind"][] = [], now = Date.now()): PendingPrompt | undefined {
+    // Expired prompts are ignored here rather than eagerly deleted so callback
+    // handlers can still produce a clear stale/expired response when needed.
     const kindFilter = kinds.length > 0 ? `AND kind IN (${kinds.map(() => "?").join(", ")})` : "";
     const row = this.db.query<PendingPromptRow, any>(`
       SELECT conversation_id, prompt_message_id, kind, created_at, session_key, payload_json, expires_at
@@ -238,6 +244,8 @@ export class PagedOutputRepository {
   constructor(private readonly db: Database) {}
 
   set(output: PagedOutput): void {
+    // Paged output can be large; prune expired pages opportunistically before
+    // storing a new one to keep the local SQLite file bounded.
     this.prune(Date.now());
     this.db.query(`
       INSERT INTO paged_outputs (token, conversation_id, session_key, text, created_at, expires_at)
@@ -348,6 +356,8 @@ export class TaskRepository {
   list(conversationId: ConversationId, workspaceName: string, statuses?: TaskStatus[], limit = 20): RelayTask[] {
     const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
     if (statuses && statuses.length > 0) {
+      // Status-filtered task reads are used for dispatch order, so return oldest
+      // first. Unfiltered history below is newest first for status displays.
       const placeholders = statuses.map(() => "?").join(", ");
       return this.db.query<TaskRow, any>(`
         SELECT id, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
@@ -402,6 +412,8 @@ export class TaskRepository {
 
   updateByTurn(conversationId: ConversationId, workspaceName: string, turnId: string, fromStatuses: TaskStatus[], status: TaskStatus): RelayTask[] {
     if (fromStatuses.length === 0) return [];
+    // SQLite cannot bind a dynamic status list and turn id into a reusable typed
+    // query cleanly here, so narrow by status in SQL and by turn id in memory.
     const tasks = this.list(conversationId, workspaceName, fromStatuses, 100).filter((task) => task.turnId === turnId);
     for (const task of tasks) {
       this.update(task.id, { status });
