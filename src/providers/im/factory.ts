@@ -9,6 +9,8 @@ export function createImAdapter(config: AppConfig, logger: Logger = noopLogger):
     case "telegram":
       if (!config.telegramBotToken) throw new Error("TELEGRAM_BOT_TOKEN is required");
       return new TelegramAdapter(config.telegramBotToken, fetch, logger, {
+        botUsername: config.telegramBotUsername,
+        discoverBotUsername: !config.telegramBotUsername,
         pollTimeoutSeconds: config.telegramPollTimeoutSeconds,
         requestRetryMaxAttempts: config.telegramRequestRetryMaxAttempts,
         retryInitialDelayMs: config.telegramRetryInitialDelayMs,

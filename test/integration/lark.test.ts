@@ -120,6 +120,9 @@ describe("lark adapter", () => {
       messageId: "om_in",
       conversationId: "oc_chat",
       userId: "ou_user",
+      conversationType: "group",
+      mentionedBot: false,
+      mentionAll: false,
       text: "hi",
       date: 2,
     }]);
@@ -164,6 +167,9 @@ describe("lark adapter", () => {
       messageId: "om_in",
       conversationId: "oc_chat",
       userId: "ou_user",
+      conversationType: "group",
+      mentionedBot: false,
+      mentionAll: false,
       photos: [{ fileId: "img_key", width: 0, height: 0 }],
       replyToMessageId: "om_parent",
       date: 2,
@@ -171,6 +177,36 @@ describe("lark adapter", () => {
     expect([...new Uint8Array(file.bytes)]).toEqual([4, 5, 6]);
     expect(file.filePath).toBe("img_key.jpg");
     expect(file.fileSize).toBe(3);
+  });
+
+  test("routes mentioned group messages with cleaned text", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+    const received: unknown[] = [];
+
+    await adapter.start(async (message) => {
+      received.push(message);
+    });
+    await channel.handlers.message?.(normalizedMessage({
+      content: "@RelayBot /relay",
+      rawContentType: "text",
+      mentionedBot: true,
+      mentions: [{ key: "@RelayBot", name: "RelayBot", openId: "ou_bot", isBot: true }],
+    }));
+
+    expect(received).toEqual([{
+      kind: "message",
+      id: "om_in",
+      messageId: "om_in",
+      conversationId: "oc_chat",
+      userId: "ou_user",
+      conversationType: "group",
+      mentionedBot: true,
+      mentionAll: false,
+      mentions: [{ label: "RelayBot", userId: "ou_bot", isBot: true }],
+      text: "/relay",
+      date: 2,
+    }]);
   });
 
   test("routes card button actions as callback queries", async () => {
@@ -542,6 +578,21 @@ describe("lark adapter", () => {
 
     expect(channel.updated.at(-1)).toMatchObject({ messageId: "om_1" });
     expectNoLarkCardFooter(channel.updated.at(-1)!.card);
+  });
+
+  test("sends outbound lark peer mentions", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+
+    await adapter.sendMessage("oc_chat", "Please help.", {
+      mentions: [{ label: "Designer", larkOpenId: "ou_designer" }],
+    });
+
+    expect(channel.sent.at(-1)).toMatchObject({
+      to: "oc_chat",
+      input: { markdown: "@Designer Please help." },
+      options: { mentions: [{ key: "Designer", openId: "ou_designer", name: "Designer", isBot: true }] },
+    });
   });
 
   test("logs Lark card update target view and text length", async () => {

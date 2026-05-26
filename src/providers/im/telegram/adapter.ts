@@ -31,6 +31,8 @@ class TelegramApiError extends Error {
 }
 
 export interface TelegramAdapterOptions {
+  botUsername?: string;
+  discoverBotUsername?: boolean;
   pollTimeoutSeconds?: number;
   requestRetryMaxAttempts?: number;
   retryInitialDelayMs?: number;
@@ -45,6 +47,8 @@ interface TelegramUpdate {
     date: number;
     text?: string;
     caption?: string;
+    entities?: TelegramMessageEntity[];
+    caption_entities?: TelegramMessageEntity[];
     media_group_id?: string;
     photo?: Array<{
       file_id: string;
@@ -53,7 +57,7 @@ interface TelegramUpdate {
       height: number;
       file_size?: number;
     }>;
-    chat: { id: number };
+    chat: { id: number; type?: "private" | "group" | "supergroup" | "channel" };
     from?: { id: number };
     reply_to_message?: { message_id: number };
   };
@@ -68,6 +72,15 @@ interface TelegramUpdate {
     };
   };
 }
+
+interface TelegramMessageEntity {
+  type: "mention" | "text_mention" | "bot_command" | string;
+  offset: number;
+  length: number;
+  user?: { id: number; is_bot?: boolean; username?: string; first_name?: string };
+}
+
+type TelegramChatType = NonNullable<NonNullable<TelegramUpdate["message"]>["chat"]["type"]>;
 
 const ALLOWED_UPDATES = ["message", "callback_query"] as const;
 const DEFAULT_POLL_TIMEOUT_SECONDS = 30;
@@ -101,6 +114,8 @@ export class TelegramAdapter implements ImAdapter {
   private readonly retryInitialDelayMs: number;
   private readonly retryMaxDelayMs: number;
   private readonly delay: (ms: number) => Promise<void>;
+  private botUsername?: string;
+  private readonly discoverBotUsername: boolean;
 
   constructor(
     token: string,
@@ -114,6 +129,8 @@ export class TelegramAdapter implements ImAdapter {
     this.retryInitialDelayMs = options.retryInitialDelayMs ?? DEFAULT_RETRY_INITIAL_DELAY_MS;
     this.retryMaxDelayMs = options.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS;
     this.delay = options.delay ?? sleep;
+    this.botUsername = normalizeBotUsername(options.botUsername);
+    this.discoverBotUsername = options.discoverBotUsername ?? false;
   }
 
   stop(): void {
@@ -123,6 +140,7 @@ export class TelegramAdapter implements ImAdapter {
 
   async start(onMessage: (message: InboundMessage) => Promise<void>): Promise<void> {
     this.logger.info("telegram.polling_started");
+    if (this.discoverBotUsername && !this.botUsername) await this.resolveBotUsername();
     await this.skipPendingUpdates();
     while (!this.stopped) {
       const updates = await this.request<TelegramUpdate[]>("getUpdates", {
@@ -187,9 +205,25 @@ export class TelegramAdapter implements ImAdapter {
     this.logger.info("telegram.pending_updates_skipped", { offset: this.offset });
   }
 
+  private async resolveBotUsername(): Promise<void> {
+    try {
+      const me = await this.request<{ username?: string }>("getMe", {});
+      this.botUsername = normalizeBotUsername(me?.username);
+      this.logger.info("telegram.bot_identity_resolved", { bot_username: this.botUsername });
+    } catch (error) {
+      this.logger.warn("telegram.bot_identity_resolve_failed", {
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
+  }
+
   async sendMessage(conversationId: ConversationId, text: string, options: SendMessageOptions = {}): Promise<{ messageId?: MessageId }> {
-    const messageText = text.length > 0 ? text : "(empty)";
-    const chunks = outboundChunks(messageText, options);
+    const mentionPrefix = telegramMentionPrefix(options.mentions);
+    const messageText = `${mentionPrefix}${text.length > 0 ? text : "(empty)"}`;
+    const sendOptions = mentionPrefix && options.entities?.length
+      ? { ...options, entities: options.entities.map((entity) => ({ ...entity, offset: entity.offset + mentionPrefix.length })) }
+      : options;
+    const chunks = outboundChunks(messageText, sendOptions);
     this.logger.debug("telegram.send_message_started", { conversation_id: conversationId, text_len: text.length, chunks: chunks.length });
     let lastMessageId: string | undefined;
     for (const [index, chunk] of chunks.entries()) {
@@ -305,26 +339,30 @@ export class TelegramAdapter implements ImAdapter {
   private toInboundMessage(update: TelegramUpdate): InboundMessage | undefined {
     const message = update.message;
     if (message?.text && message.from) {
+      const mention = mentionContextForTelegram(message.text, message.entities, message.chat.type, this.botUsername);
       return {
         kind: "message",
         id: String(message.message_id),
         messageId: String(message.message_id),
         conversationId: String(message.chat.id),
         userId: String(message.from.id),
-        text: message.text,
+        text: mention.text,
+        ...mention.context,
         ...(message.reply_to_message ? { replyToMessageId: String(message.reply_to_message.message_id) } : {}),
         date: message.date,
       };
     }
 
     if (message?.photo?.length && message.from) {
+      const mention = mentionContextForTelegram(message.caption ?? "", message.caption_entities, message.chat.type, this.botUsername);
       return {
         kind: "media",
         id: String(message.message_id),
         messageId: String(message.message_id),
         conversationId: String(message.chat.id),
         userId: String(message.from.id),
-        ...(message.caption ? { caption: message.caption } : {}),
+        ...(mention.text ? { caption: mention.text } : {}),
+        ...mention.context,
         photos: message.photo.map((photo) => ({
           fileId: photo.file_id,
           ...(photo.file_unique_id ? { fileUniqueId: photo.file_unique_id } : {}),
@@ -478,6 +516,73 @@ function retryLogFields(error: unknown): { status?: number; description?: string
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeBotUsername(value: string | undefined): string | undefined {
+  const normalized = value?.trim().replace(/^@+/, "").toLowerCase();
+  return normalized || undefined;
+}
+
+function telegramMentionPrefix(mentions: SendMessageOptions["mentions"]): string {
+  const prefixes = (mentions ?? [])
+    .map((mention) => mention.telegramUsername?.trim().replace(/^@+/, ""))
+    .filter((username): username is string => Boolean(username));
+  return prefixes.length > 0 ? `${prefixes.map((username) => `@${username}`).join(" ")} ` : "";
+}
+
+function mentionContextForTelegram(
+  text: string,
+  entities: TelegramMessageEntity[] | undefined,
+  chatType: TelegramChatType | undefined,
+  botUsername: string | undefined,
+): { text: string; context: { conversationType?: "direct" | "group" | "unknown"; mentionedBot?: boolean; mentionAll?: boolean; mentions?: Array<{ label: string; userId?: string; isBot?: boolean }> } } {
+  const conversationType: "direct" | "group" | "unknown" | undefined = chatType === "private" ? "direct" : chatType === "group" || chatType === "supergroup" ? "group" : chatType ? "unknown" : undefined;
+  const mentions = (entities ?? [])
+    .filter((entity) => entity.type === "mention" || entity.type === "text_mention")
+    .map((entity) => {
+      const label = text.slice(entity.offset, entity.offset + entity.length);
+      return {
+        label,
+        ...(entity.user?.id !== undefined ? { userId: String(entity.user.id) } : {}),
+        ...(entity.user?.is_bot !== undefined ? { isBot: entity.user.is_bot } : {}),
+      };
+    });
+  const bot = normalizeBotUsername(botUsername);
+  const botMentionEntities = bot
+    ? (entities ?? []).filter((entity) => entityMentionsBot(text, entity, bot))
+    : [];
+  const stripped = stripBotMentions(text, botMentionEntities);
+  const context: { conversationType?: "direct" | "group" | "unknown"; mentionedBot?: boolean; mentions?: Array<{ label: string; userId?: string; isBot?: boolean }> } = {
+    ...(conversationType ? { conversationType } : {}),
+    ...(conversationType === "group" ? { mentionedBot: botMentionEntities.length > 0 } : {}),
+    ...(mentions.length > 0 ? { mentions } : {}),
+  };
+  return { text: stripped, context };
+}
+
+function entityMentionsBot(text: string, entity: TelegramMessageEntity, botUsername: string): boolean {
+  const value = text.slice(entity.offset, entity.offset + entity.length);
+  if (entity.type === "mention") return normalizeBotUsername(value) === botUsername;
+  if (entity.type === "text_mention") return normalizeBotUsername(entity.user?.username) === botUsername;
+  if (entity.type !== "bot_command") return false;
+  const atIndex = value.indexOf("@");
+  return atIndex >= 0 && normalizeBotUsername(value.slice(atIndex + 1)) === botUsername;
+}
+
+function stripBotMentions(text: string, entities: TelegramMessageEntity[]): string {
+  let next = text;
+  for (const entity of [...entities].sort((a, b) => b.offset - a.offset)) {
+    const value = next.slice(entity.offset, entity.offset + entity.length);
+    if (entity.type === "bot_command") {
+      const atIndex = value.indexOf("@");
+      if (atIndex >= 0) {
+        next = `${next.slice(0, entity.offset + atIndex)}${next.slice(entity.offset + entity.length)}`;
+      }
+      continue;
+    }
+    next = `${next.slice(0, entity.offset)}${next.slice(entity.offset + entity.length)}`;
+  }
+  return next.trim();
 }
 
 function outboundChunks(text: string, options: SendMessageOptions): Array<{ text: string; entities: NonNullable<SendMessageOptions["entities"]> }> {

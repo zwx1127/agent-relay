@@ -28,6 +28,7 @@ describe("config", () => {
     expect(config.telegramRetryMaxDelayMs).toBe(10000);
     expect(config.relayControlEnabled).toBe(false);
     expect(config.relayControlPort).toBe(0);
+    expect(config.relayPeerAgents).toEqual([]);
     expect(config.imProvider).toBe("telegram");
     expect(config.agentProvider).toBe("codex");
     expect(config.larkDomain).toBe("feishu");
@@ -156,6 +157,33 @@ describe("config", () => {
     expect(config.telegramRequestRetryMaxAttempts).toBe(5);
     expect(config.telegramRetryInitialDelayMs).toBe(100);
     expect(config.telegramRetryMaxDelayMs).toBe(3000);
+  });
+
+  test("loads relay peer agent settings", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-relay-peers-"));
+    try {
+      const peersFile = join(dir, "peers.json");
+      writeFileSync(peersFile, JSON.stringify([
+        { id: "designer", name: "Designer", telegramUsername: "@designer_bot", larkOpenId: "ou_designer" },
+      ]));
+
+      const config = loadConfig({
+        TELEGRAM_BOT_TOKEN: "token",
+        TELEGRAM_BOT_USERNAME: "@relay_bot",
+        ALLOWED_USER_IDS: "10",
+        WORKSPACE_ROOT: "/tmp/workspaces",
+        RELAY_AGENT_NAME: "builder",
+        RELAY_PEER_AGENTS_FILE: peersFile,
+      });
+
+      expect(config.telegramBotUsername).toBe("relay_bot");
+      expect(config.relayAgentName).toBe("builder");
+      expect(config.relayPeerAgents).toEqual([
+        { id: "designer", name: "Designer", telegramUsername: "designer_bot", larkOpenId: "ou_designer" },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("rejects invalid telegram polling and retry settings", () => {

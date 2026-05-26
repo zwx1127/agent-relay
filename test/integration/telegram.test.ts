@@ -83,6 +83,72 @@ describe("telegram adapter", () => {
     expect(inbound).toBeUndefined();
   });
 
+  test("marks and strips telegram bot mentions in group text", async () => {
+    const adapter = new TelegramAdapter("token", async () => Response.json({ ok: true, result: [] }), noopLogger, {
+      botUsername: "relay_bot",
+    });
+    const inbound = (adapter as any).toInboundMessage({
+      update_id: 5,
+      message: {
+        message_id: 9,
+        date: 1,
+        text: "@relay_bot /relay",
+        entities: [{ type: "mention", offset: 0, length: 10 }],
+        chat: { id: -2, type: "group" },
+        from: { id: 3 },
+      },
+    });
+
+    expect(inbound).toMatchObject({
+      kind: "message",
+      conversationId: "-2",
+      text: "/relay",
+      conversationType: "group",
+      mentionedBot: true,
+    });
+  });
+
+  test("marks telegram group slash commands addressed to the bot", async () => {
+    const adapter = new TelegramAdapter("token", async () => Response.json({ ok: true, result: [] }), noopLogger, {
+      botUsername: "relay_bot",
+    });
+    const inbound = (adapter as any).toInboundMessage({
+      update_id: 5,
+      message: {
+        message_id: 9,
+        date: 1,
+        text: "/relay@relay_bot",
+        entities: [{ type: "bot_command", offset: 0, length: 16 }],
+        chat: { id: -2, type: "supergroup" },
+        from: { id: 3 },
+      },
+    });
+
+    expect(inbound).toMatchObject({
+      text: "/relay",
+      conversationType: "group",
+      mentionedBot: true,
+    });
+  });
+
+  test("marks telegram group text without bot mention as unmentioned", async () => {
+    const adapter = new TelegramAdapter("token", async () => Response.json({ ok: true, result: [] }), noopLogger, {
+      botUsername: "relay_bot",
+    });
+    const inbound = (adapter as any).toInboundMessage({
+      update_id: 5,
+      message: {
+        message_id: 9,
+        date: 1,
+        text: "hello",
+        chat: { id: -2, type: "group" },
+        from: { id: 3 },
+      },
+    });
+
+    expect(inbound).toMatchObject({ conversationType: "group", mentionedBot: false, text: "hello" });
+  });
+
   test("skips pending messages before polling", async () => {
     const requestBodies: unknown[] = [];
     let calls = 0;
@@ -254,6 +320,18 @@ describe("telegram adapter", () => {
     await adapter.sendMessage(1, "x".repeat(3600));
 
     expect(sentBodies).toHaveLength(2);
+  });
+
+  test("prepends outbound telegram peer mentions", async () => {
+    const sentBodies: unknown[] = [];
+    const adapter = new TelegramAdapter("token", async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ ok: true, result: { message_id: 12 } });
+    });
+
+    await adapter.sendMessage(1, "Please help.", { mentions: [{ label: "Designer", telegramUsername: "designer_bot" }] });
+
+    expect(sentBodies.at(-1)).toMatchObject({ text: "@designer_bot Please help." });
   });
 
   test("retries transient outbound Telegram API failures", async () => {

@@ -7,7 +7,8 @@ import { RelayController } from "../relay/controller.ts";
 import { TextLogger } from "../domain/logger.ts";
 import { CapabilityRegistry } from "../relay/capabilities/registry.ts";
 import { parseSendImageRequest, RELAY_CAPABILITY_SEND_IMAGE } from "../relay/capabilities/send-image.ts";
-import { relayCapabilityInstructions, sendImageCapabilityInstructions } from "../relay/control/skills.ts";
+import { parseMentionAgentRequest, RELAY_CAPABILITY_MENTION_AGENT } from "../relay/capabilities/mention-agent.ts";
+import { mentionAgentCapabilityInstructions, relayCapabilityInstructions, sendImageCapabilityInstructions } from "../relay/control/skills.ts";
 import { startControlServer, type RunningControlServer } from "../relay/control/server.ts";
 import { createImAdapter } from "../providers/im/factory.ts";
 import { createAgentDriver } from "../providers/agents/factory.ts";
@@ -32,6 +33,17 @@ export async function main(): Promise<void> {
       return { ok: true, message: "image sent", path: result.path };
     },
   });
+  if (config.relayPeerAgents.length > 0) {
+    capabilities.register({
+      name: RELAY_CAPABILITY_MENTION_AGENT,
+      helperCommand: "mention-agent",
+      instructions: mentionAgentCapabilityInstructions(helperPath, config.relayAgentName, config.relayPeerAgents.map((peer) => peer.id)),
+      handle: async (body) => {
+        const result = await router.mentionPeerAgent(parseMentionAgentRequest(body));
+        return { ok: true, message: `mentioned ${result.peerId}` };
+      },
+    });
+  }
   let controlInstructions: string | undefined;
   if (config.relayControlEnabled) {
     controlInstructions = relayCapabilityInstructions(helperPath, capabilities.instructions());
@@ -83,6 +95,8 @@ export async function main(): Promise<void> {
     media_max_bytes: config.mediaMaxBytes,
     relay_control_enabled: config.relayControlEnabled,
     relay_control_port: config.relayControlPort,
+    relay_agent_name: config.relayAgentName,
+    relay_peer_agent_count: config.relayPeerAgents.length,
     allowed_user_count: config.allowedUserIds.size,
     allowed_conversation_count: config.allowedConversationIds?.size ?? 0,
   });

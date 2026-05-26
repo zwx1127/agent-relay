@@ -30,6 +30,7 @@ export interface InlineKeyboardButton {
 export interface SendMessageOptions {
   parseMode?: TextParseMode;
   entities?: TextEntity[];
+  mentions?: OutboundMention[];
   replyMarkup?: InlineKeyboardMarkup;
   forceReply?: boolean;
   inputFieldPlaceholder?: string;
@@ -64,18 +65,29 @@ export interface DownloadedFile {
   fileSize?: number;
 }
 
-export interface TextInboundMessage {
-  kind: "message";
-  id: string;
-  messageId: MessageId;
-  conversationId: ConversationId;
-  userId: UserId;
-  text: string;
-  replyToMessageId?: MessageId;
-  date?: number;
+export type ConversationType = "direct" | "group" | "unknown";
+
+export interface InboundMention {
+  label: string;
+  userId?: UserId;
+  isBot?: boolean;
 }
 
-export interface MediaInboundMessage {
+export interface OutboundMention {
+  label: string;
+  telegramUsername?: string;
+  larkOpenId?: string;
+  larkUserId?: string;
+}
+
+export interface InboundMessageContext {
+  conversationType?: ConversationType;
+  mentionedBot?: boolean;
+  mentionAll?: boolean;
+  mentions?: InboundMention[];
+}
+
+export interface MediaInboundMessage extends InboundMessageContext {
   kind: "media";
   id: string;
   messageId: MessageId;
@@ -84,6 +96,17 @@ export interface MediaInboundMessage {
   caption?: string;
   photos: InboundMediaFile[];
   mediaGroupId?: string;
+  replyToMessageId?: MessageId;
+  date?: number;
+}
+
+export interface TextInboundMessage extends InboundMessageContext {
+  kind: "message";
+  id: string;
+  messageId: MessageId;
+  conversationId: ConversationId;
+  userId: UserId;
+  text: string;
   replyToMessageId?: MessageId;
   date?: number;
 }

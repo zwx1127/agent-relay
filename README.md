@@ -97,6 +97,7 @@ The relay loads `.env` first, then overlays shell environment variables, so expo
 | `ALLOWED_USER_IDS` | yes | | Comma-separated provider user IDs allowed to use the relay. Stored as strings. |
 | `ALLOWED_CONVERSATION_IDS` | no | any conversation | Optional comma-separated provider conversation IDs. When set, both user and conversation must be allowed. |
 | `TELEGRAM_BOT_TOKEN` | when `IM_PROVIDER=telegram` | | Bot token from BotFather. |
+| `TELEGRAM_BOT_USERNAME` | no | auto-discovered | Bot username used for Telegram group mention detection. Set this if the bot cannot call `getMe` at startup. |
 | `LARK_APP_ID` | when `IM_PROVIDER=lark` | | Lark self-built app id. |
 | `LARK_APP_SECRET` | when `IM_PROVIDER=lark` | | Lark self-built app secret. |
 | `LARK_DOMAIN` | no | `feishu` | Open platform domain for Lark provider. Use `feishu` for Feishu China, `lark` for Lark international, or a custom HTTPS origin. |
@@ -113,6 +114,8 @@ The relay loads `.env` first, then overlays shell environment variables, so expo
 | `CODEX_DEVELOPER_INSTRUCTIONS_FILE` | no | | File loaded into Codex developer instructions. |
 | `CODEX_DEVELOPER_INSTRUCTIONS` | no | | Inline developer instructions appended after file instructions. |
 | `CODEX_MODEL_INSTRUCTIONS_FILE` | no | | File loaded into Codex base/model instructions. |
+| `RELAY_AGENT_NAME` | no | | Human-readable name for this relay instance when multi-agent capability instructions are injected. |
+| `RELAY_PEER_AGENTS_FILE` | no | | JSON file listing peer agent bots that this relay may mention through the local capability API. |
 | `RELAY_CONTROL_ENABLED` | no | `false` | Enables the local agent-to-relay capability API on `127.0.0.1`. |
 | `RELAY_CONTROL_PORT` | no | `0` | Local capability API port. `0` asks the OS to choose an available port. |
 | `LOG_LEVEL` | no | `info` | One of `debug`, `info`, `warn`, or `error`. |
@@ -132,7 +135,7 @@ Relay Home actions:
 - `Refresh`: redraw the current Relay Home message.
 - `Stop`: interrupt the current workspace session and clear the conversation's workspace selection.
 
-After a workspace is selected, ordinary Telegram messages are sent to Codex. Text messages that start with `/` are treated as Relay slash commands; unsupported commands receive an unknown-command notice that points to `/help` instead of being forwarded to Codex. Telegram photo messages are downloaded into the selected workspace and sent to Codex as image inputs; photo captions become the prompt, and photos without captions use a default inspection prompt. Telegram file/document attachments are not supported. If Codex is idle, the message starts a new turn. If a Codex turn is active, the message is sent as steering input for that turn. If no workspace is selected, ordinary text or photos open Relay Home instead.
+After a workspace is selected, ordinary Telegram messages are sent to Codex. Text messages that start with `/` are treated as Relay slash commands; unsupported commands receive an unknown-command notice that points to `/help` instead of being forwarded to Codex. In group chats, text, media, and slash commands must mention the bot; unmentioned group messages are silently ignored, while inline button callbacks still work. Telegram photo messages are downloaded into the selected workspace and sent to Codex as image inputs; photo captions become the prompt, and photos without captions use a default inspection prompt. Telegram file/document attachments are not supported. If Codex is idle, the message starts a new turn. If a Codex turn is active, the message is sent as steering input for that turn. If no workspace is selected, ordinary text or photos open Relay Home instead.
 
 Relay-handled slash commands:
 
@@ -179,7 +182,7 @@ Set `IM_PROVIDER=lark` and configure `LARK_APP_ID` plus `LARK_APP_SECRET` for a 
 
 In the Lark developer console, enable bot messaging and subscribe to message receive and card action events. At minimum, the relay expects message receive events for text and images plus `card.action.trigger` button callbacks for Relay Home, approvals, Codex questions, pagination, workspace actions, and workspace file browsing. Grant the app the IM message send and media resource permissions required by your tenant. If card clicks still show `code: 200340` and the relay logs do not show `router.callback_received`, verify that the app is subscribed to card action events and that the long-connection client is receiving them.
 
-Allowlist IDs are provider-native strings. Use sender `open_id` values in `ALLOWED_USER_IDS`; use chat `chat_id` values in `ALLOWED_CONVERSATION_IDS`. Lark interactive actions are shown as message cards. Reply prompts use normal Lark message replies and the existing pending prompt flow.
+Allowlist IDs are provider-native strings. Use sender `open_id` values in `ALLOWED_USER_IDS`; use chat `chat_id` values in `ALLOWED_CONVERSATION_IDS`. In Lark group chats, text, image captions, and slash commands must mention the bot; unmentioned group messages are silently ignored. Lark interactive actions are shown as message cards. Reply prompts use normal Lark message replies and the existing pending prompt flow.
 
 ## Image Support
 
@@ -201,9 +204,24 @@ The registered capability is `send_image`, intended for remote H5/web UI debuggi
 
 The helper calls `POST /v1/capabilities/send_image` with `{ path, cwd, sessionKey, caption }`. The relay validates that the image is a regular PNG/JPG/WEBP/GIF inside the selected workspace, enforces `MEDIA_MAX_BYTES`, copies it to `.agent-relay/media/outgoing`, and sends it through the IM adapter.
 
+When `RELAY_PEER_AGENTS_FILE` is set, the relay also registers `mention_agent`. This supports a multi-instance group-chat topology: run one `agent-relay` process per agent bot, put the bots in the same allowed group, and let each agent explicitly mention configured peers:
+
+```json
+[
+  { "id": "designer", "name": "Designer", "telegramUsername": "designer_bot", "larkOpenId": "ou_designer" }
+]
+```
+
+```bash
+"$AGENT_RELAY_HELPER" mention-agent designer "Please review the UI state." --cwd "$PWD"
+```
+
+The helper calls `POST /v1/capabilities/mention_agent` with `{ peerId, message, cwd, sessionKey }`. The relay resolves the active session, verifies the peer exists in `RELAY_PEER_AGENTS_FILE`, and sends an IM message that mentions that bot. It does not create local agent sessions for peers; each peer is handled by its own relay instance.
+
 ## Runtime Notes
 
 - Authorization requires `ALLOWED_USER_IDS`; if `ALLOWED_CONVERSATION_IDS` is set, both the user and conversation must match.
+- In group chats, unmentioned user messages are ignored before authorization, so unrelated group traffic does not receive "Unauthorized" notices.
 - On startup, pending Telegram updates are skipped so messages sent while the relay was offline are intentionally ignored.
 - Telegram polling subscribes to `message` and `callback_query` updates. Lark uses long-connection event delivery through the official SDK.
 - Transient Telegram failures are retried with exponential backoff. Lark long-connection reconnect and outbound retry behavior is delegated to the SDK.

@@ -19,6 +19,28 @@ export function relayCapabilityInstructions(helperPath: string, capabilityInstru
   ].join("\n");
 }
 
+export function mentionAgentCapabilityInstructions(helperPath: string, agentName: string | undefined, peerIds: string[]): string {
+  return [
+    "### mention_agent",
+    "",
+    "Use this capability when you need to ask another configured agent bot in the same IM group to do related work.",
+    agentName ? `Your relay agent name is: ${agentName}.` : undefined,
+    peerIds.length > 0 ? `Configured peer agent ids: ${peerIds.join(", ")}.` : "No peer agents are configured.",
+    "",
+    "Workflow:",
+    "1. Write a concise message naming the concrete work you need from the peer.",
+    "2. Send it with:",
+    "",
+    "```bash",
+    '\"$AGENT_RELAY_HELPER\" mention-agent <peer-id> \"message\" --cwd \"$PWD\"',
+    "```",
+    "",
+    `If AGENT_RELAY_HELPER is unavailable, the helper path for this relay is: ${helperPath}`,
+    "",
+    "After mentioning another agent, keep working on your own assigned task unless you are blocked on its answer.",
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
 export function sendImageCapabilityInstructions(helperPath: string): string {
   return [
     "### send_image",

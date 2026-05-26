@@ -9,6 +9,7 @@ export interface AppConfig {
   allowedConversationIds?: Set<string>;
   mediaMaxBytes: number;
   telegramBotToken?: string;
+  telegramBotUsername?: string;
   telegramPollTimeoutSeconds: number;
   telegramRequestRetryMaxAttempts: number;
   telegramRetryInitialDelayMs: number;
@@ -24,9 +25,19 @@ export interface AppConfig {
   codexApproval: string;
   codexDeveloperInstructions?: string;
   codexBaseInstructions?: string;
+  relayAgentName?: string;
+  relayPeerAgents: RelayPeerAgent[];
   relayControlEnabled: boolean;
   relayControlPort: number;
   logLevel: LogLevel;
+}
+
+export interface RelayPeerAgent {
+  id: string;
+  name?: string;
+  telegramUsername?: string;
+  larkOpenId?: string;
+  larkUserId?: string;
 }
 
 export type Env = Record<string, string | undefined>;
@@ -154,6 +165,7 @@ export function loadConfig(env?: Env): AppConfig {
     allowedConversationIds: allowedConversations ? parseStringSet(allowedConversations, "ALLOWED_CONVERSATION_IDS") : undefined,
     mediaMaxBytes: parsePositiveIntegerEnv(effectiveEnv, "MEDIA_MAX_BYTES", 20 * 1024 * 1024),
     ...(imProvider === "telegram" ? { telegramBotToken: requireEnv(effectiveEnv, "TELEGRAM_BOT_TOKEN") } : {}),
+    ...(effectiveEnv.TELEGRAM_BOT_USERNAME?.trim() ? { telegramBotUsername: normalizeTelegramUsername(effectiveEnv.TELEGRAM_BOT_USERNAME) } : {}),
     telegramPollTimeoutSeconds: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_POLL_TIMEOUT_SECONDS", 30),
     telegramRequestRetryMaxAttempts: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS", 3),
     telegramRetryInitialDelayMs: parsePositiveIntegerEnv(effectiveEnv, "TELEGRAM_RETRY_INITIAL_DELAY_MS", 500),
@@ -171,10 +183,70 @@ export function loadConfig(env?: Env): AppConfig {
     codexApproval: effectiveEnv.CODEX_APPROVAL?.trim() || "on-request",
     ...(developerInstructions ? { codexDeveloperInstructions: developerInstructions } : {}),
     ...(baseInstructions ? { codexBaseInstructions: baseInstructions } : {}),
+    ...(effectiveEnv.RELAY_AGENT_NAME?.trim() ? { relayAgentName: effectiveEnv.RELAY_AGENT_NAME.trim() } : {}),
+    relayPeerAgents: parsePeerAgentsFile(effectiveEnv.RELAY_PEER_AGENTS_FILE),
     relayControlEnabled: parseBooleanEnv(effectiveEnv, "RELAY_CONTROL_ENABLED", false),
     relayControlPort: parseNonNegativeIntegerEnv(effectiveEnv, "RELAY_CONTROL_PORT", 0),
     logLevel: parseLogLevel(effectiveEnv.LOG_LEVEL),
   };
+}
+
+function normalizeTelegramUsername(value: string): string {
+  const normalized = value.trim().replace(/^@+/, "");
+  if (!normalized) throw new Error("TELEGRAM_BOT_USERNAME must not be empty");
+  return normalized;
+}
+
+function parsePeerAgentsFile(filePath: string | undefined): RelayPeerAgent[] {
+  const trimmed = filePath?.trim();
+  if (!trimmed) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(resolve(trimmed), "utf8"));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`RELAY_PEER_AGENTS_FILE could not be read: ${detail}`);
+  }
+  if (!Array.isArray(parsed)) throw new Error("RELAY_PEER_AGENTS_FILE must contain a JSON array");
+  const ids = new Set<string>();
+  return parsed.map((item, index) => parsePeerAgent(item, index, ids));
+}
+
+function parsePeerAgent(value: unknown, index: number, ids: Set<string>): RelayPeerAgent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`RELAY_PEER_AGENTS_FILE[${index}] must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  const id = requiredPeerString(record, "id", index);
+  if (ids.has(id)) throw new Error(`RELAY_PEER_AGENTS_FILE contains duplicate id: ${id}`);
+  ids.add(id);
+  const peer: RelayPeerAgent = { id };
+  const name = optionalPeerString(record, "name", index);
+  const telegramUsername = optionalPeerString(record, "telegramUsername", index);
+  const larkOpenId = optionalPeerString(record, "larkOpenId", index);
+  const larkUserId = optionalPeerString(record, "larkUserId", index);
+  if (name) peer.name = name;
+  if (telegramUsername) peer.telegramUsername = normalizeTelegramUsername(telegramUsername);
+  if (larkOpenId) peer.larkOpenId = larkOpenId;
+  if (larkUserId) peer.larkUserId = larkUserId;
+  if (!peer.telegramUsername && !peer.larkOpenId && !peer.larkUserId) {
+    throw new Error(`RELAY_PEER_AGENTS_FILE[${index}] must define telegramUsername, larkOpenId, or larkUserId`);
+  }
+  return peer;
+}
+
+function requiredPeerString(record: Record<string, unknown>, key: string, index: number): string {
+  const value = optionalPeerString(record, key, index);
+  if (!value) throw new Error(`RELAY_PEER_AGENTS_FILE[${index}].${key} is required`);
+  return value;
+}
+
+function optionalPeerString(record: Record<string, unknown>, key: string, index: number): string | undefined {
+  const value = record[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new Error(`RELAY_PEER_AGENTS_FILE[${index}].${key} must be a string`);
+  const trimmed = value.trim();
+  return trimmed || undefined;
 }
 
 function rejectDeprecatedEnv(env: Env, deprecatedName: string, replacementName: string): void {

@@ -135,7 +135,8 @@ export class LarkAdapter implements ImAdapter {
   }
 
   async sendMessage(conversationId: ConversationId, text: string, options: SendMessageOptions = {}): Promise<SendMessageResult> {
-    const messageText = text.length > 0 ? text : "(empty)";
+    const prefix = options.mentions?.length ? `${options.mentions.map((mention) => `@${mention.label}`).join(" ")} ` : "";
+    const messageText = `${prefix}${text.length > 0 ? text : "(empty)"}`.trim();
     const sendOptions = sendOptionsFor(options);
     if (shouldSendCard(options)) {
       const card = createLarkCard(messageText, options);
@@ -328,6 +329,7 @@ export class LarkAdapter implements ImAdapter {
         messageId: message.messageId,
         conversationId: message.chatId,
         userId: message.senderId,
+        ...larkMessageContext(message),
         photos: imageResources.map(resourceToPhoto),
         ...(captionFromMessage(message) ? { caption: captionFromMessage(message) } : {}),
         ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
@@ -343,15 +345,29 @@ export class LarkAdapter implements ImAdapter {
       messageId: message.messageId,
       conversationId: message.chatId,
       userId: message.senderId,
-      text,
+      ...larkMessageContext(message),
+      text: stripLarkBotMentions(text, message),
       ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
       date: Math.floor(message.createTime / 1000),
     };
   }
 }
 
-function sendOptionsFor(options: Pick<SendMessageOptions | SendPhotoOptions, "replyToMessageId">): SendOptions {
-  return options.replyToMessageId ? { replyTo: String(options.replyToMessageId) } : {};
+function sendOptionsFor(options: Pick<SendMessageOptions | SendPhotoOptions, "replyToMessageId"> & Partial<Pick<SendMessageOptions, "mentions">>): SendOptions {
+  return {
+    ...(options.replyToMessageId ? { replyTo: String(options.replyToMessageId) } : {}),
+    ...("mentions" in options && options.mentions?.length ? {
+      mentions: options.mentions
+        .filter((mention) => mention.larkOpenId || mention.larkUserId)
+        .map((mention) => ({
+          key: mention.label,
+          ...(mention.larkOpenId ? { openId: mention.larkOpenId } : {}),
+          ...(mention.larkUserId ? { userId: mention.larkUserId } : {}),
+          name: mention.label,
+          isBot: true,
+        })),
+    } : {}),
+  };
 }
 
 export function larkDomainForSdk(domain: string | undefined): lark.Domain | string {
@@ -443,8 +459,38 @@ function resourceToPhoto(resource: ResourceDescriptor): InboundMediaFile {
 
 function captionFromMessage(message: NormalizedMessage): string | undefined {
   if (message.rawContentType === "image") return undefined;
-  const caption = message.content.trim();
+  const caption = stripLarkBotMentions(message.content, message).trim();
   return caption.length > 0 ? caption : undefined;
+}
+
+function larkMessageContext(message: NormalizedMessage): {
+  conversationType: "direct" | "group" | "unknown";
+  mentionedBot: boolean;
+  mentionAll: boolean;
+  mentions?: Array<{ label: string; userId?: string; isBot?: boolean }>;
+} {
+  const mentions = message.mentions.map((mention) => ({
+    label: mention.name ?? mention.key,
+    ...(mention.openId ? { userId: mention.openId } : mention.userId ? { userId: mention.userId } : {}),
+    ...(mention.isBot !== undefined ? { isBot: mention.isBot } : {}),
+  }));
+  return {
+    conversationType: message.chatType === "p2p" ? "direct" : message.chatType === "group" ? "group" : "unknown",
+    mentionedBot: message.mentionedBot,
+    mentionAll: message.mentionAll,
+    ...(mentions.length > 0 ? { mentions } : {}),
+  };
+}
+
+function stripLarkBotMentions(text: string, message: NormalizedMessage): string {
+  let next = text;
+  for (const mention of message.mentions.filter((item) => item.isBot)) {
+    const candidates = [mention.key, mention.name ? `@${mention.name}` : undefined, mention.name].filter((item): item is string => Boolean(item));
+    for (const candidate of candidates) {
+      next = next.replace(candidate, "");
+    }
+  }
+  return next.trim();
 }
 
 function reactionForEmoji(emoji: string): string {

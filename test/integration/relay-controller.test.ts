@@ -16,7 +16,7 @@ let stores: SQLiteStore[] = [];
 
 const TEST_STREAM_QUIET_MS = 5;
 
-function fixture(logLevel: LogLevel = "info"): { router: RelayController; store: SQLiteStore; adapter: FakeImAdapter; agent: FakeAgent; root: string; logLines: string[] } {
+function fixture(logLevel: LogLevel = "info", configOverrides: Partial<AppConfig> = {}): { router: RelayController; store: SQLiteStore; adapter: FakeImAdapter; agent: FakeAgent; root: string; logLines: string[] } {
   const root = mkdtempSync(join(tmpdir(), "agent-relay-controller-root-"));
   dirs.push(root);
   const store = new SQLiteStore(":memory:");
@@ -42,9 +42,11 @@ function fixture(logLevel: LogLevel = "info"): { router: RelayController; store:
     codexBin: "codex",
     codexSandbox: "workspace-write",
     codexApproval: "on-request",
+    relayPeerAgents: [],
     relayControlEnabled: false,
     relayControlPort: 0,
     logLevel,
+    ...configOverrides,
   };
   return { router: new RelayController({ config, store, adapter, agent, logger, streamTiming: { quietMs: TEST_STREAM_QUIET_MS } }), store, adapter, agent, root, logLines };
 }
@@ -71,6 +73,36 @@ describe("relay controller", () => {
     expect(adapter.sent.at(-1)?.text).toBe("Unauthorized.");
   });
 
+  test("ignores unmentioned group text before authorization", async () => {
+    const { router, adapter, agent } = fixture();
+
+    await router.handle({ ...textMessage("/relay", 99), conversationType: "group", mentionedBot: false });
+
+    expect(adapter.sent).toEqual([]);
+    expect(agent.sent).toEqual([]);
+  });
+
+  test("handles mentioned group text and strips provider mention before routing", async () => {
+    const { router, store, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle({ ...textMessage("hello codex"), conversationType: "group", mentionedBot: true });
+
+    expect(agent.sent).toEqual([sentPrompt("hello codex")]);
+  });
+
+  test("ignores unmentioned group media", async () => {
+    const { router, adapter, agent } = fixture();
+
+    await router.handle({ ...mediaMessage("inspect"), conversationType: "group", mentionedBot: false });
+
+    expect(adapter.sent).toEqual([]);
+    expect(agent.sent).toEqual([]);
+  });
+
   test("rejects unauthorized callbacks with callback answer only", async () => {
     const { router, adapter } = fixture();
     await router.handle(callbackMessage("ar:s", 99));
@@ -90,6 +122,27 @@ describe("relay controller", () => {
 
     expect(agent.sent).toEqual([sentPrompt("hello codex")]);
     expect(agent.getStatus("codex:1:demo")?.running).toBe(true);
+  });
+
+  test("agent capability can mention a configured peer agent in the active chat", async () => {
+    const { router, store, adapter, agent, root } = fixture("info", {
+      relayPeerAgents: [{ id: "designer", name: "Designer", telegramUsername: "designer_bot" }],
+    });
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
+    store.markSessionStarted("codex:1:demo", "1", "demo", 1, "thread-1");
+
+    await expect(router.mentionPeerAgent({ peerId: "designer", message: "Please review the UI.", cwd: path }))
+      .resolves.toEqual({ peerId: "designer" });
+
+    expect(adapter.sent.at(-1)).toMatchObject({
+      conversationId: "1",
+      text: "Please review the UI.",
+      options: { mentions: [{ label: "Designer", telegramUsername: "designer_bot" }] },
+    });
   });
 
   test("info logs message metadata without raw text", async () => {
