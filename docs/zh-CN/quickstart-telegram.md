@@ -46,7 +46,18 @@ WORKSPACE_ROOT=/absolute/path/to/workspaces
 ALLOWED_CONVERSATION_IDS=-100123456
 ```
 
-## 4. 启动和使用
+## 4. 可选群聊配置
+
+群聊使用时：
+
+1. 把 bot 加入群聊。
+2. 将 `ALLOWED_CONVERSATION_IDS` 设置为这个群的 chat ID。
+3. 如果当前环境中 bot username 自动发现不稳定，可以手动配置 `TELEGRAM_BOT_USERNAME`。
+4. 发送文本、图片 caption 和 slash command 时提及 bot。
+
+未提及 bot 的群聊消息会在授权检查前被忽略，因此普通群消息不会触发 relay。
+
+## 5. 启动和使用
 
 ```bash
 bun run start

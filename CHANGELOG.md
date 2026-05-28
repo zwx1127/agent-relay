@@ -10,6 +10,7 @@ The project is pre-1.0 and currently installs from source.
 
 - Split user-facing README and docs into separate English and Chinese versions.
 - Simplified user docs around features, quick start, daily usage, troubleshooting, and extension workflow.
+- Documented group chat setup, allowed conversations, and multi-agent group workflows.
 
 ## 0.1.0 - 2026-05-28
 

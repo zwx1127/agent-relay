@@ -50,7 +50,18 @@ WORKSPACE_ROOT=/absolute/path/to/workspaces
 
 Use `LARK_DOMAIN=feishu` for Feishu China apps and `LARK_DOMAIN=lark` for Lark international apps.
 
-## 4. Start and use
+## 4. Optional group chat setup
+
+For group chats:
+
+1. Add the bot to the group.
+2. Use sender `open_id` values in `ALLOWED_USER_IDS`.
+3. Use the group `chat_id` in `ALLOWED_CONVERSATION_IDS`.
+4. Mention the bot in text, image captions, and slash commands.
+
+Unmentioned group messages are ignored before authorization checks, so normal group traffic will not trigger the relay.
+
+## 5. Start and use
 
 ```bash
 bun run start

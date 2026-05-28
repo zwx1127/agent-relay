@@ -66,6 +66,39 @@ Suggested prompt:
 Add a new relay capability named <capability>. It should be callable from the helper, validate input carefully, and include tests for success and rejection paths.
 ```
 
+## Multi-agent group workflow
+
+You can put several agent-relay bots in the same Telegram or Lark/Feishu group. This gives each local agent its own bot identity while keeping the discussion in one shared room.
+
+Recommended setup:
+
+1. Run one agent-relay process per agent bot.
+2. Add all agent bots to the same allowed group.
+3. Set `RELAY_AGENT_NAME` so each agent knows its own role.
+4. Set `RELAY_PEER_AGENTS_FILE` to list the other bots it may mention.
+5. Set `RELAY_CONTROL_ENABLED=true` so Codex receives the helper and capability instructions.
+
+Example peer file:
+
+```json
+[
+  {
+    "id": "designer",
+    "name": "Designer",
+    "telegramUsername": "designer_bot",
+    "larkOpenId": "ou_designer"
+  }
+]
+```
+
+Once configured, Codex can ask another agent bot for related work with `mention_agent`. The relay sends a group message that mentions the peer; it does not start or manage the peer's local session.
+
+Suggested prompt:
+
+```text
+Ask the designer peer to review the current UI screenshot, then continue with the implementation while waiting for feedback.
+```
+
 ## Checks before merging
 
 ```bash

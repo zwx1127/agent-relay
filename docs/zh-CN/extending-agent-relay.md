@@ -66,6 +66,39 @@ Add a new AgentDriver for <agent name>. Start with text prompts, streaming outpu
 Add a new relay capability named <capability>. It should be callable from the helper, validate input carefully, and include tests for success and rejection paths.
 ```
 
+## 多 agent 群聊协作
+
+你可以把多个 agent-relay bot 放在同一个 Telegram 或 Lark/飞书群聊里。这样每个本地 agent 都有独立 bot 身份，但协作讨论仍然在同一个群里完成。
+
+推荐配置：
+
+1. 每个 agent bot 运行一个 agent-relay 进程。
+2. 将所有 agent bot 加入同一个允许的群聊。
+3. 设置 `RELAY_AGENT_NAME`，让每个 agent 知道自己的角色。
+4. 设置 `RELAY_PEER_AGENTS_FILE`，列出它可以提及的其他 bot。
+5. 设置 `RELAY_CONTROL_ENABLED=true`，让 Codex 获得 helper 和能力说明。
+
+peer 配置示例：
+
+```json
+[
+  {
+    "id": "designer",
+    "name": "Designer",
+    "telegramUsername": "designer_bot",
+    "larkOpenId": "ou_designer"
+  }
+]
+```
+
+配置完成后，Codex 可以用 `mention_agent` 请求另一个 agent bot 协助。relay 会在群里发送一条提及 peer 的消息；它不会启动或管理 peer 的本地会话。
+
+可用提示词：
+
+```text
+Ask the designer peer to review the current UI screenshot, then continue with the implementation while waiting for feedback.
+```
+
 ## 合并前检查
 
 ```bash

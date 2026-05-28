@@ -37,6 +37,7 @@ Windows 上支持 `codex.cmd` 和 `codex.exe`。如果自动查找失败，请�
 - 发送者 user ID 在 `ALLOWED_USER_IDS` 中。
 - 如果配置了 `ALLOWED_CONVERSATION_IDS`，当前 chat ID 也在其中。
 - 群聊消息提及了 bot。
+- 如果 bot username 自动发现失败，群聊里需要手动配置 `TELEGRAM_BOT_USERNAME`。
 - token 属于你正在聊天的 bot。
 
 relay 启动时会跳过离线期间积压的 Telegram 消息。
@@ -50,6 +51,16 @@ relay 启动时会跳过离线期间积压的 Telegram 消息。
 - `ALLOWED_CONVERSATION_IDS` 使用 chat `chat_id`。
 - 已启用机器人消息、消息接收事件和卡片 action 事件。
 - 群聊消息提及了 bot。
+
+## 群聊消息被忽略
+
+检查：
+
+- bot 确实已经加入群聊。
+- 消息直接提及了 bot。
+- 如果设置了 `ALLOWED_CONVERSATION_IDS`，用户和群聊都需要命中 allowlist。
+- slash command、图片 caption 和普通文本都需要包含 bot 提及。
+- 多 agent 群聊中，每个 bot 都需要独立 relay 进程和独立凭证。
 
 ## 按钮失效
 

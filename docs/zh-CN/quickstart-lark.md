@@ -50,7 +50,18 @@ WORKSPACE_ROOT=/absolute/path/to/workspaces
 
 飞书中国区应用使用 `LARK_DOMAIN=feishu`，Lark 国际版应用使用 `LARK_DOMAIN=lark`。
 
-## 4. 启动和使用
+## 4. 可选群聊配置
+
+群聊使用时：
+
+1. 把 bot 加入群聊。
+2. `ALLOWED_USER_IDS` 使用发送者 `open_id`。
+3. `ALLOWED_CONVERSATION_IDS` 使用群聊 `chat_id`。
+4. 发送文本、图片 caption 和 slash command 时提及 bot。
+
+未提及 bot 的群聊消息会在授权检查前被忽略，因此普通群消息不会触发 relay。
+
+## 5. 启动和使用
 
 ```bash
 bun run start

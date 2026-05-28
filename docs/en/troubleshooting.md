@@ -37,6 +37,7 @@ Check:
 - The sender user ID is in `ALLOWED_USER_IDS`.
 - If `ALLOWED_CONVERSATION_IDS` is set, the chat ID is included.
 - In groups, the message mentions the bot.
+- In groups, `TELEGRAM_BOT_USERNAME` is set if automatic username discovery failed.
 - The token belongs to the bot you are messaging.
 
 Messages sent while the relay was offline are skipped on startup.
@@ -50,6 +51,16 @@ Check:
 - `ALLOWED_CONVERSATION_IDS` uses chat `chat_id` values.
 - Bot messaging, message receive events, and card action events are enabled.
 - In groups, the message mentions the bot.
+
+## Group chat messages are ignored
+
+Check:
+
+- The bot is actually a member of the group.
+- The message mentions the bot directly.
+- Both the user and the group are allowed when `ALLOWED_CONVERSATION_IDS` is set.
+- Slash commands, image captions, and normal text all include the bot mention.
+- For multi-agent groups, each bot has its own relay process and its own credentials.
 
 ## Buttons stop working
 

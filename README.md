@@ -15,8 +15,10 @@ The goal is simple: keep the agent close to your code, while letting you operate
 - Select, create, browse, and delete workspaces from chat.
 - Send normal prompts, images, and follow-up steering messages.
 - Answer Codex questions and approve actions inline.
+- Use direct chats or allowed group chats; group messages are handled only when they mention the bot.
 - Use common Codex workflows such as review, Plan mode, goals, resume, fork, side conversations, interrupt, and background terminal cleanup.
 - Send screenshots or generated images back to chat with the optional local relay capability API.
+- Put multiple agent-relay bots in one group and let agents mention configured peers for related work.
 - Extend the relay to support more IM providers or agent backends.
 
 ## Quick start
@@ -70,7 +72,19 @@ Common commands:
 | `/ps` | List Codex background terminals. |
 | `/stop` | Ask Codex to clean background terminals. |
 
-In group chats, mention the bot when sending text, images, or slash commands.
+In group chats, mention the bot when sending text, images, or slash commands. Use `ALLOWED_CONVERSATION_IDS` when a bot should only respond in specific groups.
+
+## Group chats and agent teams
+
+agent-relay works in private chats and group chats. Group chats are useful when you want a shared operator room for one or more local agents.
+
+- Add the bot to the group and allow the group with `ALLOWED_CONVERSATION_IDS`.
+- Mention the bot in text, image captions, and slash commands.
+- Unmentioned group messages are ignored before authorization checks.
+- Run one agent-relay process per agent bot when you want several agents in the same group.
+- Configure peer agents and enable the local relay capability API when you want Codex to mention another agent bot.
+
+See the Telegram and Lark/Feishu quickstarts for group setup details.
 
 ## Extend it with itself
 

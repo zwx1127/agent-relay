@@ -46,7 +46,18 @@ For a group bot, also set:
 ALLOWED_CONVERSATION_IDS=-100123456
 ```
 
-## 4. Start and use
+## 4. Optional group chat setup
+
+For group chats:
+
+1. Add the bot to the group.
+2. Set `ALLOWED_CONVERSATION_IDS` to the group chat ID.
+3. Set `TELEGRAM_BOT_USERNAME` if automatic username discovery is not reliable in your environment.
+4. Mention the bot in text, image captions, and slash commands.
+
+Unmentioned group messages are ignored before authorization checks, so normal group traffic will not trigger the relay.
+
+## 5. Start and use
 
 ```bash
 bun run start

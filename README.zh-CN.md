@@ -15,8 +15,10 @@
 - 在聊天里选择、创建、浏览、删除工作区。
 - 发送普通提示词、图片和运行中的补充指令。
 - 直接在聊天里回答 Codex 问题和审批操作。
+- 支持私聊和指定群聊；群聊消息只有提及 bot 时才会被处理。
 - 使用 review、Plan mode、goal、resume、fork、side conversation、interrupt、后台终端清理等常见 Codex 工作流。
 - 通过可选的本地能力 API，把截图或生成图片发回聊天窗口。
+- 可以把多个 agent-relay bot 放在同一个群里，让 agent 提及已配置的 peer bot 协作。
 - 继续扩展更多 IM provider 或 Agent backend。
 
 ## 快速开始
@@ -70,7 +72,19 @@ bun run start
 | `/ps` | 查看 Codex 后台终端。 |
 | `/stop` | 要求 Codex 清理后台终端。 |
 
-在群聊里发送文本、图片或 slash command 时，需要提及 bot。
+在群聊里发送文本、图片或 slash command 时，需要提及 bot。如果 bot 只应该在指定群里工作，请配置 `ALLOWED_CONVERSATION_IDS`。
+
+## 群聊和 agent 团队
+
+agent-relay 支持私聊，也支持群聊。群聊适合作为一个共享的 agent 操作室。
+
+- 把 bot 加入群聊，并用 `ALLOWED_CONVERSATION_IDS` 允许这个群。
+- 发送文本、图片 caption 和 slash command 时提及 bot。
+- 未提及 bot 的群聊消息会在授权检查前被忽略。
+- 如果希望多个 agent 在同一个群里协作，每个 agent bot 运行一个 agent-relay 进程。
+- 如果希望 Codex 主动提及另一个 agent bot，需要配置 peer agents 并开启本地 relay 能力 API。
+
+Telegram 和 Lark/飞书快速上手文档里有更具体的群聊配置步骤。
 
 ## 用它扩展它自己
 
