@@ -4,7 +4,14 @@ All notable changes to agent-relay will be documented in this file.
 
 The project is pre-1.0 and currently installs from source.
 
-## 0.1.0 - Unreleased
+## Unreleased
+
+### Changed
+
+- Split user-facing README and docs into separate English and Chinese versions.
+- Simplified user docs around features, quick start, daily usage, troubleshooting, and extension workflow.
+
+## 0.1.0 - 2026-05-28
 
 Initial open-source baseline.
 

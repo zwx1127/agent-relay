@@ -83,5 +83,5 @@ body:
       options:
         - label: I removed credentials, allowlisted IDs, private paths, prompts, and assistant output from this report.
           required: true
-        - label: I checked docs/troubleshooting.md.
+        - label: I checked docs/en/troubleshooting.md.
           required: true

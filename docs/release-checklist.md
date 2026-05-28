@@ -35,7 +35,7 @@ bun run check
 
 Review:
 
-- `README.md` quickstart still matches `.env.example`.
+- `README.md`, `README.zh-CN.md`, and quickstart guides still match `.env.example`.
 - `CHANGELOG.md` has a release entry.
 - `SECURITY.md` reflects the current security model.
 - No local runtime files are staged.
