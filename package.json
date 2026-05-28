@@ -1,8 +1,28 @@
 {
   "name": "agent-relay",
+  "version": "0.1.0",
+  "description": "Remote-control local Codex CLI sessions from Telegram or Lark.",
   "module": "src/main.ts",
   "type": "module",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zwx1127/agent-relay.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zwx1127/agent-relay/issues"
+  },
+  "homepage": "https://github.com/zwx1127/agent-relay#readme",
+  "keywords": [
+    "codex",
+    "telegram-bot",
+    "lark",
+    "feishu",
+    "cli-agent",
+    "remote-control",
+    "automation"
+  ],
   "scripts": {
     "dev": "bun --watch src/main.ts",
     "start": "bun src/main.ts",

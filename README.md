@@ -1,5 +1,8 @@
 # agent-relay
 
+[![CI](https://github.com/zwx1127/agent-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/zwx1127/agent-relay/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 `agent-relay` connects chat apps to a local Codex CLI agent. It lets approved users pick a workspace, send prompts, answer Codex questions, approve actions, review code, manage threads, and exchange images from Telegram or Lark without sitting at the machine running Codex.
 
 `agent-relay` 将即时通讯工具连接到本地 Codex CLI agent。授权用户可以通过 Telegram 或 Lark 选择工作区、发送提示词、回答 Codex 问题、审批操作、发起代码审查、管理线程，并收发图片，而不需要直接操作运行 Codex 的机器。
@@ -7,6 +10,46 @@
 The current implementation uses Bun, TypeScript, SQLite, Telegram or Lark as IM providers, and `codex app-server --listen stdio://` as the agent backend.
 
 当前实现基于 Bun、TypeScript、SQLite，支持 Telegram 或 Lark 作为 IM provider，并使用 `codex app-server --listen stdio://` 作为 agent 后端。
+
+## Who this is for / 适用场景
+
+- You run Codex on a trusted machine but want to steer it from a phone, tablet, or team chat.
+- You want Telegram or Lark approvals, questions, screenshots, and status updates without exposing Codex directly to the public internet.
+- You need one relay process per local agent, with workspace selection and allowlisted users or groups.
+
+- 你在可信机器上运行 Codex，但希望通过手机、平板或团队群聊远程操控。
+- 你希望通过 Telegram 或飞书处理审批、问题、截图和状态更新，同时不把 Codex 直接暴露到公网。
+- 你需要为每个本地 agent 运行一个 relay，并支持工作区选择、用户或群聊 allowlist。
+
+## Start in 3 steps / 三步启动
+
+```bash
+git clone https://github.com/zwx1127/agent-relay.git
+cd agent-relay
+bun install
+cp .env.example .env
+```
+
+Edit `.env` with a Telegram bot token or Lark/Feishu app credentials, then start the relay:
+
+编辑 `.env`，填入 Telegram bot token 或 Lark/飞书应用凭证，然后启动 relay：
+
+```bash
+bun run start
+```
+
+Send `/relay` to the bot, select or create a workspace, then send normal messages to Codex.
+
+向 bot 发送 `/relay`，选择或创建工作区，然后像平常一样发送消息给 Codex。
+
+More setup detail:
+
+更多配置说明：
+
+- [Telegram quickstart](docs/quickstart-telegram.md)
+- [Lark/Feishu quickstart](docs/quickstart-lark.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Changelog](CHANGELOG.md)
 
 ## Highlights / 功能亮点
 
@@ -43,6 +86,10 @@ The current implementation uses Bun, TypeScript, SQLite, Telegram or Lark as IM 
 - Telegram BotFather 创建的 bot token，或 Lark/飞书自建应用的 app id 与 app secret。
 
 ## Quick Start / 快速开始
+
+For provider-specific setup, see [Telegram quickstart](docs/quickstart-telegram.md) or [Lark/Feishu quickstart](docs/quickstart-lark.md). If startup fails, check [Troubleshooting](docs/troubleshooting.md).
+
+特定 provider 的配置可参考 [Telegram quickstart](docs/quickstart-telegram.md) 或 [Lark/Feishu quickstart](docs/quickstart-lark.md)。启动失败时请先查看 [Troubleshooting](docs/troubleshooting.md)。
 
 Install dependencies:
 
@@ -426,18 +473,18 @@ Useful package scripts:
 - Telegram and Lark are the implemented IM providers today.
 - Codex is the only implemented agent provider today.
 - File/document attachments are not supported.
-- npm publication is not configured; `package.json` is private.
+- npm publication is not configured; install from source with `git clone`.
 
 - 目前已实现的 IM provider 是 Telegram 和 Lark。
 - 目前已实现的 agent provider 只有 Codex。
 - 不支持文件/文档附件。
-- 当前未配置 npm 发布，`package.json` 标记为 private。
+- 当前未配置 npm 发布，请通过 `git clone` 从源码安装。
 
 ## Contributing / 贡献
 
-Contributions are welcome. Before opening a pull request, run:
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow. Before opening a pull request, run:
 
-欢迎贡献。提交 pull request 前请运行：
+欢迎贡献。开发流程请参考 [CONTRIBUTING.md](CONTRIBUTING.md)。提交 pull request 前请运行：
 
 ```bash
 bun install
@@ -450,9 +497,9 @@ Keep changes focused, include tests for behavior changes, and avoid committing l
 
 ## Support / 支持
 
-When opening an issue, include the Bun version, operating system, whether `codex` is available on `PATH`, the Codex CLI version if available, relevant configuration variable names, and redacted logs. Do not paste IM credentials, allowlisted IDs, private workspace paths, prompt text, or assistant output that should not be public.
+When opening an issue, use the bug report template and include the Bun version, operating system, whether `codex` is available on `PATH`, the Codex CLI version if available, relevant configuration variable names, and redacted logs. Do not paste IM credentials, allowlisted IDs, private workspace paths, prompt text, or assistant output that should not be public.
 
-提交 issue 时，请提供 Bun 版本、操作系统、`codex` 是否在 `PATH` 中可用、Codex CLI 版本（如可用）、相关配置变量名称以及脱敏日志。不要粘贴 IM 凭证、allowlist ID、私有工作区路径、提示词文本或不应公开的 assistant 输出。
+提交 issue 时，请使用 bug report 模板，并提供 Bun 版本、操作系统、`codex` 是否在 `PATH` 中可用、Codex CLI 版本（如可用）、相关配置变量名称以及脱敏日志。不要粘贴 IM 凭证、allowlist ID、私有工作区路径、提示词文本或不应公开的 assistant 输出。
 
 ## License / 许可证
 

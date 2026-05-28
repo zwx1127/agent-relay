@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Troubleshooting guide
+    url: https://github.com/zwx1127/agent-relay/blob/main/docs/troubleshooting.md
+    about: Check common setup and runtime failures before opening an issue.

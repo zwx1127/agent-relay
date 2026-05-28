@@ -1,0 +1,87 @@
+name: Bug report
+description: Report a reproducible agent-relay problem.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Do not paste bot tokens, app secrets, allowlisted IDs, private workspace paths, prompt text, or assistant output that should not be public.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What failed, and what did you expect to happen?
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: IM provider
+      options:
+        - Telegram
+        - Lark/Feishu
+        - Other or not sure
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and shell
+      placeholder: Ubuntu 24.04 / bash, macOS 15 / zsh, Windows 11 / PowerShell
+    validations:
+      required: true
+  - type: input
+    id: bun
+    attributes:
+      label: Bun version
+      placeholder: bun --version
+    validations:
+      required: true
+  - type: input
+    id: codex
+    attributes:
+      label: Codex CLI version
+      placeholder: codex --version, or "not available"
+    validations:
+      required: false
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration
+      description: List variable names and redacted values only.
+      placeholder: |
+        IM_PROVIDER=telegram
+        ALLOWED_USER_IDS=<redacted>
+        ALLOWED_CONVERSATION_IDS=<redacted>
+        WORKSPACE_ROOT=/redacted/path
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Start relay with ...
+        2. Send ...
+        3. Click ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs
+      description: Include the smallest useful log excerpt. Keep secrets and private prompts out.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submit checks
+      options:
+        - label: I removed credentials, allowlisted IDs, private paths, prompts, and assistant output from this report.
+          required: true
+        - label: I checked docs/troubleshooting.md.
+          required: true
