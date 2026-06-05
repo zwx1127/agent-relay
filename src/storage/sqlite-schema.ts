@@ -87,6 +87,7 @@ export function migrateSQLiteSchema(db: Database, logger: Logger): void {
   `);
   addColumnIfMissing(db, "agent_sessions", "thread_id", "TEXT");
   addColumnIfMissing(db, "agent_sessions", "collaboration_mode", "TEXT NOT NULL DEFAULT 'default'");
+  addColumnIfMissing(db, "agent_sessions", "collaboration_thread_id", "TEXT");
   addColumnIfMissing(db, "pending_prompts", "session_key", "TEXT");
   addColumnIfMissing(db, "pending_prompts", "payload_json", "TEXT");
   addColumnIfMissing(db, "pending_prompts", "expires_at", "INTEGER");

@@ -38,6 +38,7 @@ export interface AgentSessionRow {
   stopped_at?: number | null;
   thread_id?: string | null;
   collaboration_mode?: string | null;
+  collaboration_thread_id?: string | null;
 }
 
 export interface PagedOutputRow {

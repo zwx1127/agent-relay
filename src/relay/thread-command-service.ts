@@ -449,7 +449,7 @@ export class ThreadCommandService {
   private async planFromCallback(
     message: CallbackMessage,
     pending: PendingPrompt,
-    _data: Record<string, unknown>,
+    data: Record<string, unknown>,
     action: string | undefined,
   ): Promise<void> {
     const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
@@ -473,6 +473,19 @@ export class ThreadCommandService {
           reason: "session_not_running",
         });
         await this.deps.renderStrictCallbackPage(message, messageWithTitle("Plan action expired.", "The Codex session is no longer running."), { inline_keyboard: [] });
+        this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+        return;
+      }
+      const promptThreadId = typeof data.threadId === "string" ? data.threadId : undefined;
+      if (this.deps.store.getCollaborationMode(key) !== "plan" || (promptThreadId && promptThreadId !== status.threadId)) {
+        this.deps.logger.info("router.plan_callback_expired", {
+          conversation_id: message.conversationId,
+          session_key: key,
+          reason: "thread_mismatch",
+          prompt_thread_id: promptThreadId,
+          current_thread_id: status.threadId,
+        });
+        await this.deps.renderStrictCallbackPage(message, messageWithTitle("Plan action expired.", "Open the latest Plan ready card."), { inline_keyboard: [] });
         this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
         return;
       }
@@ -549,6 +562,7 @@ export class ThreadCommandService {
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed || this.deps.store.getCollaborationMode(sessionKeyValue) !== "plan") return;
     if (completedTurnId && this.interruptedPlanTurns.delete(`${sessionKeyValue}:${completedTurnId}`)) return;
+    const threadId = this.deps.agent.getStatus(sessionKeyValue)?.threadId ?? this.deps.store.getSession(sessionKeyValue)?.thread_id ?? undefined;
     const token = shortToken();
     const result = await this.deps.sendRendered(parsed.conversationId, messageWithTitle("Plan ready.", "Choose whether to implement it now or keep refining the plan."), {
       replyMarkup: planReadyKeyboard(token),
@@ -567,7 +581,7 @@ export class ThreadCommandService {
       kind: "relay_command",
       createdAt: Date.now(),
       sessionKey: sessionKeyValue,
-      payloadJson: JSON.stringify({ command: "plan", token, completedTurnId }),
+      payloadJson: JSON.stringify({ command: "plan", token, completedTurnId, threadId }),
       expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
     });
   }

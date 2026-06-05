@@ -96,39 +96,53 @@ export class SessionRepository {
         stopped_at = NULL,
         -- Reusing a session without an explicit thread id should preserve the
         -- last known thread for resume/status flows.
-        thread_id = COALESCE(excluded.thread_id, agent_sessions.thread_id)
+        thread_id = COALESCE(excluded.thread_id, agent_sessions.thread_id),
+        collaboration_mode = 'default',
+        collaboration_thread_id = NULL
     `).run({ $sessionKey: sessionKey, $conversationId: String(conversationId), $workspaceName: workspaceName, $startedAt: startedAt, $threadId: threadId ?? null });
     this.logger.info("store.session_marked_started", { session_key: sessionKey, conversation_id: conversationId, workspace: workspaceName });
   }
 
   markStopped(sessionKey: string, stoppedAt = Date.now()): void {
-    this.db.query("UPDATE agent_sessions SET status = 'stopped', stopped_at = ? WHERE session_key = ?").run(stoppedAt, sessionKey);
+    this.db.query("UPDATE agent_sessions SET status = 'stopped', stopped_at = ?, collaboration_mode = 'default', collaboration_thread_id = NULL WHERE session_key = ?").run(stoppedAt, sessionKey);
     this.logger.info("store.session_marked_stopped", { session_key: sessionKey });
   }
 
   clearThreadId(sessionKey: string): void {
-    this.db.query("UPDATE agent_sessions SET thread_id = NULL, collaboration_mode = 'default' WHERE session_key = ?").run(sessionKey);
+    this.db.query("UPDATE agent_sessions SET thread_id = NULL, collaboration_mode = 'default', collaboration_thread_id = NULL WHERE session_key = ?").run(sessionKey);
     this.logger.info("store.session_thread_cleared", { session_key: sessionKey });
   }
 
   setThreadId(sessionKey: string, threadId: string): void {
-    this.db.query("UPDATE agent_sessions SET thread_id = ? WHERE session_key = ?").run(threadId, sessionKey);
+    this.db.query("UPDATE agent_sessions SET thread_id = ?, collaboration_mode = 'default', collaboration_thread_id = NULL WHERE session_key = ?").run(threadId, sessionKey);
     this.logger.info("store.session_thread_set", { session_key: sessionKey, thread_id: threadId });
   }
 
   getCollaborationMode(sessionKey: string): AgentCollaborationMode {
-    const row = this.db.query<{ collaboration_mode?: string | null }, [string]>("SELECT collaboration_mode FROM agent_sessions WHERE session_key = ?").get(sessionKey);
-    return row?.collaboration_mode === "plan" ? "plan" : "default";
+    const row = this.db.query<{ status?: string | null; collaboration_mode?: string | null; thread_id?: string | null; collaboration_thread_id?: string | null }, [string]>(`
+      SELECT status, collaboration_mode, thread_id, collaboration_thread_id
+      FROM agent_sessions
+      WHERE session_key = ?
+    `).get(sessionKey);
+    if (row?.status !== "running") return "default";
+    if (row?.collaboration_mode !== "plan") return "default";
+    if (!row.thread_id || row.collaboration_thread_id !== row.thread_id) return "default";
+    return "plan";
   }
 
   setCollaborationMode(sessionKey: string, mode: AgentCollaborationMode): void {
-    this.db.query("UPDATE agent_sessions SET collaboration_mode = ? WHERE session_key = ?").run(mode, sessionKey);
+    this.db.query(`
+      UPDATE agent_sessions
+      SET collaboration_mode = ?,
+          collaboration_thread_id = CASE WHEN ? = 'plan' THEN thread_id ELSE NULL END
+      WHERE session_key = ?
+    `).run(mode, mode, sessionKey);
     this.logger.info("store.session_collaboration_mode_set", { session_key: sessionKey, collaboration_mode: mode });
   }
 
   get(sessionKey: string): AgentSessionRow | undefined {
     const row = this.db.query<AgentSessionRow, [string]>(`
-      SELECT session_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode
+      SELECT session_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode, collaboration_thread_id
       FROM agent_sessions
       WHERE session_key = ?
     `).get(sessionKey);
@@ -137,7 +151,7 @@ export class SessionRepository {
 
   listRunning(): AgentSessionRow[] {
     return this.db.query<AgentSessionRow, []>(`
-      SELECT session_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode
+      SELECT session_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode, collaboration_thread_id
       FROM agent_sessions
       WHERE status = 'running'
       ORDER BY started_at DESC

@@ -131,6 +131,30 @@ describe("store", () => {
     store.close();
   });
 
+  test("binds collaboration mode to the current thread lifecycle", () => {
+    const store = tempStore();
+    store.markSessionStarted("123:demo", 123, "demo", 4, "thread-1");
+    store.setCollaborationMode("123:demo", "plan");
+    expect(store.getCollaborationMode("123:demo")).toBe("plan");
+    expect(store.getSession("123:demo")?.collaboration_thread_id).toBe("thread-1");
+
+    store.setSessionThreadId("123:demo", "thread-2");
+    expect(store.getCollaborationMode("123:demo")).toBe("default");
+    expect(store.getSession("123:demo")?.collaboration_thread_id).toBeNull();
+
+    store.setCollaborationMode("123:demo", "plan");
+    expect(store.getCollaborationMode("123:demo")).toBe("plan");
+    store.markSessionStopped("123:demo", 5);
+    expect(store.getCollaborationMode("123:demo")).toBe("default");
+
+    store.markSessionStarted("123:demo", 123, "demo", 6, "thread-2");
+    store.setCollaborationMode("123:demo", "plan");
+    expect(store.getCollaborationMode("123:demo")).toBe("plan");
+    store.markSessionStarted("123:demo", 123, "demo", 7, "thread-2");
+    expect(store.getCollaborationMode("123:demo")).toBe("default");
+    store.close();
+  });
+
   test("stores and prunes paged outputs", () => {
     const store = tempStore();
     store.setPagedOutput({

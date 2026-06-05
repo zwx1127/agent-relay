@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sessionKey } from "../../src/domain/session.ts";
+import { workspaceCallbackToken } from "../../src/relay/ui/callback-data.ts";
 import type { AppConfig } from "../../src/runtime/config.ts";
 import { RelayController } from "../../src/relay/controller.ts";
 import { SQLiteStore } from "../../src/storage/sqlite-store.ts";
@@ -755,6 +756,117 @@ describe("relay controller", () => {
     expect(adapter.edited.at(-1)?.options.replyMarkup).toEqual({ inline_keyboard: [] });
     expect(adapter.edited.at(-1)?.text).not.toContain("Continuing in Plan mode.");
     expect(adapter.edited.at(-1)?.text).not.toContain("Plan ready.");
+  });
+
+  test("new thread resets plan mode before the next prompt", async () => {
+    const { router, store, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/plan design this"));
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+
+    await router.handle(textMessage("/clear"));
+    await router.handle(textMessage("build it"));
+
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
+    expect(agent.sent.at(-1)).toEqual(sentPrompt("build it"));
+  });
+
+  test("resuming a thread resets plan mode before the next prompt", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.threads = [{ id: "saved-thread", name: "Saved work", cwd: path, updatedAt: 1 }];
+
+    await router.handle(textMessage("/plan design this"));
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+
+    await router.handle(textMessage("/resume saved"));
+    const resumeButton = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat()[0];
+    await router.handle(callbackMessage(resumeButton!.callback_data, 7, "cb-resume-plan-reset", adapter.sent.at(-1)?.messageId));
+    await router.handle(textMessage("continue work"));
+
+    expect(agent.getStatus("codex:1:demo")?.threadId).toBe("saved-thread");
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
+    expect(agent.sent.at(-1)).toEqual(sentPrompt("continue work"));
+  });
+
+  test("forking a thread resets plan mode before the next prompt", async () => {
+    const { router, store, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/plan design this"));
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    agent.getStatus("codex:1:demo")!.activeTurnId = undefined;
+
+    await router.handle(textMessage("/fork"));
+    await router.handle(textMessage("continue on fork"));
+
+    expect(agent.forks).toEqual(["codex:1:demo"]);
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
+    expect(agent.sent.at(-1)).toEqual(sentPrompt("continue on fork"));
+  });
+
+  test("switching workspace starts the selected workspace in default mode", async () => {
+    const { router, store, agent, root } = fixture();
+    const demoPath = join(root, "demo");
+    const otherPath = join(root, "other");
+    mkdirSync(demoPath);
+    mkdirSync(otherPath);
+    store.upsertWorkspace({ name: "demo", path: demoPath, createdAt: 1 });
+    store.upsertWorkspace({ name: "other", path: otherPath, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/plan design this"));
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+
+    await router.handle(callbackMessage(`ar:uh:${workspaceCallbackToken("other")}`, 7, "cb-workspace-plan-reset"));
+    await router.handle(textMessage("work in other"));
+
+    expect(store.getBinding(1)?.workspaceName).toBe("other");
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
+    expect(store.getCollaborationMode("codex:1:other")).toBe("default");
+    expect(agent.sent.at(-1)).toEqual({
+      key: "codex:1:other",
+      text: "work in other",
+      options: { collaborationMode: "default" },
+    });
+
+    await router.handle(callbackMessage(`ar:uh:${workspaceCallbackToken("demo")}`, 7, "cb-workspace-plan-reset-back"));
+    await router.handle(textMessage("back to demo"));
+
+    expect(store.getBinding(1)?.workspaceName).toBe("demo");
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
+    expect(agent.sent.at(-1)).toEqual(sentPrompt("back to demo"));
+  });
+
+  test("old plan ready implement callback expires after starting a new thread", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/plan design this"));
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    const planMessage = adapter.sent.at(-1)!;
+    const planButton = planMessage.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Implement");
+    const sentCount = agent.sent.length;
+
+    await router.handle(textMessage("/clear"));
+    await router.handle(callbackMessage(planButton!.callback_data, 7, "cb-old-plan", planMessage.messageId));
+
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
+    expect(agent.sent).toHaveLength(sentCount);
+    expect(adapter.edited.at(-1)?.text).toContain("Plan action expired.");
   });
 
   test("plan implement callback expires instead of steering into an active turn", async () => {
@@ -1902,6 +2014,7 @@ describe("relay controller", () => {
 
     expect(agent.stopped).toEqual(["codex:1:demo"]);
     expect(store.getBinding(1)).toBeUndefined();
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
     expect(adapter.edited.at(-1)?.text).toContain("workspace: none");
     expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb1", text: undefined });
   });

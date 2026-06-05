@@ -130,11 +130,13 @@ export class WorkspaceFlow {
     const name = await this.workspaceNameForToken(token);
     const workspace = this.requireWorkspace(name);
     await this.deps.renderStrictCallbackPage(message, messageWithTitle("Selecting workspace.", workspace.name), { inline_keyboard: [] });
+    this.resetCurrentCollaborationMode(message.conversationId);
     this.deps.store.bindConversation(message.conversationId, workspace.name);
     this.deps.logger.info("router.workspace_selected", { conversation_id: message.conversationId, workspace: workspace.name, path: workspace.path });
     // Explicit workspace selection starts a fresh session binding rather than
     // resuming the previous thread implicitly.
     await this.deps.ensureAgentStarted(message.conversationId, workspace, undefined, { resumePrevious: false });
+    this.deps.store.setCollaborationMode(sessionKey(message.conversationId, workspace.name), "default");
     await this.renderHomeOnCallback(message);
   }
 
@@ -245,10 +247,18 @@ export class WorkspaceFlow {
       ? resolveWorkspacePath(this.deps.config.workspaceRoot, name)
       : await createWorkspace(this.deps.config.workspaceRoot, name);
     this.deps.store.upsertWorkspace({ name, path, createdAt: Date.now() });
+    this.resetCurrentCollaborationMode(conversationId);
     this.deps.store.bindConversation(conversationId, name);
     this.deps.logger.info(existed ? "router.workspace_existing_selected" : "router.workspace_created", { conversation_id: conversationId, workspace: name, path });
     await this.deps.ensureAgentStarted(conversationId, { name, path, createdAt: Date.now() }, undefined, { resumePrevious: false });
+    this.deps.store.setCollaborationMode(sessionKey(conversationId, name), "default");
     return { name, path, existed };
+  }
+
+  private resetCurrentCollaborationMode(conversationId: ConversationId): void {
+    const current = this.currentWorkspace(conversationId);
+    if (!current) return;
+    this.deps.store.setCollaborationMode(sessionKey(conversationId, current.name), "default");
   }
 
   private async refreshWorkspacesMessageFromPrompt(conversationId: ConversationId, payload: Record<string, unknown> | undefined): Promise<void> {
