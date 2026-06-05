@@ -20,14 +20,19 @@ async function main(): Promise<void> {
   if (!response.ok || !payload?.ok) {
     throw new Error(payload?.error || `agent-relay returned HTTP ${response.status}`);
   }
-  console.log(payload.message || "image sent");
+  console.log(payload.message || "sent");
 }
 
 const helperCommands: Record<string, { capability: string; parse(args: string[]): unknown; usage: string }> = {
   "send-image": {
     capability: "send_image",
-    parse: parseSendImageArgs,
+    parse: (args) => parsePathCapabilityArgs("send-image", args),
     usage: "agent-relay-helper send-image <path> [--cwd <cwd>] [--session-key <key>] [--caption <text>]",
+  },
+  "send-file": {
+    capability: "send_file",
+    parse: (args) => parsePathCapabilityArgs("send-file", args),
+    usage: "agent-relay-helper send-file <path> [--cwd <cwd>] [--session-key <key>] [--caption <text>]",
   },
   "mention-agent": {
     capability: "mention_agent",
@@ -40,9 +45,9 @@ function usage(): string {
   return `usage: ${Object.values(helperCommands).map((definition) => definition.usage).join(" | ")}`;
 }
 
-function parseSendImageArgs(args: string[]): { path: string; cwd?: string; sessionKey?: string; caption?: string } {
+function parsePathCapabilityArgs(command: string, args: string[]): { path: string; cwd?: string; sessionKey?: string; caption?: string } {
   const path = args.shift();
-  if (!path || path.startsWith("--")) throw new Error("send-image requires a path");
+  if (!path || path.startsWith("--")) throw new Error(`${command} requires a path`);
   const result: { path: string; cwd?: string; sessionKey?: string; caption?: string } = { path };
   while (args.length > 0) {
     const flag = args.shift();

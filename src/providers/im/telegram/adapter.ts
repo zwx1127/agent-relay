@@ -1,5 +1,5 @@
 import type { ConversationId, MessageId } from "../../../domain/ids.ts";
-import type { DownloadedFile, EditMessageTextOptions, InboundMessage, ImAdapter, SendMessageOptions, SendPhotoOptions } from "../../../ports/im.ts";
+import type { DownloadedFile, EditMessageTextOptions, InboundMessage, ImAdapter, SendFileOptions, SendMessageOptions, SendPhotoOptions } from "../../../ports/im.ts";
 import { splitForTelegram, splitHtmlForTelegram, splitRenderedForTelegram } from "../../../presentation/telegram/text.ts";
 import { noopLogger, type Logger } from "../../../domain/logger.ts";
 
@@ -57,6 +57,13 @@ interface TelegramUpdate {
       height: number;
       file_size?: number;
     }>;
+    document?: {
+      file_id: string;
+      file_unique_id?: string;
+      file_name?: string;
+      mime_type?: string;
+      file_size?: number;
+    };
     chat: { id: number; type?: "private" | "group" | "supergroup" | "channel" };
     from?: { id: number };
     reply_to_message?: { message_id: number };
@@ -104,6 +111,7 @@ export class TelegramAdapter implements ImAdapter {
     typing: true,
     mediaDownload: true,
     imageUpload: true,
+    fileUpload: true,
   };
 
   private offset = 0;
@@ -160,20 +168,21 @@ export class TelegramAdapter implements ImAdapter {
             has_message: Boolean(update.message),
             has_text: Boolean(update.message?.text),
             has_photo: Boolean(update.message?.photo?.length),
+            has_document: Boolean(update.message?.document),
             has_from: Boolean(update.message?.from || update.callback_query?.from),
             has_callback_query: Boolean(update.callback_query),
             has_callback_data: Boolean(update.callback_query?.data),
           });
           continue;
         }
-        this.logger.debug(inbound.kind === "message" ? "telegram.message_received" : inbound.kind === "media" ? "telegram.media_received" : "telegram.callback_query_received", {
+        this.logger.debug(inbound.kind === "message" ? "telegram.message_received" : inbound.kind === "media" ? "telegram.media_received" : inbound.kind === "file" ? "telegram.file_received" : "telegram.callback_query_received", {
           update_id: update.update_id,
           message_id: inbound.kind === "message" ? inbound.id : inbound.messageId,
           conversation_id: inbound.conversationId,
           user_id: inbound.userId,
           kind: inbound.kind,
-          text_len: inbound.kind === "message" ? inbound.text.length : inbound.kind === "media" ? inbound.caption?.length ?? 0 : inbound.data.length,
-          message_text: inbound.kind === "message" ? inbound.text : inbound.kind === "media" ? inbound.caption ?? "" : inbound.data,
+          text_len: inbound.kind === "message" ? inbound.text.length : inbound.kind === "media" || inbound.kind === "file" ? inbound.caption?.length ?? 0 : inbound.data.length,
+          message_text: inbound.kind === "message" ? inbound.text : inbound.kind === "media" || inbound.kind === "file" ? inbound.caption ?? "" : inbound.data,
         });
         try {
           await onMessage(inbound);
@@ -264,6 +273,21 @@ export class TelegramAdapter implements ImAdapter {
       }));
     }
     const result = await this.request<{ message_id?: number }>("sendPhoto", form);
+    return { messageId: result?.message_id !== undefined ? String(result.message_id) : undefined };
+  }
+
+  async sendFile(conversationId: ConversationId, file: Blob, options: SendFileOptions = {}): Promise<{ messageId?: MessageId }> {
+    const form = new FormData();
+    form.append("chat_id", String(conversationId));
+    form.append("document", file, options.filename ?? "file.bin");
+    if (options.caption) form.append("caption", options.caption);
+    if (options.replyToMessageId) {
+      form.append("reply_parameters", JSON.stringify({
+        message_id: Number(options.replyToMessageId),
+        allow_sending_without_reply: true,
+      }));
+    }
+    const result = await this.request<{ message_id?: number }>("sendDocument", form);
     return { messageId: result?.message_id !== undefined ? String(result.message_id) : undefined };
   }
 
@@ -371,6 +395,28 @@ export class TelegramAdapter implements ImAdapter {
           ...(typeof photo.file_size === "number" ? { fileSize: photo.file_size } : {}),
         })),
         ...(message.media_group_id ? { mediaGroupId: message.media_group_id } : {}),
+        ...(message.reply_to_message ? { replyToMessageId: String(message.reply_to_message.message_id) } : {}),
+        date: message.date,
+      };
+    }
+
+    if (message?.document && message.from) {
+      const mention = mentionContextForTelegram(message.caption ?? "", message.caption_entities, message.chat.type, this.botUsername);
+      return {
+        kind: "file",
+        id: String(message.message_id),
+        messageId: String(message.message_id),
+        conversationId: String(message.chat.id),
+        userId: String(message.from.id),
+        ...(mention.text ? { caption: mention.text } : {}),
+        ...mention.context,
+        file: {
+          fileId: message.document.file_id,
+          ...(message.document.file_unique_id ? { fileUniqueId: message.document.file_unique_id } : {}),
+          ...(message.document.file_name ? { fileName: message.document.file_name } : {}),
+          ...(message.document.mime_type ? { mimeType: message.document.mime_type } : {}),
+          ...(typeof message.document.file_size === "number" ? { fileSize: message.document.file_size } : {}),
+        },
         ...(message.reply_to_message ? { replyToMessageId: String(message.reply_to_message.message_id) } : {}),
         date: message.date,
       };

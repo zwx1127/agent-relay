@@ -13,10 +13,12 @@ import type {
 } from "@larksuiteoapi/node-sdk";
 import type {
   DownloadedFile,
+  DownloadFileOptions,
   EditMessageTextOptions,
   InboundMediaFile,
   InboundMessage,
   ImAdapter,
+  SendFileOptions,
   SendMessageOptions,
   SendMessageResult,
   SendPhotoOptions,
@@ -75,6 +77,7 @@ export class LarkAdapter implements ImAdapter {
     typing: false,
     mediaDownload: true,
     imageUpload: true,
+    fileUpload: true,
   };
 
   private readonly channel: LarkChannelClient;
@@ -158,6 +161,17 @@ export class LarkAdapter implements ImAdapter {
     return { messageId: result.messageId };
   }
 
+  async sendFile(conversationId: ConversationId, file: Blob, options: SendFileOptions = {}): Promise<SendMessageResult> {
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const result = await this.channel.send(String(conversationId), {
+      file: { source: buffer, fileName: options.filename ?? "file.bin" },
+    }, sendOptionsFor(options));
+    if (options.caption) {
+      await this.channel.send(String(conversationId), { text: options.caption }, { replyTo: result.messageId });
+    }
+    return { messageId: result.messageId };
+  }
+
   async editMessageText(_conversationId: ConversationId, text: string, options: EditMessageTextOptions): Promise<void> {
     const messageText = text.length > 0 ? text : "(empty)";
     if (shouldSendCard(options) || this.cardMessageIds.has(String(options.messageId))) {
@@ -191,13 +205,14 @@ export class LarkAdapter implements ImAdapter {
     }
   }
 
-  async downloadFile(fileId: string): Promise<DownloadedFile> {
-    const buffer = await this.channel.downloadResource(fileId, "image");
+  async downloadFile(fileId: string, options: DownloadFileOptions = {}): Promise<DownloadedFile> {
+    const kind = options.kind ?? "image";
+    const buffer = await this.channel.downloadResource(fileId, kind);
     const bytes = new ArrayBuffer(buffer.byteLength);
     new Uint8Array(bytes).set(buffer);
     return {
       bytes,
-      filePath: `${fileId}.jpg`,
+      filePath: kind === "image" ? `${fileId}.jpg` : fileId,
       fileSize: buffer.byteLength,
     };
   }
@@ -213,7 +228,7 @@ export class LarkAdapter implements ImAdapter {
       });
       return;
     }
-    this.logger.debug(inbound.kind === "media" ? "lark.media_received" : "lark.message_received", {
+    this.logger.debug(inbound.kind === "media" ? "lark.media_received" : inbound.kind === "file" ? "lark.file_received" : "lark.message_received", {
       message_id: inbound.messageId,
       conversation_id: inbound.conversationId,
       user_id: inbound.userId,
@@ -337,6 +352,25 @@ export class LarkAdapter implements ImAdapter {
       };
     }
 
+    const fileResource = message.resources.find((resource) => resource.type === "file");
+    if (fileResource) {
+      return {
+        kind: "file",
+        id: message.messageId,
+        messageId: message.messageId,
+        conversationId: message.chatId,
+        userId: message.senderId,
+        ...larkMessageContext(message),
+        file: {
+          fileId: fileResource.fileKey,
+          ...(fileResource.fileName ? { fileName: fileResource.fileName } : {}),
+        },
+        ...(captionFromMessage(message) ? { caption: captionFromMessage(message) } : {}),
+        ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
+        date: Math.floor(message.createTime / 1000),
+      };
+    }
+
     const text = message.content.trim();
     if (!text) return undefined;
     return {
@@ -353,7 +387,7 @@ export class LarkAdapter implements ImAdapter {
   }
 }
 
-function sendOptionsFor(options: Pick<SendMessageOptions | SendPhotoOptions, "replyToMessageId"> & Partial<Pick<SendMessageOptions, "mentions">>): SendOptions {
+function sendOptionsFor(options: Pick<SendMessageOptions | SendPhotoOptions | SendFileOptions, "replyToMessageId"> & Partial<Pick<SendMessageOptions, "mentions">>): SendOptions {
   return {
     ...(options.replyToMessageId ? { replyTo: String(options.replyToMessageId) } : {}),
     ...("mentions" in options && options.mentions?.length ? {

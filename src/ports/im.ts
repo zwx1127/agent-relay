@@ -53,6 +53,12 @@ export interface SendPhotoOptions {
   replyToMessageId?: MessageId;
 }
 
+export interface SendFileOptions {
+  filename?: string;
+  caption?: string;
+  replyToMessageId?: MessageId;
+}
+
 export interface InboundMediaFile {
   fileId: string;
   fileUniqueId?: string;
@@ -61,10 +67,24 @@ export interface InboundMediaFile {
   fileSize?: number;
 }
 
+export interface InboundDocumentFile {
+  fileId: string;
+  fileUniqueId?: string;
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+}
+
 export interface DownloadedFile {
   bytes: ArrayBuffer;
   filePath?: string;
+  fileName?: string;
+  mimeType?: string;
   fileSize?: number;
+}
+
+export interface DownloadFileOptions {
+  kind?: "image" | "file";
 }
 
 export type ConversationType = "direct" | "group" | "unknown";
@@ -104,6 +124,18 @@ export interface MediaInboundMessage extends InboundMessageContext {
   date?: number;
 }
 
+export interface FileInboundMessage extends InboundMessageContext {
+  kind: "file";
+  id: string;
+  messageId: MessageId;
+  conversationId: ConversationId;
+  userId: UserId;
+  file: InboundDocumentFile;
+  caption?: string;
+  replyToMessageId?: MessageId;
+  date?: number;
+}
+
 export interface TextInboundMessage extends InboundMessageContext {
   kind: "message";
   id: string;
@@ -126,7 +158,7 @@ export interface CallbackInboundMessage {
   date?: number;
 }
 
-export type InboundMessage = TextInboundMessage | MediaInboundMessage | CallbackInboundMessage;
+export type InboundMessage = TextInboundMessage | MediaInboundMessage | FileInboundMessage | CallbackInboundMessage;
 
 export interface ImAdapterCapabilities {
   editMessage: boolean;
@@ -136,6 +168,7 @@ export interface ImAdapterCapabilities {
   typing: boolean;
   mediaDownload: boolean;
   imageUpload: boolean;
+  fileUpload: boolean;
 }
 
 export interface ImAdapter {
@@ -146,10 +179,11 @@ export interface ImAdapter {
   stop?(): void;
   sendMessage(conversationId: ConversationId, text: string, options?: SendMessageOptions): Promise<SendMessageResult>;
   sendPhoto?(conversationId: ConversationId, photo: Blob, options?: SendPhotoOptions): Promise<SendMessageResult>;
+  sendFile?(conversationId: ConversationId, file: Blob, options?: SendFileOptions): Promise<SendMessageResult>;
   editMessageText?(conversationId: ConversationId, text: string, options: EditMessageTextOptions): Promise<void>;
   deleteMessage?(conversationId: ConversationId, messageId: MessageId): Promise<void>;
   answerCallbackQuery?(callbackQueryId: string, text?: string): Promise<void>;
   sendChatAction?(conversationId: ConversationId, action?: "typing"): Promise<void>;
   setMessageReaction?(conversationId: ConversationId, messageId: MessageId, emoji?: string): Promise<void>;
-  downloadFile?(fileId: string): Promise<DownloadedFile>;
+  downloadFile?(fileId: string, options?: DownloadFileOptions): Promise<DownloadedFile>;
 }

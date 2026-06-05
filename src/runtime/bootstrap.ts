@@ -7,8 +7,9 @@ import { RelayController } from "../relay/controller.ts";
 import { TextLogger } from "../domain/logger.ts";
 import { CapabilityRegistry } from "../relay/capabilities/registry.ts";
 import { parseSendImageRequest, RELAY_CAPABILITY_SEND_IMAGE } from "../relay/capabilities/send-image.ts";
+import { parseSendFileRequest, RELAY_CAPABILITY_SEND_FILE } from "../relay/capabilities/send-file.ts";
 import { parseMentionAgentRequest, RELAY_CAPABILITY_MENTION_AGENT } from "../relay/capabilities/mention-agent.ts";
-import { mentionAgentCapabilityInstructions, relayCapabilityInstructions, sendImageCapabilityInstructions } from "../relay/control/skills.ts";
+import { mentionAgentCapabilityInstructions, relayCapabilityInstructions, sendFileCapabilityInstructions, sendImageCapabilityInstructions } from "../relay/control/skills.ts";
 import { startControlServer, type RunningControlServer } from "../relay/control/server.ts";
 import { createImAdapter } from "../providers/im/factory.ts";
 import { createAgentDriver } from "../providers/agents/factory.ts";
@@ -31,6 +32,15 @@ export async function main(): Promise<void> {
     handle: async (body) => {
       const result = await router.sendDebugImage(parseSendImageRequest(body));
       return { ok: true, message: "image sent", path: result.path };
+    },
+  });
+  capabilities.register({
+    name: RELAY_CAPABILITY_SEND_FILE,
+    helperCommand: "send-file",
+    instructions: sendFileCapabilityInstructions(helperPath),
+    handle: async (body) => {
+      const result = await router.sendDebugFile(parseSendFileRequest(body));
+      return { ok: true, message: "file sent", path: result.path };
     },
   });
   if (config.relayPeerAgents.length > 0) {

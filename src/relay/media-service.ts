@@ -1,14 +1,15 @@
 import { lstat, readFile } from "node:fs/promises";
-import { extname, isAbsolute, resolve } from "node:path";
+import { basename, extname, isAbsolute, resolve } from "node:path";
 import { isAuthorized, type AppConfig } from "../runtime/config.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
 import { parseSessionKey } from "../domain/session.ts";
 import { isRealDirectory } from "../domain/workspace.ts";
 import type { AgentDriver, AgentImageInput, AgentImageOutputEvent, AgentSessionStatus, AgentTaskInput } from "../ports/agent.ts";
-import type { ImAdapter, MediaInboundMessage } from "../ports/im.ts";
+import type { FileInboundMessage, ImAdapter, MediaInboundMessage } from "../ports/im.ts";
 import type { RelayStore } from "../storage/store.ts";
 import type { Logger, LogFields } from "../domain/logger.ts";
 import type { SendImageCapabilityRequest } from "./capabilities/send-image.ts";
+import type { SendFileCapabilityRequest } from "./capabilities/send-file.ts";
 import type { TaskSubmitPreference } from "./task-coordinator.ts";
 import type { WorkspaceRecord } from "./types.ts";
 import { DEFAULT_IMAGE_PROMPT, MEDIA_GROUP_QUIET_MS } from "./ui/constants.ts";
@@ -16,7 +17,7 @@ import { bestPhoto, formatBytes, pathContains, truncateTelegramCaption } from ".
 import { formatErrorMessage } from "./ui/messages.ts";
 import { textMessage } from "./ui/text-parts.ts";
 import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
-import { extensionFromTelegramPath, imageBlobFromPath, saveGeneratedImage, saveRelayMedia } from "./media.ts";
+import { extensionFromTelegramPath, fileBlobFromPath, imageBlobFromPath, safeFilename, saveGeneratedImage, saveRelayFile, saveRelayMedia } from "./media.ts";
 
 interface MediaGroupState {
   conversationId: ConversationId;
@@ -28,7 +29,7 @@ interface MediaGroupState {
 export interface MediaRelayDeps {
   config: AppConfig;
   store: RelayStore;
-  adapter: Pick<ImAdapter, "sendMessage" | "sendPhoto" | "downloadFile">;
+  adapter: Pick<ImAdapter, "sendMessage" | "sendPhoto" | "sendFile" | "downloadFile">;
   agent: Pick<AgentDriver, "getStatus">;
   logger: Logger;
   currentWorkspace(conversationId: ConversationId): WorkspaceRecord | undefined;
@@ -76,6 +77,34 @@ export class MediaRelayService {
       await this.submitMediaMessages(message.conversationId, [message]);
     } catch (error) {
       await this.handleMediaError(message.conversationId, message.id, error);
+    }
+  }
+
+  async handleFileMessage(message: FileInboundMessage): Promise<void> {
+    this.deps.logger.info("router.file_received", {
+      conversation_id: message.conversationId,
+      user_id: message.userId,
+      message_id: message.id,
+      file_name: message.file.fileName,
+      mime_type: message.file.mimeType,
+      file_size: message.file.fileSize,
+      caption_len: message.caption?.length ?? 0,
+    });
+
+    if (!isAuthorized(this.deps.config, message.userId, message.conversationId)) {
+      this.deps.logger.warn("router.unauthorized_file", {
+        conversation_id: message.conversationId,
+        user_id: message.userId,
+        message_id: message.id,
+      });
+      await this.deps.sendRendered(message.conversationId, textMessage("Unauthorized."));
+      return;
+    }
+
+    try {
+      await this.submitFileMessage(message);
+    } catch (error) {
+      await this.handleFileError(message.conversationId, message.id, error);
     }
   }
 
@@ -151,6 +180,66 @@ export class MediaRelayService {
     this.deps.appendSystem(conversationId, `Error: ${detail}\n`);
   }
 
+  private async submitFileMessage(message: FileInboundMessage): Promise<void> {
+    const workspace = this.deps.currentWorkspace(message.conversationId);
+    if (!workspace) {
+      await this.deps.renderConsole(message.conversationId);
+      return;
+    }
+    if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
+    const status = await this.deps.ensureAgentStarted(message.conversationId, workspace);
+    if (await this.deps.sendWaitingPromptNotice(message.conversationId, status)) return;
+
+    const stored = await this.downloadAndSaveFile(workspace, message);
+    const prompt = formatAttachedFilePrompt({
+      path: stored.path,
+      filename: stored.filename,
+      fileSize: stored.fileSize,
+      mimeType: stored.mimeType,
+      caption: message.caption,
+    });
+    await this.deps.submitTask(message.conversationId, prompt, message.messageId);
+  }
+
+  private async downloadAndSaveFile(workspace: WorkspaceRecord, message: FileInboundMessage): Promise<{ path: string; filename: string; fileSize: number; mimeType?: string }> {
+    if (message.file.fileSize && message.file.fileSize > this.deps.config.mediaMaxBytes) {
+      throw new Error(`File is too large (${formatBytes(message.file.fileSize)}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
+    }
+    if (!this.deps.adapter.downloadFile) throw new Error("IM adapter cannot download files.");
+    const downloaded = await this.deps.adapter.downloadFile(message.file.fileId, { kind: "file" });
+    const size = downloaded.fileSize ?? downloaded.bytes.byteLength;
+    if (size > this.deps.config.mediaMaxBytes || downloaded.bytes.byteLength > this.deps.config.mediaMaxBytes) {
+      throw new Error(`File is too large (${formatBytes(Math.max(size, downloaded.bytes.byteLength))}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
+    }
+    const filename = safeFilename(downloaded.fileName ?? message.file.fileName ?? (basename(downloaded.filePath ?? "") || "file.bin"));
+    const path = await saveRelayFile(workspace.path, "incoming", downloaded.bytes, {
+      filename,
+      messageId: message.messageId,
+    });
+    return {
+      path,
+      filename,
+      fileSize: size,
+      ...(downloaded.mimeType ?? message.file.mimeType ? { mimeType: downloaded.mimeType ?? message.file.mimeType } : {}),
+    };
+  }
+
+  private async handleFileError(conversationId: ConversationId, messageId: MessageId, error: unknown): Promise<void> {
+    const detail = error instanceof Error ? error.message : String(error);
+    this.deps.logger.error("router.file_failed", {
+      conversation_id: conversationId,
+      message_id: messageId,
+      error: error instanceof Error ? error : new Error(detail),
+    });
+    await this.deps.trySendRendered(
+      conversationId,
+      formatErrorMessage(detail),
+      "router.file_error_notice_failed",
+      { message_id: messageId },
+    );
+    this.deps.appendSystem(conversationId, `Error: ${detail}\n`);
+  }
+
   async sendAgentImageOutput(event: AgentImageOutputEvent): Promise<void> {
     const parsed = parseSessionKey(event.sessionKey);
     if (!parsed) return;
@@ -180,7 +269,7 @@ export class MediaRelayService {
   }
 
   async sendDebugImage(input: SendImageCapabilityRequest): Promise<{ path: string }> {
-    const { sessionKey: sessionKeyValue, workspace } = this.resolveDebugImageSession(input);
+    const { sessionKey: sessionKeyValue, workspace } = this.resolveCapabilitySession(input, "image");
     await this.validateDebugImagePath(input.path, workspace.path);
     const path = await this.copyOutgoingImage(workspace.path, input.path);
     const parsed = parseSessionKey(sessionKeyValue);
@@ -196,7 +285,24 @@ export class MediaRelayService {
     return { path };
   }
 
-  private resolveDebugImageSession(input: SendImageCapabilityRequest): { sessionKey: string; workspace: WorkspaceRecord } {
+  async sendDebugFile(input: SendFileCapabilityRequest): Promise<{ path: string }> {
+    const { sessionKey: sessionKeyValue, workspace } = this.resolveCapabilitySession(input, "file");
+    await this.validateDebugFilePath(input.path, workspace.path);
+    const path = await this.copyOutgoingFile(workspace.path, input.path);
+    const parsed = parseSessionKey(sessionKeyValue);
+    if (!parsed) throw new Error("Invalid session key.");
+    await this.sendStoredFile(parsed.conversationId, parsed.workspaceName, path, input.caption, this.deps.lastUserMessageId(sessionKeyValue));
+    this.deps.logger.info("router.debug_file_sent", {
+      conversation_id: parsed.conversationId,
+      workspace: parsed.workspaceName,
+      session_key: sessionKeyValue,
+      source_path: input.path,
+      stored_path: path,
+    });
+    return { path };
+  }
+
+  private resolveCapabilitySession(input: SendImageCapabilityRequest | SendFileCapabilityRequest, kind: "image" | "file"): { sessionKey: string; workspace: WorkspaceRecord } {
     if (input.sessionKey) {
       const parsed = parseSessionKey(input.sessionKey);
       if (!parsed) throw new Error("sessionKey is invalid");
@@ -220,8 +326,8 @@ export class MediaRelayService {
         return [{ sessionKey: key, workspace }];
       });
     if (matches.length === 1) return matches[0]!;
-    if (matches.length === 0) throw new Error("No running relay session matches this image request.");
-    throw new Error("Multiple running relay sessions match this image request; pass --session-key.");
+    if (matches.length === 0) throw new Error(`No running relay session matches this ${kind} request.`);
+    throw new Error(`Multiple running relay sessions match this ${kind} request; pass --session-key.`);
   }
 
   private async validateDebugImagePath(path: string, workspacePath: string): Promise<void> {
@@ -241,8 +347,23 @@ export class MediaRelayService {
     }
   }
 
+  private async validateDebugFilePath(path: string, workspacePath: string): Promise<void> {
+    if (!isAbsolute(path)) throw new Error("File path must be absolute.");
+    const resolvedPath = resolve(path);
+    if (!pathContains(workspacePath, resolvedPath)) throw new Error("File path must stay inside the selected workspace.");
+    const stat = await lstat(resolvedPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("File path must be a regular file.");
+    if (stat.size > this.deps.config.mediaMaxBytes) {
+      throw new Error(`File is too large (${formatBytes(stat.size)}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
+    }
+  }
+
   private async copyOutgoingImage(workspacePath: string, sourcePath: string): Promise<string> {
     return await saveRelayMedia(workspacePath, "outgoing", await readFile(sourcePath), { extension: extensionFromTelegramPath(sourcePath) });
+  }
+
+  private async copyOutgoingFile(workspacePath: string, sourcePath: string): Promise<string> {
+    return await saveRelayFile(workspacePath, "outgoing", await readFile(sourcePath), { filename: basename(sourcePath) });
   }
 
   private async sendStoredImage(conversationId: ConversationId, workspaceName: string, path: string, caption?: string, replyToMessageId?: MessageId): Promise<void> {
@@ -260,4 +381,35 @@ export class MediaRelayService {
       createdAt: Date.now(),
     });
   }
+
+  private async sendStoredFile(conversationId: ConversationId, workspaceName: string, path: string, caption?: string, replyToMessageId?: MessageId): Promise<void> {
+    if (!this.deps.adapter.sendFile) throw new Error("IM adapter cannot send files.");
+    const blob = await fileBlobFromPath(path);
+    await this.deps.adapter.sendFile(conversationId, blob, {
+      filename: basename(path),
+      ...(caption ? { caption: truncateTelegramCaption(caption) } : {}),
+      ...(replyToMessageId ? { replyToMessageId } : {}),
+    });
+    this.deps.store.appendTranscript({
+      conversationId,
+      workspaceName,
+      role: "agent",
+      text: `[file: ${path}]\n`,
+      createdAt: Date.now(),
+    });
+  }
+}
+
+function formatAttachedFilePrompt(input: { path: string; filename: string; fileSize: number; mimeType?: string; caption?: string }): string {
+  return [
+    "User attached a file for this Codex session.",
+    "",
+    `Local path: ${input.path}`,
+    `Filename: ${input.filename}`,
+    `Size: ${formatBytes(input.fileSize)}`,
+    input.mimeType ? `MIME type: ${input.mimeType}` : undefined,
+    input.caption?.trim() ? `User caption: ${input.caption.trim()}` : undefined,
+    "",
+    "Use the local path above to inspect or process the file if needed.",
+  ].filter((line): line is string => line !== undefined).join("\n");
 }

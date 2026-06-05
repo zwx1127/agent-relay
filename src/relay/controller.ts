@@ -1,6 +1,7 @@
 import { isAuthorized } from "../runtime/config.ts";
 import { resolve } from "node:path";
 import type { SendImageCapabilityRequest } from "./capabilities/send-image.ts";
+import type { SendFileCapabilityRequest } from "./capabilities/send-file.ts";
 import type { MentionAgentCapabilityRequest } from "./capabilities/mention-agent.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
 import { parseSessionKey, sessionKey } from "../domain/session.ts";
@@ -211,6 +212,10 @@ export class RelayController {
     }
     if (message.kind === "media") {
       await this.mediaRelay.handleMediaMessage(message);
+      return;
+    }
+    if (message.kind === "file") {
+      await this.mediaRelay.handleFileMessage(message);
       return;
     }
 
@@ -448,6 +453,10 @@ export class RelayController {
 
   async sendDebugImage(input: SendImageCapabilityRequest): Promise<{ path: string }> {
     return await this.mediaRelay.sendDebugImage(input);
+  }
+
+  async sendDebugFile(input: SendFileCapabilityRequest): Promise<{ path: string }> {
+    return await this.mediaRelay.sendDebugFile(input);
   }
 
   async mentionPeerAgent(input: MentionAgentCapabilityRequest): Promise<{ peerId: string }> {

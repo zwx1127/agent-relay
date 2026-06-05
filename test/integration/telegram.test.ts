@@ -73,14 +73,36 @@ describe("telegram adapter", () => {
     }]);
   });
 
-  test("ignores image documents", async () => {
+  test("routes document messages as files", async () => {
     const adapter = new TelegramAdapter("token", async () => Response.json({ ok: true, result: [] }));
     const inbound = (adapter as any).toInboundMessage({
       update_id: 5,
-      message: { message_id: 9, date: 1, chat: { id: 2 }, from: { id: 3 }, document: { file_id: "doc", mime_type: "image/png" } },
+      message: {
+        message_id: 9,
+        date: 1,
+        caption: "inspect",
+        chat: { id: 2 },
+        from: { id: 3 },
+        document: { file_id: "doc", file_unique_id: "unique", file_name: "report.pdf", mime_type: "application/pdf", file_size: 123 },
+      },
     });
 
-    expect(inbound).toBeUndefined();
+    expect(inbound).toEqual({
+      kind: "file",
+      id: "9",
+      messageId: "9",
+      conversationId: "2",
+      userId: "3",
+      caption: "inspect",
+      file: {
+        fileId: "doc",
+        fileUniqueId: "unique",
+        fileName: "report.pdf",
+        mimeType: "application/pdf",
+        fileSize: 123,
+      },
+      date: 1,
+    });
   });
 
   test("marks and strips telegram bot mentions in group text", async () => {
@@ -481,6 +503,27 @@ describe("telegram adapter", () => {
     expect(requests[0]?.body.get("caption")).toBe("caption");
     expect(requests[0]?.body.get("reply_parameters")).toBe(JSON.stringify({ message_id: 99, allow_sending_without_reply: true }));
     expect(requests[0]?.body.get("photo")).toBeInstanceOf(Blob);
+  });
+
+  test("sends documents as multipart", async () => {
+    const requests: Array<{ method: string; body: FormData }> = [];
+    const adapter = new TelegramAdapter("token", async (url, init) => {
+      requests.push({ method: String(url).split("/").at(-1) || "", body: init?.body as FormData });
+      return Response.json({ ok: true, result: { message_id: 12 } });
+    });
+
+    const result = await adapter.sendFile(1, new Blob([new Uint8Array([1, 2, 3])]), {
+      filename: "report.txt",
+      caption: "caption",
+      replyToMessageId: 99,
+    });
+
+    expect(result).toEqual({ messageId: "12" });
+    expect(requests[0]?.method).toBe("sendDocument");
+    expect(requests[0]?.body.get("chat_id")).toBe("1");
+    expect(requests[0]?.body.get("caption")).toBe("caption");
+    expect(requests[0]?.body.get("reply_parameters")).toBe(JSON.stringify({ message_id: 99, allow_sending_without_reply: true }));
+    expect(requests[0]?.body.get("document")).toBeInstanceOf(Blob);
   });
 
   test("sends reply parameters only on the first outbound chunk", async () => {

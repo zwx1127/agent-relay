@@ -1479,6 +1479,27 @@ describe("relay controller", () => {
     expect(agent.sent[0]?.options?.images).toHaveLength(1);
   });
 
+  test("file prompt is saved under relay files and sent to agent as a path prompt", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    adapter.downloads.set("file-doc", new TextEncoder().encode("hello").buffer);
+
+    await router.handle(fileMessage("inspect file"));
+
+    expect(agent.sent).toHaveLength(1);
+    expect(agent.sent[0]?.key).toBe("codex:1:demo");
+    expect(agent.sent[0]?.text).toContain("User attached a file");
+    expect(agent.sent[0]?.text).toContain("Filename: file.txt");
+    expect(agent.sent[0]?.text).toContain("User caption: inspect file");
+    expect(agent.sent[0]?.text).toContain(join(path, ".agent-relay", "files", "incoming"));
+    expect(existsSync(join(path, ".agent-relay", ".gitignore"))).toBe(true);
+    const incomingDayDirs = readdirSync(join(path, ".agent-relay", "files", "incoming"));
+    expect(incomingDayDirs).toHaveLength(1);
+  });
+
   test("codex image output is sent as photo and copied to outgoing media", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
@@ -1512,6 +1533,36 @@ describe("relay controller", () => {
     expect(result.path).toContain(join(path, ".agent-relay", "media", "outgoing"));
     expect(adapter.photos).toHaveLength(1);
     expect(adapter.photos[0]?.options).toEqual({ caption: "home screen", replyToMessageId: "1" });
+  });
+
+  test("send_file capability sends workspace file", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("make report"));
+    const report = join(path, "report.txt");
+    writeFileSync(report, "hello");
+
+    const result = await router.sendDebugFile({ path: report, cwd: path, caption: "report" });
+
+    expect(result.path).toContain(join(path, ".agent-relay", "files", "outgoing"));
+    expect(adapter.files).toHaveLength(1);
+    expect(adapter.files[0]?.options).toEqual({ filename: result.path.split(/[\\/]/).at(-1), caption: "report", replyToMessageId: "1" });
+  });
+
+  test("send_file capability rejects paths outside workspace", async () => {
+    const { router, store, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("make report"));
+    const report = join(root, "outside.txt");
+    writeFileSync(report, "hello");
+
+    await expect(router.sendDebugFile({ path: report, cwd: path })).rejects.toThrow("inside the selected workspace");
   });
 
   test("send_image capability rejects paths outside workspace", async () => {
@@ -2594,6 +2645,23 @@ function mediaMessage(caption?: string, userId = 7) {
       { fileId: "photo-small", width: 10, height: 10, fileSize: 10 },
       { fileId: "photo-large", fileUniqueId: "unique-large", width: 100, height: 100, fileSize: 100 },
     ],
+  };
+}
+
+function fileMessage(caption?: string, userId = 7) {
+  return {
+    kind: "file" as const,
+    id: "1",
+    messageId: "1",
+    conversationId: "1",
+    userId,
+    ...(caption ? { caption } : {}),
+    file: {
+      fileId: "file-doc",
+      fileName: "file.txt",
+      mimeType: "text/plain",
+      fileSize: 5,
+    },
   };
 }
 

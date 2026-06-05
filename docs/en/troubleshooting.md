@@ -59,7 +59,7 @@ Check:
 - The bot is actually a member of the group.
 - The message mentions the bot directly.
 - Both the user and the group are allowed when `ALLOWED_CONVERSATION_IDS` is set.
-- Slash commands, image captions, and normal text all include the bot mention.
+- Slash commands, image/file captions, and normal text all include the bot mention.
 - For multi-agent groups, each bot has its own relay process and its own credentials.
 
 ## Buttons stop working
@@ -82,7 +82,15 @@ Check:
 
 - A workspace is selected.
 - The image is under `MEDIA_MAX_BYTES`.
-- The upload is a real image message, not a document attachment.
+
+## Files fail
+
+Check:
+
+- A workspace is selected.
+- The file is under `MEDIA_MAX_BYTES`.
+- The upload is a regular file attachment, not a folder.
+- Outbound files sent through `send-file` are inside the selected workspace.
 
 ## Opening an issue
 

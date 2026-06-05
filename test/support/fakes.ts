@@ -13,9 +13,11 @@ export class FakeImAdapter {
     typing: true,
     mediaDownload: true,
     imageUpload: true,
+    fileUpload: true,
   };
   sent: Array<{ conversationId: ConversationId; text: string; options?: SendMessageOptions; messageId?: number }> = [];
   photos: Array<{ conversationId: ConversationId; photo: Blob; options?: unknown; messageId?: number }> = [];
+  files: Array<{ conversationId: ConversationId; file: Blob; options?: unknown; messageId?: number }> = [];
   edited: Array<{ conversationId: ConversationId; text: string; options: EditMessageTextOptions }> = [];
   deleted: Array<{ conversationId: ConversationId; messageId: MessageId }> = [];
   answered: Array<{ callbackQueryId: string; text?: string }> = [];
@@ -45,10 +47,18 @@ export class FakeImAdapter {
     return { messageId };
   }
 
-  async downloadFile(fileId: string): Promise<{ bytes: ArrayBuffer; filePath?: string; fileSize?: number }> {
+  async sendFile(conversationId: ConversationId, file: Blob, options?: unknown): Promise<{ messageId?: number }> {
+    const messageId = this.nextMessageId++;
+    this.files.push({ conversationId, file, options, messageId });
+    return { messageId };
+  }
+
+  async downloadFile(fileId: string, options: { kind?: "image" | "file" } = {}): Promise<{ bytes: ArrayBuffer; filePath?: string; fileName?: string; fileSize?: number }> {
+    const kind = options.kind ?? "image";
     return {
-      bytes: this.downloads.get(fileId) ?? new TextEncoder().encode("image").buffer,
-      filePath: "photos/image.jpg",
+      bytes: this.downloads.get(fileId) ?? new TextEncoder().encode(kind).buffer,
+      filePath: kind === "image" ? "photos/image.jpg" : "documents/file.txt",
+      ...(kind === "file" ? { fileName: "file.txt" } : {}),
     };
   }
 

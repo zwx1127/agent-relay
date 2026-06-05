@@ -5,7 +5,7 @@
 
 English | [中文](README.zh-CN.md)
 
-`agent-relay` lets you control a local Codex CLI agent from Telegram or Lark/Feishu. You keep Codex running on a trusted machine, then use chat to choose a workspace, send prompts, answer questions, approve actions, review code, manage threads, and exchange screenshots or images.
+`agent-relay` lets you control a local Codex CLI agent from Telegram or Lark/Feishu. You keep Codex running on a trusted machine, then use chat to choose a workspace, send prompts, answer questions, approve actions, review code, manage threads, and exchange screenshots, images, or files.
 
 The goal is simple: keep the agent close to your code, while letting you operate it from the chat app you already use.
 
@@ -13,11 +13,11 @@ The goal is simple: keep the agent close to your code, while letting you operate
 
 - Remote-control local Codex sessions from Telegram or Lark/Feishu.
 - Select, create, browse, and delete workspaces from chat.
-- Send normal prompts, images, and follow-up steering messages.
+- Send normal prompts, images, files, and follow-up steering messages.
 - Answer Codex questions and approve actions inline.
 - Use direct chats or allowed group chats; group messages are handled only when they mention the bot.
 - Use common Codex workflows such as review, Plan mode, goals, resume, fork, side conversations, interrupt, and background terminal cleanup.
-- Send screenshots or generated images back to chat with the optional local relay capability API.
+- Send screenshots, generated images, or files back to chat with the optional local relay capability API.
 - Put multiple agent-relay bots in one group and let agents mention configured peers for related work.
 - Extend the relay to support more IM providers or agent backends.
 
@@ -72,14 +72,14 @@ Common commands:
 | `/ps` | List Codex background terminals. |
 | `/stop` | Ask Codex to clean background terminals. |
 
-In group chats, mention the bot when sending text, images, or slash commands. Use `ALLOWED_CONVERSATION_IDS` when a bot should only respond in specific groups.
+In group chats, mention the bot when sending text, images, files, or slash commands. Use `ALLOWED_CONVERSATION_IDS` when a bot should only respond in specific groups.
 
 ## Group chats and agent teams
 
 agent-relay works in private chats and group chats. Group chats are useful when you want a shared operator room for one or more local agents.
 
 - Add the bot to the group and allow the group with `ALLOWED_CONVERSATION_IDS`.
-- Mention the bot in text, image captions, and slash commands.
+- Mention the bot in text, image/file captions, and slash commands.
 - Unmentioned group messages are ignored before authorization checks.
 - Run one agent-relay process per agent bot when you want several agents in the same group.
 - Configure peer agents and enable the local relay capability API when you want Codex to mention another agent bot.
@@ -114,7 +114,7 @@ Current providers:
 
 Known limitations:
 
-- File/document attachments are not supported.
+- Folder attachments and automatic archive extraction are not supported.
 - npm publication is not configured; install from source with `git clone`.
 - Codex is currently the only implemented agent backend.
 

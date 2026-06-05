@@ -3,9 +3,11 @@ import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, extname, join, resolve } from "node:path";
 
 export type RelayMediaKind = "incoming" | "outgoing";
+export type RelayFileKind = "incoming" | "outgoing";
 
 const RELAY_DIR = ".agent-relay";
 const MEDIA_DIR = "media";
+const FILES_DIR = "files";
 const RELAY_GITIGNORE = "*\n";
 
 export async function ensureRelayMediaRoot(workspacePath: string): Promise<string> {
@@ -15,6 +17,14 @@ export async function ensureRelayMediaRoot(workspacePath: string): Promise<strin
   await ensureDirectory(join(relayRoot, MEDIA_DIR));
   await ensureDirectory(join(relayRoot, MEDIA_DIR, "incoming"));
   await ensureDirectory(join(relayRoot, MEDIA_DIR, "outgoing"));
+  return relayRoot;
+}
+
+export async function ensureRelayFilesRoot(workspacePath: string): Promise<string> {
+  const relayRoot = await ensureRelayRoot(workspacePath);
+  await ensureDirectory(join(relayRoot, FILES_DIR));
+  await ensureDirectory(join(relayRoot, FILES_DIR, "incoming"));
+  await ensureDirectory(join(relayRoot, FILES_DIR, "outgoing"));
   return relayRoot;
 }
 
@@ -36,6 +46,23 @@ export async function saveRelayMedia(
   return path;
 }
 
+export async function saveRelayFile(
+  workspacePath: string,
+  kind: RelayFileKind,
+  bytes: ArrayBuffer | Uint8Array,
+  options: { filename?: string; messageId?: string | number; createdAt?: Date } = {},
+): Promise<string> {
+  const relayRoot = await ensureRelayFilesRoot(workspacePath);
+  const day = utcDay(options.createdAt ?? new Date());
+  const dir = join(relayRoot, FILES_DIR, kind, day);
+  await ensureDirectory(dir);
+  const messagePart = options.messageId ? `m${options.messageId}-` : "";
+  const filename = `${Date.now()}-${messagePart}${randomBytes(6).toString("hex")}-${safeFilename(options.filename ?? "file.bin")}`;
+  const path = join(dir, filename);
+  await writeFile(path, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+  return path;
+}
+
 export async function saveGeneratedImage(workspacePath: string, data: string): Promise<string> {
   const parsed = parseImageData(data);
   return await saveRelayMedia(workspacePath, "outgoing", parsed.bytes, { extension: parsed.extension });
@@ -44,6 +71,17 @@ export async function saveGeneratedImage(workspacePath: string, data: string): P
 export async function imageBlobFromPath(path: string): Promise<Blob> {
   const bytes = await readFile(path);
   return new Blob([bytes], { type: mimeTypeForPath(path) });
+}
+
+export async function fileBlobFromPath(path: string, mimeType?: string): Promise<Blob> {
+  const bytes = await readFile(path);
+  return new Blob([bytes], { type: mimeType ?? "application/octet-stream" });
+}
+
+export function safeFilename(name: string): string {
+  const normalized = basename(name).trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_");
+  const collapsed = normalized.replace(/\s+/g, " ").replace(/^\.+/, "");
+  return collapsed.slice(0, 160) || "file.bin";
 }
 
 export function extensionFromTelegramPath(path: string | undefined): string {
@@ -75,6 +113,13 @@ async function ensureDirectory(path: string, notDirectoryMessage = "Path exists 
     if (code !== "ENOENT") throw error;
     await mkdir(path, { recursive: true });
   }
+}
+
+async function ensureRelayRoot(workspacePath: string): Promise<string> {
+  const relayRoot = resolve(workspacePath, RELAY_DIR);
+  await ensureDirectory(relayRoot, `${RELAY_DIR} exists but is not a directory.`);
+  await writeFile(join(relayRoot, ".gitignore"), RELAY_GITIGNORE, "utf8");
+  return relayRoot;
 }
 
 function utcDay(date: Date): string {

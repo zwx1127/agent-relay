@@ -15,7 +15,7 @@ export function relayCapabilityInstructions(helperPath: string, capabilityInstru
     "",
     "This Codex session can call local agent-relay capabilities through the helper exposed in `AGENT_RELAY_HELPER`.",
     "",
-    capabilityInstructions ?? sendImageCapabilityInstructions(helperPath),
+    capabilityInstructions ?? [sendImageCapabilityInstructions(helperPath), sendFileCapabilityInstructions(helperPath)].join("\n\n"),
   ].join("\n");
 }
 
@@ -59,5 +59,25 @@ export function sendImageCapabilityInstructions(helperPath: string): string {
     `If AGENT_RELAY_HELPER is unavailable, the helper path for this relay is: ${helperPath}`,
     "",
     "After sending the image, briefly summarize what the screenshot shows and what you will change or verify next.",
+  ].join("\n");
+}
+
+export function sendFileCapabilityInstructions(helperPath: string): string {
+  return [
+    "### send_file",
+    "",
+    "Use this capability when the user needs a generated or existing workspace file sent back to chat, such as a report, log, archive, spreadsheet, document, or other non-image artifact.",
+    "",
+    "Workflow:",
+    "1. Create or locate the file inside the current workspace.",
+    "2. Send it to the user with:",
+    "",
+    "```bash",
+    '\"$AGENT_RELAY_HELPER\" send-file <file-path> --cwd \"$PWD\" --caption \"short description\"',
+    "```",
+    "",
+    `If AGENT_RELAY_HELPER is unavailable, the helper path for this relay is: ${helperPath}`,
+    "",
+    "After sending the file, briefly summarize what the file contains.",
   ].join("\n");
 }

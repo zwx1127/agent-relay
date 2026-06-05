@@ -179,6 +179,42 @@ describe("lark adapter", () => {
     expect(file.fileSize).toBe(3);
   });
 
+  test("routes file messages and downloads file resources", async () => {
+    const channel = new FakeLarkChannel();
+    channel.resources.set("file_key", Buffer.from([7, 8, 9]));
+    const adapter = adapterWith(channel);
+    const received: unknown[] = [];
+
+    await adapter.start(async (message) => {
+      received.push(message);
+    });
+    await channel.handlers.message?.(normalizedMessage({
+      content: "inspect",
+      rawContentType: "file",
+      resources: [{ type: "file", fileKey: "file_key", fileName: "report.txt" }],
+      replyToMessageId: "om_parent",
+    }));
+    const file = await adapter.downloadFile("file_key", { kind: "file" });
+
+    expect(received).toEqual([{
+      kind: "file",
+      id: "om_in",
+      messageId: "om_in",
+      conversationId: "oc_chat",
+      userId: "ou_user",
+      conversationType: "group",
+      mentionedBot: false,
+      mentionAll: false,
+      file: { fileId: "file_key", fileName: "report.txt" },
+      caption: "inspect",
+      replyToMessageId: "om_parent",
+      date: 2,
+    }]);
+    expect([...new Uint8Array(file.bytes)]).toEqual([7, 8, 9]);
+    expect(file.filePath).toBe("file_key");
+    expect(file.fileSize).toBe(3);
+  });
+
   test("routes mentioned group messages with cleaned text", async () => {
     const channel = new FakeLarkChannel();
     const adapter = adapterWith(channel);
@@ -439,6 +475,7 @@ describe("lark adapter", () => {
     await adapter.editMessageText("oc_chat", "updated", { messageId: "om_2", replyMarkup: { inline_keyboard: [] } });
     await adapter.editMessageText("oc_chat", "plain edit", { messageId: "om_1" });
     await expect(adapter.sendPhoto("oc_chat", new Blob([new Uint8Array([1, 2, 3])]), { caption: "caption" })).resolves.toEqual({ messageId: "om_3" });
+    await expect(adapter.sendFile("oc_chat", new Blob([new Uint8Array([4, 5, 6])]), { filename: "report.txt", caption: "file caption" })).resolves.toEqual({ messageId: "om_5" });
     await adapter.deleteMessage("oc_chat", "om_1");
     await adapter.setMessageReaction("oc_chat", "om_1", "😎");
     await adapter.setMessageReaction("oc_chat", "om_1", "🤔");
@@ -472,6 +509,8 @@ describe("lark adapter", () => {
     expect(channel.edited).toEqual([{ messageId: "om_1", text: "plain edit" }]);
     expect(channel.sent[2]?.input).toHaveProperty("image");
     expect(channel.sent[3]).toEqual({ to: "oc_chat", input: { text: "caption" }, options: { replyTo: "om_3" } });
+    expect(channel.sent[4]?.input).toHaveProperty("file");
+    expect(channel.sent[5]).toEqual({ to: "oc_chat", input: { text: "file caption" }, options: { replyTo: "om_5" } });
     expect(channel.recalled).toEqual(["om_1"]);
     expect(channel.reactions).toEqual([
       { messageId: "om_1", emojiType: "DONE" },
