@@ -65,8 +65,9 @@ interface TelegramUpdate {
       file_size?: number;
     };
     chat: { id: number; type?: "private" | "group" | "supergroup" | "channel" };
+    message_thread_id?: number;
     from?: { id: number };
-    reply_to_message?: { message_id: number };
+    reply_to_message?: { message_id: number; message_thread_id?: number };
   };
   callback_query?: {
     id: string;
@@ -74,6 +75,7 @@ interface TelegramUpdate {
     data?: string;
     message?: {
       message_id: number;
+      message_thread_id?: number;
       date?: number;
       chat: { id: number };
     };
@@ -244,6 +246,7 @@ export class TelegramAdapter implements ImAdapter {
           ...(options.parseMode ? { parse_mode: options.parseMode } : {}),
           ...(chunk.entities.length > 0 ? { entities: chunk.entities } : {}),
           ...(replyParametersForOptions(options, index === 0)),
+          ...(telegramThreadForOptions(options)),
           ...(replyMarkupForOptions(options, index === chunks.length - 1)),
         });
         lastMessageId = result?.message_id !== undefined ? String(result.message_id) : lastMessageId;
@@ -272,6 +275,7 @@ export class TelegramAdapter implements ImAdapter {
         allow_sending_without_reply: true,
       }));
     }
+    appendTelegramThread(form, options);
     const result = await this.request<{ message_id?: number }>("sendPhoto", form);
     return { messageId: result?.message_id !== undefined ? String(result.message_id) : undefined };
   }
@@ -287,6 +291,7 @@ export class TelegramAdapter implements ImAdapter {
         allow_sending_without_reply: true,
       }));
     }
+    appendTelegramThread(form, options);
     const result = await this.request<{ message_id?: number }>("sendDocument", form);
     return { messageId: result?.message_id !== undefined ? String(result.message_id) : undefined };
   }
@@ -331,10 +336,11 @@ export class TelegramAdapter implements ImAdapter {
     });
   }
 
-  async sendChatAction(conversationId: ConversationId, action: "typing" = "typing"): Promise<void> {
+  async sendChatAction(conversationId: ConversationId, action: "typing" = "typing", options: { topic?: SendMessageOptions["topic"] } = {}): Promise<void> {
     await this.request("sendChatAction", {
       chat_id: conversationId,
       action,
+      ...(telegramThreadForOptions(options)),
     });
   }
 
@@ -364,6 +370,7 @@ export class TelegramAdapter implements ImAdapter {
     const message = update.message;
     if (message?.text && message.from) {
       const mention = mentionContextForTelegram(message.text, message.entities, message.chat.type, this.botUsername);
+      const topic = telegramTopic(message.message_thread_id ?? message.reply_to_message?.message_thread_id);
       return {
         kind: "message",
         id: String(message.message_id),
@@ -372,6 +379,7 @@ export class TelegramAdapter implements ImAdapter {
         userId: String(message.from.id),
         text: mention.text,
         ...mention.context,
+        ...(topic ? { topic } : {}),
         ...(message.reply_to_message ? { replyToMessageId: String(message.reply_to_message.message_id) } : {}),
         date: message.date,
       };
@@ -379,6 +387,7 @@ export class TelegramAdapter implements ImAdapter {
 
     if (message?.photo?.length && message.from) {
       const mention = mentionContextForTelegram(message.caption ?? "", message.caption_entities, message.chat.type, this.botUsername);
+      const topic = telegramTopic(message.message_thread_id ?? message.reply_to_message?.message_thread_id);
       return {
         kind: "media",
         id: String(message.message_id),
@@ -387,6 +396,7 @@ export class TelegramAdapter implements ImAdapter {
         userId: String(message.from.id),
         ...(mention.text ? { caption: mention.text } : {}),
         ...mention.context,
+        ...(topic ? { topic } : {}),
         photos: message.photo.map((photo) => ({
           fileId: photo.file_id,
           ...(photo.file_unique_id ? { fileUniqueId: photo.file_unique_id } : {}),
@@ -402,6 +412,7 @@ export class TelegramAdapter implements ImAdapter {
 
     if (message?.document && message.from) {
       const mention = mentionContextForTelegram(message.caption ?? "", message.caption_entities, message.chat.type, this.botUsername);
+      const topic = telegramTopic(message.message_thread_id ?? message.reply_to_message?.message_thread_id);
       return {
         kind: "file",
         id: String(message.message_id),
@@ -410,6 +421,7 @@ export class TelegramAdapter implements ImAdapter {
         userId: String(message.from.id),
         ...(mention.text ? { caption: mention.text } : {}),
         ...mention.context,
+        ...(topic ? { topic } : {}),
         file: {
           fileId: message.document.file_id,
           ...(message.document.file_unique_id ? { fileUniqueId: message.document.file_unique_id } : {}),
@@ -424,6 +436,7 @@ export class TelegramAdapter implements ImAdapter {
 
     const callback = update.callback_query;
     if (callback?.data && callback.message) {
+      const topic = telegramTopic(callback.message.message_thread_id);
       return {
         kind: "callback_query",
         id: callback.id,
@@ -432,6 +445,7 @@ export class TelegramAdapter implements ImAdapter {
         userId: String(callback.from.id),
         messageId: String(callback.message.message_id),
         data: callback.data,
+        ...(topic ? { topic } : {}),
         date: callback.message.date,
       };
     }
@@ -662,4 +676,20 @@ function replyParametersForOptions(options: SendMessageOptions, include: boolean
       allow_sending_without_reply: true,
     },
   };
+}
+
+function telegramThreadForOptions(options: Pick<SendMessageOptions, "topic">): { message_thread_id?: number } {
+  if (options.topic?.provider !== "telegram") return {};
+  const id = Number(options.topic.id);
+  return Number.isFinite(id) ? { message_thread_id: id } : {};
+}
+
+function appendTelegramThread(form: FormData, options: Pick<SendPhotoOptions | SendFileOptions, "topic">): void {
+  if (options.topic?.provider !== "telegram") return;
+  const id = Number(options.topic.id);
+  if (Number.isFinite(id)) form.append("message_thread_id", String(id));
+}
+
+function telegramTopic(messageThreadId: number | undefined): { provider: "telegram"; id: string } | undefined {
+  return messageThreadId !== undefined ? { provider: "telegram", id: String(messageThreadId) } : undefined;
 }

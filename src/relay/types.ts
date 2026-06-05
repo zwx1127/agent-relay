@@ -9,6 +9,7 @@ export interface WorkspaceRecord {
 
 export interface ConversationBinding {
   conversationId: ConversationId;
+  scopeKey?: string;
   /** One active workspace is bound per IM conversation; agent sessions are keyed from this pair. */
   workspaceName: string;
   updatedAt: number;
@@ -18,6 +19,7 @@ export type TranscriptRole = "user" | "agent" | "system";
 
 export interface TranscriptEvent {
   conversationId: ConversationId;
+  scopeKey?: string;
   workspaceName: string;
   role: TranscriptRole;
   text: string;
@@ -28,6 +30,7 @@ export type PendingPromptKind = "workspace_name" | "codex_user_input" | "codex_a
 
 export interface PendingPrompt {
   conversationId: ConversationId;
+  scopeKey?: string;
   /** IM message that should be replied to or updated when answering this prompt. */
   promptMessageId: MessageId;
   kind: PendingPromptKind;
@@ -53,6 +56,7 @@ export type TaskStatus = "waiting" | "queued" | "running" | "blocked" | "done" |
 export interface RelayTask {
   id: number;
   conversationId: ConversationId;
+  scopeKey?: string;
   workspaceName: string;
   text: string;
   inputJson?: string;

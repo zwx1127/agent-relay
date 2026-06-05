@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
 import type { Logger } from "../domain/logger.ts";
 import type { AgentCollaborationMode, AgentTaskInput } from "../ports/agent.ts";
+import { conversationIdForScope } from "../domain/scope.ts";
 import type {
   ConversationBinding,
   HomeStatusMode,
@@ -61,21 +62,29 @@ export class WorkspaceRepository {
 export class BindingRepository {
   constructor(private readonly db: Database) {}
 
-  bind(conversationId: ConversationId, workspaceName: string, updatedAt = Date.now()): void {
+  bind(scopeKey: ConversationId, workspaceName: string, updatedAt = Date.now(), conversationId: ConversationId = conversationIdForScope(String(scopeKey))): void {
     this.db.query(`
-      INSERT INTO chat_bindings (conversation_id, workspace_name, updated_at)
-      VALUES ($conversationId, $workspaceName, $updatedAt)
-      ON CONFLICT(conversation_id) DO UPDATE SET workspace_name = excluded.workspace_name, updated_at = excluded.updated_at
-    `).run({ $conversationId: String(conversationId), $workspaceName: workspaceName, $updatedAt: updatedAt });
+      INSERT INTO chat_bindings (scope_key, conversation_id, workspace_name, updated_at)
+      VALUES ($scopeKey, $conversationId, $workspaceName, $updatedAt)
+      ON CONFLICT(scope_key) DO UPDATE SET
+        conversation_id = excluded.conversation_id,
+        workspace_name = excluded.workspace_name,
+        updated_at = excluded.updated_at
+    `).run({ $scopeKey: String(scopeKey), $conversationId: String(conversationId), $workspaceName: workspaceName, $updatedAt: updatedAt });
   }
 
-  get(conversationId: ConversationId): ConversationBinding | undefined {
-    const row = this.db.query<BindingRow, [string]>("SELECT conversation_id, workspace_name, updated_at FROM chat_bindings WHERE conversation_id = ?").get(String(conversationId));
-    return row ? { conversationId: row.conversation_id, workspaceName: row.workspace_name, updatedAt: row.updated_at } : undefined;
+  get(scopeKey: ConversationId): ConversationBinding | undefined {
+    const row = this.db.query<BindingRow, [string]>("SELECT scope_key, conversation_id, workspace_name, updated_at FROM chat_bindings WHERE scope_key = ?").get(String(scopeKey));
+    return row ? {
+      ...(row.scope_key !== row.conversation_id ? { scopeKey: row.scope_key } : {}),
+      conversationId: row.conversation_id,
+      workspaceName: row.workspace_name,
+      updatedAt: row.updated_at,
+    } : undefined;
   }
 
-  clear(conversationId: ConversationId): void {
-    this.db.query("DELETE FROM chat_bindings WHERE conversation_id = ?").run(String(conversationId));
+  clear(scopeKey: ConversationId): void {
+    this.db.query("DELETE FROM chat_bindings WHERE scope_key = ?").run(String(scopeKey));
   }
 
   clearForWorkspace(workspaceName: string): void {
@@ -86,11 +95,13 @@ export class BindingRepository {
 export class SessionRepository {
   constructor(private readonly db: Database, private readonly logger: Logger) {}
 
-  markStarted(sessionKey: string, conversationId: ConversationId, workspaceName: string, startedAt = Date.now(), threadId?: string): void {
+  markStarted(sessionKey: string, conversationId: ConversationId, workspaceName: string, startedAt = Date.now(), threadId?: string, scopeKey = String(conversationId)): void {
     this.db.query(`
-      INSERT INTO agent_sessions (session_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id)
-      VALUES ($sessionKey, $conversationId, $workspaceName, 'running', $startedAt, NULL, $threadId)
+      INSERT INTO agent_sessions (session_key, scope_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id)
+      VALUES ($sessionKey, $scopeKey, $conversationId, $workspaceName, 'running', $startedAt, NULL, $threadId)
       ON CONFLICT(session_key) DO UPDATE SET
+        scope_key = excluded.scope_key,
+        conversation_id = excluded.conversation_id,
         status = 'running',
         started_at = excluded.started_at,
         stopped_at = NULL,
@@ -99,7 +110,7 @@ export class SessionRepository {
         thread_id = COALESCE(excluded.thread_id, agent_sessions.thread_id),
         collaboration_mode = 'default',
         collaboration_thread_id = NULL
-    `).run({ $sessionKey: sessionKey, $conversationId: String(conversationId), $workspaceName: workspaceName, $startedAt: startedAt, $threadId: threadId ?? null });
+    `).run({ $sessionKey: sessionKey, $scopeKey: scopeKey, $conversationId: String(conversationId), $workspaceName: workspaceName, $startedAt: startedAt, $threadId: threadId ?? null });
     this.logger.info("store.session_marked_started", { session_key: sessionKey, conversation_id: conversationId, workspace: workspaceName });
   }
 
@@ -142,7 +153,7 @@ export class SessionRepository {
 
   get(sessionKey: string): AgentSessionRow | undefined {
     const row = this.db.query<AgentSessionRow, [string]>(`
-      SELECT session_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode, collaboration_thread_id
+      SELECT session_key, scope_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode, collaboration_thread_id
       FROM agent_sessions
       WHERE session_key = ?
     `).get(sessionKey);
@@ -151,7 +162,7 @@ export class SessionRepository {
 
   listRunning(): AgentSessionRow[] {
     return this.db.query<AgentSessionRow, []>(`
-      SELECT session_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode, collaboration_thread_id
+      SELECT session_key, scope_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode, collaboration_thread_id
       FROM agent_sessions
       WHERE status = 'running'
       ORDER BY started_at DESC
@@ -163,10 +174,12 @@ export class TranscriptRepository {
   constructor(private readonly db: Database) {}
 
   append(event: TranscriptEvent): void {
+    const scopeKey = event.scopeKey ?? String(event.conversationId);
     this.db.query(`
-      INSERT INTO transcript_events (conversation_id, workspace_name, role, text, created_at)
-      VALUES ($conversationId, $workspaceName, $role, $text, $createdAt)
+      INSERT INTO transcript_events (scope_key, conversation_id, workspace_name, role, text, created_at)
+      VALUES ($scopeKey, $conversationId, $workspaceName, $role, $text, $createdAt)
     `).run({
+      $scopeKey: scopeKey,
       $conversationId: String(event.conversationId),
       $workspaceName: event.workspaceName,
       $role: event.role,
@@ -175,14 +188,21 @@ export class TranscriptRepository {
     });
   }
 
-  latest(conversationId: ConversationId, workspaceName: string, role: TranscriptRole): TranscriptEvent | undefined {
+  latest(scopeKey: ConversationId, workspaceName: string, role: TranscriptRole): TranscriptEvent | undefined {
     const row = this.db.query<TranscriptRow, [string, string, string]>(`
-      SELECT conversation_id, text, created_at FROM transcript_events
-      WHERE conversation_id = ? AND workspace_name = ? AND role = ?
+      SELECT scope_key, conversation_id, text, created_at FROM transcript_events
+      WHERE scope_key = ? AND workspace_name = ? AND role = ?
       ORDER BY id DESC LIMIT 1
-    `).get(String(conversationId), workspaceName, role);
+    `).get(String(scopeKey), workspaceName, role);
     return row
-      ? { conversationId: row.conversation_id, workspaceName, role, text: row.text, createdAt: row.created_at ?? 0 }
+      ? {
+        conversationId: row.conversation_id,
+        ...(row.scope_key && row.scope_key !== row.conversation_id ? { scopeKey: row.scope_key } : {}),
+        workspaceName,
+        role,
+        text: row.text,
+        createdAt: row.created_at ?? 0,
+      }
       : undefined;
   }
 }
@@ -191,16 +211,19 @@ export class PromptRepository {
   constructor(private readonly db: Database) {}
 
   set(prompt: PendingPrompt): void {
+    const scopeKey = prompt.scopeKey ?? String(prompt.conversationId);
     this.db.query(`
-      INSERT INTO pending_prompts (conversation_id, prompt_message_id, kind, created_at, session_key, payload_json, expires_at)
-      VALUES ($conversationId, $promptMessageId, $kind, $createdAt, $sessionKey, $payloadJson, $expiresAt)
-      ON CONFLICT(conversation_id, prompt_message_id) DO UPDATE SET
+      INSERT INTO pending_prompts (scope_key, conversation_id, prompt_message_id, kind, created_at, session_key, payload_json, expires_at)
+      VALUES ($scopeKey, $conversationId, $promptMessageId, $kind, $createdAt, $sessionKey, $payloadJson, $expiresAt)
+      ON CONFLICT(scope_key, prompt_message_id) DO UPDATE SET
+        conversation_id = excluded.conversation_id,
         kind = excluded.kind,
         created_at = excluded.created_at,
         session_key = excluded.session_key,
         payload_json = excluded.payload_json,
         expires_at = excluded.expires_at
     `).run({
+      $scopeKey: scopeKey,
       $conversationId: String(prompt.conversationId),
       $promptMessageId: String(prompt.promptMessageId),
       $kind: prompt.kind,
@@ -211,33 +234,33 @@ export class PromptRepository {
     });
   }
 
-  get(conversationId: ConversationId, promptMessageId: MessageId): PendingPrompt | undefined {
+  get(scopeKey: ConversationId, promptMessageId: MessageId): PendingPrompt | undefined {
     const row = this.db.query<PendingPromptRow, [string, string]>(`
-      SELECT conversation_id, prompt_message_id, kind, created_at, session_key, payload_json, expires_at
+      SELECT scope_key, conversation_id, prompt_message_id, kind, created_at, session_key, payload_json, expires_at
       FROM pending_prompts
-      WHERE conversation_id = ? AND prompt_message_id = ?
-    `).get(String(conversationId), String(promptMessageId));
+      WHERE scope_key = ? AND prompt_message_id = ?
+    `).get(String(scopeKey), String(promptMessageId));
     return row ? rowToPendingPrompt(row) : undefined;
   }
 
-  latest(conversationId: ConversationId, kinds: PendingPrompt["kind"][] = [], now = Date.now()): PendingPrompt | undefined {
+  latest(scopeKey: ConversationId, kinds: PendingPrompt["kind"][] = [], now = Date.now()): PendingPrompt | undefined {
     // Expired prompts are ignored here rather than eagerly deleted so callback
     // handlers can still produce a clear stale/expired response when needed.
     const kindFilter = kinds.length > 0 ? `AND kind IN (${kinds.map(() => "?").join(", ")})` : "";
     const row = this.db.query<PendingPromptRow, any>(`
-      SELECT conversation_id, prompt_message_id, kind, created_at, session_key, payload_json, expires_at
+      SELECT scope_key, conversation_id, prompt_message_id, kind, created_at, session_key, payload_json, expires_at
       FROM pending_prompts
-      WHERE conversation_id = ?
+      WHERE scope_key = ?
         ${kindFilter}
         AND (expires_at IS NULL OR expires_at > ?)
       ORDER BY created_at DESC, prompt_message_id DESC
       LIMIT 1
-    `).get(String(conversationId), ...kinds, now);
+    `).get(String(scopeKey), ...kinds, now);
     return row ? rowToPendingPrompt(row) : undefined;
   }
 
-  delete(conversationId: ConversationId, promptMessageId: MessageId): void {
-    this.db.query("DELETE FROM pending_prompts WHERE conversation_id = ? AND prompt_message_id = ?").run(String(conversationId), String(promptMessageId));
+  delete(scopeKey: ConversationId, promptMessageId: MessageId): void {
+    this.db.query("DELETE FROM pending_prompts WHERE scope_key = ? AND prompt_message_id = ?").run(String(scopeKey), String(promptMessageId));
   }
 
   deleteForSession(sessionKey: string, kinds: PendingPrompt["kind"][] = []): number {
@@ -261,10 +284,12 @@ export class PagedOutputRepository {
     // Paged output can be large; prune expired pages opportunistically before
     // storing a new one to keep the local SQLite file bounded.
     this.prune(Date.now());
+    const scopeKey = output.scopeKey ?? String(output.conversationId);
     this.db.query(`
-      INSERT INTO paged_outputs (token, conversation_id, session_key, text, created_at, expires_at)
-      VALUES ($token, $conversationId, $sessionKey, $text, $createdAt, $expiresAt)
+      INSERT INTO paged_outputs (token, scope_key, conversation_id, session_key, text, created_at, expires_at)
+      VALUES ($token, $scopeKey, $conversationId, $sessionKey, $text, $createdAt, $expiresAt)
       ON CONFLICT(token) DO UPDATE SET
+        scope_key = excluded.scope_key,
         conversation_id = excluded.conversation_id,
         session_key = excluded.session_key,
         text = excluded.text,
@@ -272,6 +297,7 @@ export class PagedOutputRepository {
         expires_at = excluded.expires_at
     `).run({
       $token: output.token,
+      $scopeKey: scopeKey,
       $conversationId: String(output.conversationId),
       $sessionKey: output.sessionKey,
       $text: output.text,
@@ -282,7 +308,7 @@ export class PagedOutputRepository {
 
   get(token: string): PagedOutput | undefined {
     const row = this.db.query<PagedOutputRow, [string]>(`
-      SELECT token, conversation_id, session_key, text, created_at, expires_at
+      SELECT token, scope_key, conversation_id, session_key, text, created_at, expires_at
       FROM paged_outputs
       WHERE token = ?
     `).get(token);
@@ -301,30 +327,53 @@ export class PagedOutputRepository {
 export class ChatUiRepository {
   constructor(private readonly db: Database) {}
 
-  getConsoleMessageId(conversationId: ConversationId): MessageId | undefined {
-    const row = this.db.query<ChatUiStateRow, [string]>("SELECT conversation_id, console_message_id FROM chat_ui_state WHERE conversation_id = ?").get(String(conversationId));
+  getConsoleMessageId(scopeKey: ConversationId): MessageId | undefined {
+    const row = this.db.query<ChatUiStateRow, [string]>("SELECT scope_key, conversation_id, console_message_id FROM chat_ui_state WHERE scope_key = ?").get(String(scopeKey));
     return row?.console_message_id ?? undefined;
   }
 
-  setConsoleMessageId(conversationId: ConversationId, messageId: MessageId): void {
+  setConsoleMessageId(scopeKey: ConversationId, messageId: MessageId, conversationId: ConversationId = conversationIdForScope(String(scopeKey))): void {
     this.db.query(`
-      INSERT INTO chat_ui_state (conversation_id, console_message_id)
-      VALUES (?, ?)
-      ON CONFLICT(conversation_id) DO UPDATE SET console_message_id = excluded.console_message_id
-    `).run(String(conversationId), String(messageId));
+      INSERT INTO chat_ui_state (scope_key, conversation_id, console_message_id)
+      VALUES (?, ?, ?)
+      ON CONFLICT(scope_key) DO UPDATE SET
+        conversation_id = excluded.conversation_id,
+        console_message_id = excluded.console_message_id
+    `).run(String(scopeKey), String(conversationId), String(messageId));
   }
 
-  getHomeStatusMode(conversationId: ConversationId): HomeStatusMode {
-    const row = this.db.query<ChatUiStateRow, [string]>("SELECT conversation_id, home_status_mode FROM chat_ui_state WHERE conversation_id = ?").get(String(conversationId));
+  getHomeStatusMode(scopeKey: ConversationId): HomeStatusMode {
+    const row = this.db.query<ChatUiStateRow, [string]>("SELECT scope_key, conversation_id, home_status_mode FROM chat_ui_state WHERE scope_key = ?").get(String(scopeKey));
     return row?.home_status_mode === "details" ? "details" : "compact";
   }
 
-  setHomeStatusMode(conversationId: ConversationId, mode: HomeStatusMode): void {
+  setHomeStatusMode(scopeKey: ConversationId, mode: HomeStatusMode, conversationId: ConversationId = conversationIdForScope(String(scopeKey))): void {
     this.db.query(`
-      INSERT INTO chat_ui_state (conversation_id, home_status_mode)
-      VALUES (?, ?)
-      ON CONFLICT(conversation_id) DO UPDATE SET home_status_mode = excluded.home_status_mode
-    `).run(conversationId, mode);
+      INSERT INTO chat_ui_state (scope_key, conversation_id, home_status_mode)
+      VALUES (?, ?, ?)
+      ON CONFLICT(scope_key) DO UPDATE SET
+        conversation_id = excluded.conversation_id,
+        home_status_mode = excluded.home_status_mode
+    `).run(String(scopeKey), String(conversationId), mode);
+  }
+
+  setControlMessage(conversationId: ConversationId, messageId: MessageId, scopeKey: string, kind = "control"): void {
+    this.db.query(`
+      INSERT INTO control_messages (conversation_id, message_id, scope_key, kind, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(conversation_id, message_id) DO UPDATE SET
+        scope_key = excluded.scope_key,
+        kind = excluded.kind,
+        updated_at = excluded.updated_at
+    `).run(String(conversationId), String(messageId), scopeKey, kind, Date.now());
+  }
+
+  getControlMessageScopeKey(conversationId: ConversationId, messageId: MessageId): string | undefined {
+    const row = this.db.query<{ scope_key: string }, [string, string]>(`
+      SELECT scope_key FROM control_messages
+      WHERE conversation_id = ? AND message_id = ?
+    `).get(String(conversationId), String(messageId));
+    return row?.scope_key;
   }
 }
 
@@ -333,6 +382,7 @@ export class TaskRepository {
 
   create(task: {
     conversationId: ConversationId;
+    scopeKey?: string;
     workspaceName: string;
     text: string;
     input?: AgentTaskInput;
@@ -342,10 +392,12 @@ export class TaskRepository {
   }): RelayTask {
     const now = task.createdAt ?? Date.now();
     const inputJson = task.input ? JSON.stringify(task.input) : null;
+    const scopeKey = task.scopeKey ?? String(task.conversationId);
     const result = this.db.query(`
-      INSERT INTO tasks (conversation_id, workspace_name, text, input_json, status, created_at, updated_at, user_message_id)
-      VALUES ($conversationId, $workspaceName, $text, $inputJson, $status, $createdAt, $updatedAt, $userMessageId)
+      INSERT INTO tasks (scope_key, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, user_message_id)
+      VALUES ($scopeKey, $conversationId, $workspaceName, $text, $inputJson, $status, $createdAt, $updatedAt, $userMessageId)
     `).run({
+      $scopeKey: scopeKey,
       $conversationId: String(task.conversationId),
       $workspaceName: task.workspaceName,
       $text: task.text,
@@ -361,50 +413,50 @@ export class TaskRepository {
 
   get(id: number): RelayTask | undefined {
     const row = this.db.query<TaskRow, [number]>(`
-      SELECT id, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+      SELECT id, scope_key, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
       FROM tasks WHERE id = ?
     `).get(id);
     return row ? rowToTask(row) : undefined;
   }
 
-  list(conversationId: ConversationId, workspaceName: string, statuses?: TaskStatus[], limit = 20): RelayTask[] {
+  list(scopeKey: ConversationId, workspaceName: string, statuses?: TaskStatus[], limit = 20): RelayTask[] {
     const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
     if (statuses && statuses.length > 0) {
       // Status-filtered task reads are used for dispatch order, so return oldest
       // first. Unfiltered history below is newest first for status displays.
       const placeholders = statuses.map(() => "?").join(", ");
       return this.db.query<TaskRow, any>(`
-        SELECT id, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+        SELECT id, scope_key, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
         FROM tasks
-        WHERE conversation_id = ? AND workspace_name = ? AND status IN (${placeholders})
+        WHERE scope_key = ? AND workspace_name = ? AND status IN (${placeholders})
         ORDER BY id ASC LIMIT ?
-    `).all(String(conversationId), workspaceName, ...statuses, safeLimit).map(rowToTask);
+    `).all(String(scopeKey), workspaceName, ...statuses, safeLimit).map(rowToTask);
     }
     return this.db.query<TaskRow, [string, string, number]>(`
-      SELECT id, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+      SELECT id, scope_key, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
       FROM tasks
-      WHERE conversation_id = ? AND workspace_name = ?
+      WHERE scope_key = ? AND workspace_name = ?
       ORDER BY id DESC LIMIT ?
-    `).all(String(conversationId), workspaceName, safeLimit).map(rowToTask);
+    `).all(String(scopeKey), workspaceName, safeLimit).map(rowToTask);
   }
 
-  nextQueued(conversationId: ConversationId, workspaceName: string): RelayTask | undefined {
+  nextQueued(scopeKey: ConversationId, workspaceName: string): RelayTask | undefined {
     const row = this.db.query<TaskRow, [string, string]>(`
-      SELECT id, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+      SELECT id, scope_key, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
       FROM tasks
-      WHERE conversation_id = ? AND workspace_name = ? AND status = 'queued'
+      WHERE scope_key = ? AND workspace_name = ? AND status = 'queued'
       ORDER BY id ASC LIMIT 1
-    `).get(String(conversationId), workspaceName);
+    `).get(String(scopeKey), workspaceName);
     return row ? rowToTask(row) : undefined;
   }
 
-  active(conversationId: ConversationId, workspaceName: string): RelayTask | undefined {
+  active(scopeKey: ConversationId, workspaceName: string): RelayTask | undefined {
     const row = this.db.query<TaskRow, [string, string]>(`
-      SELECT id, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
+      SELECT id, scope_key, conversation_id, workspace_name, text, input_json, status, created_at, updated_at, turn_id, user_message_id, status_message_id
       FROM tasks
-      WHERE conversation_id = ? AND workspace_name = ? AND status IN ('waiting', 'running', 'blocked')
+      WHERE scope_key = ? AND workspace_name = ? AND status IN ('waiting', 'running', 'blocked')
       ORDER BY id DESC LIMIT 1
-    `).get(String(conversationId), workspaceName);
+    `).get(String(scopeKey), workspaceName);
     return row ? rowToTask(row) : undefined;
   }
 
@@ -424,36 +476,36 @@ export class TaskRepository {
     );
   }
 
-  updateByTurn(conversationId: ConversationId, workspaceName: string, turnId: string, fromStatuses: TaskStatus[], status: TaskStatus): RelayTask[] {
+  updateByTurn(scopeKey: ConversationId, workspaceName: string, turnId: string, fromStatuses: TaskStatus[], status: TaskStatus): RelayTask[] {
     if (fromStatuses.length === 0) return [];
     // SQLite cannot bind a dynamic status list and turn id into a reusable typed
     // query cleanly here, so narrow by status in SQL and by turn id in memory.
-    const tasks = this.list(conversationId, workspaceName, fromStatuses, 100).filter((task) => task.turnId === turnId);
+    const tasks = this.list(scopeKey, workspaceName, fromStatuses, 100).filter((task) => task.turnId === turnId);
     for (const task of tasks) {
       this.update(task.id, { status });
     }
     return tasks.map((task) => this.get(task.id)).filter((task): task is RelayTask => Boolean(task));
   }
 
-  updateActive(conversationId: ConversationId, workspaceName: string, status: TaskStatus): RelayTask[] {
-    return this.updateByStatus(conversationId, workspaceName, ["waiting", "running", "blocked"], status);
+  updateActive(scopeKey: ConversationId, workspaceName: string, status: TaskStatus): RelayTask[] {
+    return this.updateByStatus(scopeKey, workspaceName, ["waiting", "running", "blocked"], status);
   }
 
-  updateByStatus(conversationId: ConversationId, workspaceName: string, fromStatuses: TaskStatus[], status: TaskStatus): RelayTask[] {
-    const tasks = this.list(conversationId, workspaceName, fromStatuses, 100);
+  updateByStatus(scopeKey: ConversationId, workspaceName: string, fromStatuses: TaskStatus[], status: TaskStatus): RelayTask[] {
+    const tasks = this.list(scopeKey, workspaceName, fromStatuses, 100);
     for (const task of tasks) {
       this.update(task.id, { status });
     }
     return tasks.map((task) => this.get(task.id)).filter((task): task is RelayTask => Boolean(task));
   }
 
-  count(conversationId: ConversationId, workspaceName: string, statuses: TaskStatus[]): number {
+  count(scopeKey: ConversationId, workspaceName: string, statuses: TaskStatus[]): number {
     if (statuses.length === 0) return 0;
     const placeholders = statuses.map(() => "?").join(", ");
     const row = this.db.query<{ count: number }, any>(`
       SELECT COUNT(*) as count FROM tasks
-      WHERE conversation_id = ? AND workspace_name = ? AND status IN (${placeholders})
-    `).get(String(conversationId), workspaceName, ...statuses);
+      WHERE scope_key = ? AND workspace_name = ? AND status IN (${placeholders})
+    `).get(String(scopeKey), workspaceName, ...statuses);
     return row?.count ?? 0;
   }
 }

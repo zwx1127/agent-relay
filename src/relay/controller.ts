@@ -5,6 +5,7 @@ import type { SendFileCapabilityRequest } from "./capabilities/send-file.ts";
 import type { MentionAgentCapabilityRequest } from "./capabilities/mention-agent.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
 import { parseSessionKey, sessionKey } from "../domain/session.ts";
+import { chatScopeKey, parseChatScopeKey } from "../domain/scope.ts";
 import type {
   AgentTaskInput,
   AgentOutputEvent,
@@ -193,17 +194,20 @@ export class RelayController {
   }
 
   async handle(message: InboundMessage): Promise<void> {
-    await this.conversationQueue.run(message.conversationId, () => this.handleSerial(message));
+    const scopeKey = this.scopeKeyForInbound(message);
+    await this.conversationQueue.run(scopeKey, () => this.handleSerial(this.scopedMessage(message, scopeKey)));
   }
 
   private async handleSerial(message: InboundMessage): Promise<void> {
+    const scope = parseChatScopeKey(String(message.conversationId));
     if (message.kind === "callback_query") {
       await this.handleCallback(message);
       return;
     }
     if (this.shouldIgnoreUnmentionedGroupMessage(message)) {
       this.logger.info("router.group_message_ignored", {
-        conversation_id: message.conversationId,
+        conversation_id: scope.conversationId,
+        scope_key: scope.scopeKey,
         user_id: message.userId,
         message_id: message.id,
         kind: message.kind,
@@ -222,20 +226,22 @@ export class RelayController {
     const text = message.text.trim();
     const command = this.slashCommands.command(text);
     this.logger.info("router.message_received", {
-      conversation_id: message.conversationId,
+      conversation_id: scope.conversationId,
+      scope_key: scope.scopeKey,
       user_id: message.userId,
       message_id: message.id,
       text_len: message.text.length,
       command,
     });
     this.logger.debug("router.message_text", {
-      conversation_id: message.conversationId,
+      conversation_id: scope.conversationId,
+      scope_key: scope.scopeKey,
       user_id: message.userId,
       message_id: message.id,
       message_text: message.text,
     });
 
-    if (!isAuthorized(this.deps.config, message.userId, message.conversationId)) {
+    if (!isAuthorized(this.deps.config, message.userId, scope.conversationId)) {
       this.logger.warn("router.unauthorized_message", {
         conversation_id: message.conversationId,
         user_id: message.userId,
@@ -366,18 +372,20 @@ export class RelayController {
     this.logger.debug("router.agent_output_received", {
       session_key: session.sessionKey,
       conversation_id: parsed.conversationId,
+      scope_key: parsed.scopeKey,
       workspace: parsed.workspaceName,
       chunk_len: session.chunk.length,
       agent_chunk: session.chunk,
     });
     this.deps.store.appendTranscript({
       conversationId: parsed.conversationId,
+      scopeKey: parsed.scopeKey,
       workspaceName: parsed.workspaceName,
       role: "agent",
       text: session.chunk,
       createdAt: Date.now(),
     });
-    await this.bufferAgentOutput(session.sessionKey, parsed.conversationId, session.chunk, session.turnId);
+    await this.bufferAgentOutput(session.sessionKey, parsed.scopeKey, session.chunk, session.turnId);
   }
 
   async handleAgentExit(sessionKeyValue: string, exitText: string): Promise<void> {
@@ -403,13 +411,15 @@ export class RelayController {
     this.deps.store.markSessionStopped(sessionKeyValue);
     await this.finalizeSessionOutput(sessionKeyValue);
     await this.failActiveTasks(sessionKeyValue);
-    await this.sendRendered(parsed.conversationId, messageWithTitle(exitText));
+    await this.sendRendered(parsed.scopeKey, messageWithTitle(exitText));
   }
 
   private async handleCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
+    const scope = parseChatScopeKey(String(message.conversationId));
     const consoleMessageId = this.deps.store.getConsoleMessageId(message.conversationId);
     this.logger.info("router.callback_received", {
-      conversation_id: message.conversationId,
+      conversation_id: scope.conversationId,
+      scope_key: scope.scopeKey,
       user_id: message.userId,
       callback_query_id: message.callbackQueryId,
       message_id: message.messageId,
@@ -418,9 +428,10 @@ export class RelayController {
       data: message.data,
     });
 
-    if (!isAuthorized(this.deps.config, message.userId, message.conversationId)) {
+    if (!isAuthorized(this.deps.config, message.userId, scope.conversationId)) {
       this.logger.warn("router.unauthorized_callback", {
-        conversation_id: message.conversationId,
+        conversation_id: scope.conversationId,
+        scope_key: scope.scopeKey,
         user_id: message.userId,
         callback_query_id: message.callbackQueryId,
       });
@@ -434,7 +445,8 @@ export class RelayController {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       this.logger.error("router.callback_failed", {
-        conversation_id: message.conversationId,
+        conversation_id: scope.conversationId,
+        scope_key: scope.scopeKey,
         user_id: message.userId,
         callback_query_id: message.callbackQueryId,
         data: message.data,
@@ -470,23 +482,28 @@ export class RelayController {
     }
     const { sessionKey: sessionKeyValue, conversationId, workspaceName } = this.resolveCapabilitySession(input);
     const label = peer.name ?? peer.id;
-    await this.deps.adapter.sendMessage(conversationId, input.message, {
+    const scope = parseChatScopeKey(String(conversationId));
+    const result = await this.deps.adapter.sendMessage(scope.conversationId, input.message, {
       mentions: [{
         label,
         ...(peer.telegramUsername ? { telegramUsername: peer.telegramUsername } : {}),
         ...(peer.larkOpenId ? { larkOpenId: peer.larkOpenId } : {}),
         ...(peer.larkUserId ? { larkUserId: peer.larkUserId } : {}),
       }],
+      ...(scope.topic ? { topic: scope.topic } : {}),
     });
+    if (result.messageId) this.deps.store.setControlMessage(scope.conversationId, result.messageId, scope.scopeKey, "message");
     this.deps.store.appendTranscript({
-      conversationId,
+      conversationId: scope.conversationId,
+      scopeKey: scope.scopeKey,
       workspaceName,
       role: "agent",
       text: `[mentioned peer ${peer.id} via ${sessionKeyValue}]\n${input.message}\n`,
       createdAt: Date.now(),
     });
     this.logger.info("router.peer_agent_mentioned", {
-      conversation_id: conversationId,
+      conversation_id: scope.conversationId,
+      scope_key: scope.scopeKey,
       workspace: workspaceName,
       session_key: sessionKeyValue,
       peer_id: peer.id,
@@ -504,7 +521,7 @@ export class RelayController {
       if (!parsed) throw new Error("sessionKey is invalid");
       const status = this.deps.agent.getStatus(input.sessionKey);
       if (!status?.running) throw new Error("session is not running");
-      return { sessionKey: input.sessionKey, conversationId: parsed.conversationId, workspaceName: parsed.workspaceName };
+      return { sessionKey: input.sessionKey, conversationId: parsed.scopeKey, workspaceName: parsed.workspaceName };
     }
 
     // Helper calls normally pass cwd instead of a session key. Match it to one
@@ -518,7 +535,7 @@ export class RelayController {
         if (cwd && !pathContains(workspace.path, cwd)) return [];
         return [{
           sessionKey: session.session_key,
-          conversationId: session.conversation_id,
+          conversationId: session.scope_key ?? session.conversation_id,
           workspaceName: session.workspace_name,
         }];
       });
@@ -585,7 +602,9 @@ export class RelayController {
     body: string | RenderedTelegramText,
     replyMarkup: InlineKeyboardMarkup,
   ): Promise<RenderCallbackPageResult> {
-    return await this.renderer.renderCallbackPage(message, body, replyMarkup);
+    const result = await this.renderer.renderCallbackPage(message, body, replyMarkup);
+    this.trackControlMessageForScope(message.conversationId, result.messageId, "control");
+    return result;
   }
 
   private async renderStrictCallbackPage(
@@ -593,7 +612,9 @@ export class RelayController {
     body: string | RenderedTelegramText,
     replyMarkup: InlineKeyboardMarkup,
   ): Promise<RenderCallbackPageResult> {
-    return await this.renderer.renderStrictCallbackPage(message, body, replyMarkup);
+    const result = await this.renderer.renderStrictCallbackPage(message, body, replyMarkup);
+    this.trackControlMessageForScope(message.conversationId, result.messageId, "control");
+    return result;
   }
 
   private async tryRenderCallbackPage(
@@ -610,7 +631,12 @@ export class RelayController {
   }
 
   private async sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: Omit<SendMessageOptions, "entities" | "parseMode"> = {}): Promise<{ messageId?: MessageId }> {
-    return await this.renderer.sendRendered(conversationId, rendered, options);
+    const result = await this.renderer.sendRendered(conversationId, rendered, options);
+    if (result.messageId) {
+      const scope = parseChatScopeKey(String(conversationId));
+      this.deps.store.setControlMessage(scope.conversationId, result.messageId, scope.scopeKey, options.replyMarkup ? "control" : "message");
+    }
+    return result;
   }
 
   private async trySendRendered(
@@ -732,10 +758,30 @@ export class RelayController {
   }
 
   private conversationIdForSessionKey(sessionKeyValue: string): ConversationId | undefined {
-    return parseSessionKey(sessionKeyValue)?.conversationId;
+    return parseSessionKey(sessionKeyValue)?.scopeKey;
+  }
+
+  private trackControlMessageForScope(scopeKey: ConversationId, messageId: MessageId | undefined, kind = "control"): void {
+    if (!messageId) return;
+    const scope = parseChatScopeKey(String(scopeKey));
+    this.deps.store.setControlMessage(scope.conversationId, messageId, scope.scopeKey, kind);
   }
 
   private readonly lastUserMessageIds = new Map<string, MessageId>();
+
+  private scopeKeyForInbound(message: InboundMessage): string {
+    if (message.scopeKey) return message.scopeKey;
+    if (message.topic) return chatScopeKey(message.conversationId, message.topic);
+    if (message.kind === "callback_query" && message.messageId) {
+      return this.deps.store.getControlMessageScopeKey(message.conversationId, message.messageId)
+        ?? chatScopeKey(message.conversationId);
+    }
+    return chatScopeKey(message.conversationId);
+  }
+
+  private scopedMessage<T extends InboundMessage>(message: T, scopeKey: string): T {
+    return { ...message, conversationId: scopeKey, scopeKey } as T;
+  }
 
   private async expireCallbackPrompt(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {
     if (message.messageId) this.deps.store.deletePendingPrompt(message.conversationId, message.messageId);

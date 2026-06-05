@@ -112,14 +112,16 @@ export class FakeAgent implements AgentDriver {
   staleInterrupt = false;
   failStartForThreadIds = new Map<string, Error>();
 
-  async start(options: { conversationId: ConversationId; workspaceName: string; workspacePath: string; threadId?: string }): Promise<AgentSessionStatus> {
+  async start(options: { conversationId: ConversationId; scopeKey?: string; workspaceName: string; workspacePath: string; threadId?: string }): Promise<AgentSessionStatus> {
     if (options.threadId && this.failStartForThreadIds.has(options.threadId)) {
       throw this.failStartForThreadIds.get(options.threadId)!;
     }
-    const key = sessionKey(options.conversationId, options.workspaceName);
+    const scopeKey = options.scopeKey ?? String(options.conversationId);
+    const key = sessionKey(scopeKey, options.workspaceName);
     const status = {
       sessionKey: key,
       conversationId: options.conversationId,
+      scopeKey,
       workspaceName: options.workspaceName,
       workspacePath: options.workspacePath,
       running: true,

@@ -1,6 +1,7 @@
 import type { ConversationId } from "../domain/ids.ts";
 import type { Logger } from "../domain/logger.ts";
 import { sessionKey } from "../domain/session.ts";
+import { parseChatScopeKey } from "../domain/scope.ts";
 import { isRealDirectory } from "../domain/workspace.ts";
 import type { AgentDriver, AgentSessionStatus } from "../ports/agent.ts";
 import type { RelayStore } from "../storage/store.ts";
@@ -12,7 +13,7 @@ export interface RelaySessionServiceDeps {
   store: RelayStore;
   agent: AgentDriver;
   logger: Logger;
-  currentWorkspace(conversationId: ConversationId): WorkspaceRecord | undefined;
+  currentWorkspace(scopeKey: ConversationId): WorkspaceRecord | undefined;
 }
 
 export class RelaySessionService {
@@ -25,7 +26,8 @@ export class RelaySessionService {
     options: { resumePrevious?: boolean } = {},
   ): Promise<AgentSessionStatus> {
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
-    const key = sessionKey(conversationId, workspace.name);
+    const scope = parseChatScopeKey(String(conversationId));
+    const key = sessionKey(scope.scopeKey, workspace.name);
     const existing = this.deps.agent.getStatus(key);
     if (existing?.running && !threadId) return existing;
 
@@ -36,7 +38,8 @@ export class RelaySessionService {
     let status: AgentSessionStatus;
     try {
       status = await this.deps.agent.start({
-        conversationId,
+        conversationId: scope.conversationId,
+        scopeKey: scope.scopeKey,
         workspaceName: workspace.name,
         workspacePath: workspace.path,
         threadId: resumeThreadId,
@@ -52,42 +55,46 @@ export class RelaySessionService {
       });
       this.deps.store.clearSessionThreadId(key);
       status = await this.deps.agent.start({
-        conversationId,
+        conversationId: scope.conversationId,
+        scopeKey: scope.scopeKey,
         workspaceName: workspace.name,
         workspacePath: workspace.path,
       });
     }
-    this.deps.store.markSessionStarted(key, conversationId, workspace.name, Date.now(), status.threadId);
-    this.deps.logger.info("router.session_started", { conversation_id: conversationId, workspace: workspace.name, session_key: key, thread_id: status.threadId });
+    this.deps.store.markSessionStarted(key, scope.conversationId, workspace.name, Date.now(), status.threadId, scope.scopeKey);
+    this.deps.logger.info("router.session_started", { conversation_id: scope.conversationId, scope_key: scope.scopeKey, workspace: workspace.name, session_key: key, thread_id: status.threadId });
     return status;
   }
 
   appendSystem(conversationId: ConversationId, text: string): void {
-    const workspace = this.deps.currentWorkspace(conversationId);
+    const scope = parseChatScopeKey(String(conversationId));
+    const workspace = this.deps.currentWorkspace(scope.scopeKey);
     if (!workspace) return;
-    this.deps.store.appendTranscript({ conversationId, workspaceName: workspace.name, role: "system", text, createdAt: Date.now() });
+    this.deps.store.appendTranscript({ conversationId: scope.conversationId, scopeKey: scope.scopeKey, workspaceName: workspace.name, role: "system", text, createdAt: Date.now() });
   }
 
   statusView(conversationId: ConversationId): StatusView {
-    const workspace = this.deps.currentWorkspace(conversationId);
+    const scope = parseChatScopeKey(String(conversationId));
+    const workspace = this.deps.currentWorkspace(scope.scopeKey);
     if (!workspace) return {};
-    const status = this.deps.agent.getStatus(sessionKey(conversationId, workspace.name));
-    const recentOutput = this.deps.store.latestTranscriptEvent(conversationId, workspace.name, "agent");
-    const recentError = this.deps.store.latestTranscriptEvent(conversationId, workspace.name, "system");
+    const status = this.deps.agent.getStatus(sessionKey(scope.scopeKey, workspace.name));
+    const recentOutput = this.deps.store.latestTranscriptEvent(scope.scopeKey, workspace.name, "agent");
+    const recentError = this.deps.store.latestTranscriptEvent(scope.scopeKey, workspace.name, "system");
     return statusViewFromParts(
       workspace,
       status,
       recentOutput?.createdAt,
       recentError?.text,
-      this.deps.store.countTasks(conversationId, workspace.name, ["waiting"]),
-      this.deps.store.countTasks(conversationId, workspace.name, ["queued"]),
-      this.deps.store.countTasks(conversationId, workspace.name, ["blocked"]),
-      this.deps.store.activeTask(conversationId, workspace.name),
+      this.deps.store.countTasks(scope.scopeKey, workspace.name, ["waiting"]),
+      this.deps.store.countTasks(scope.scopeKey, workspace.name, ["queued"]),
+      this.deps.store.countTasks(scope.scopeKey, workspace.name, ["blocked"]),
+      this.deps.store.activeTask(scope.scopeKey, workspace.name),
     );
   }
 
   hasTaskCreatedAfter(conversationId: ConversationId, workspaceName: string, timestamp: number): boolean {
-    return this.deps.store.listTasks(conversationId, workspaceName, undefined, 1)
+    const scope = parseChatScopeKey(String(conversationId));
+    return this.deps.store.listTasks(scope.scopeKey, workspaceName, undefined, 1)
       .some((task: RelayTask) => task.createdAt > timestamp);
   }
 }

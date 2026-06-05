@@ -1,4 +1,5 @@
 import type { ConversationId, MessageId, ProviderId, UserId } from "../domain/ids.ts";
+import type { ImTopicContext } from "../domain/scope.ts";
 
 export type TextParseMode = "HTML";
 
@@ -38,6 +39,7 @@ export interface SendMessageOptions {
   inputFieldPlaceholder?: string;
   disableWebPagePreview?: boolean;
   replyToMessageId?: MessageId;
+  topic?: ImTopicContext;
 }
 
 export interface EditMessageTextOptions extends SendMessageOptions {
@@ -51,12 +53,14 @@ export interface SendMessageResult {
 export interface SendPhotoOptions {
   caption?: string;
   replyToMessageId?: MessageId;
+  topic?: ImTopicContext;
 }
 
 export interface SendFileOptions {
   filename?: string;
   caption?: string;
   replyToMessageId?: MessageId;
+  topic?: ImTopicContext;
 }
 
 export interface InboundMediaFile {
@@ -108,6 +112,8 @@ export interface InboundMessageContext {
   mentionedBot?: boolean;
   mentionAll?: boolean;
   mentions?: InboundMention[];
+  topic?: ImTopicContext;
+  scopeKey?: string;
 }
 
 export interface MediaInboundMessage extends InboundMessageContext {
@@ -155,6 +161,8 @@ export interface CallbackInboundMessage {
   callbackQueryId: string;
   messageId?: MessageId;
   data: string;
+  topic?: ImTopicContext;
+  scopeKey?: string;
   date?: number;
 }
 
@@ -183,7 +191,7 @@ export interface ImAdapter {
   editMessageText?(conversationId: ConversationId, text: string, options: EditMessageTextOptions): Promise<void>;
   deleteMessage?(conversationId: ConversationId, messageId: MessageId): Promise<void>;
   answerCallbackQuery?(callbackQueryId: string, text?: string): Promise<void>;
-  sendChatAction?(conversationId: ConversationId, action?: "typing"): Promise<void>;
+  sendChatAction?(conversationId: ConversationId, action?: "typing", options?: { topic?: ImTopicContext }): Promise<void>;
   setMessageReaction?(conversationId: ConversationId, messageId: MessageId, emoji?: string): Promise<void>;
   downloadFile?(fileId: string, options?: DownloadFileOptions): Promise<DownloadedFile>;
 }

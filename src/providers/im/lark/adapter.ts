@@ -345,6 +345,7 @@ export class LarkAdapter implements ImAdapter {
         conversationId: message.chatId,
         userId: message.senderId,
         ...larkMessageContext(message),
+        ...larkTopicContext(message),
         photos: imageResources.map(resourceToPhoto),
         ...(captionFromMessage(message) ? { caption: captionFromMessage(message) } : {}),
         ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
@@ -361,6 +362,7 @@ export class LarkAdapter implements ImAdapter {
         conversationId: message.chatId,
         userId: message.senderId,
         ...larkMessageContext(message),
+        ...larkTopicContext(message),
         file: {
           fileId: fileResource.fileKey,
           ...(fileResource.fileName ? { fileName: fileResource.fileName } : {}),
@@ -380,6 +382,7 @@ export class LarkAdapter implements ImAdapter {
       conversationId: message.chatId,
       userId: message.senderId,
       ...larkMessageContext(message),
+      ...larkTopicContext(message),
       text: stripLarkBotMentions(text, message),
       ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
       date: Math.floor(message.createTime / 1000),
@@ -387,9 +390,11 @@ export class LarkAdapter implements ImAdapter {
   }
 }
 
-function sendOptionsFor(options: Pick<SendMessageOptions | SendPhotoOptions | SendFileOptions, "replyToMessageId"> & Partial<Pick<SendMessageOptions, "mentions">>): SendOptions {
+function sendOptionsFor(options: Pick<SendMessageOptions | SendPhotoOptions | SendFileOptions, "replyToMessageId" | "topic"> & Partial<Pick<SendMessageOptions, "mentions">>): SendOptions {
+  const topic = options.topic?.provider === "lark" ? options.topic : undefined;
   return {
-    ...(options.replyToMessageId ? { replyTo: String(options.replyToMessageId) } : {}),
+    ...(options.replyToMessageId ? { replyTo: String(options.replyToMessageId) } : topic ? { replyTo: String(topic.rootMessageId ?? topic.id) } : {}),
+    ...(topic ? { replyInThread: true } : {}),
     ...("mentions" in options && options.mentions?.length ? {
       mentions: options.mentions
         .filter((mention) => mention.larkOpenId || mention.larkUserId)
@@ -401,6 +406,18 @@ function sendOptionsFor(options: Pick<SendMessageOptions | SendPhotoOptions | Se
           isBot: true,
         })),
     } : {}),
+  };
+}
+
+function larkTopicContext(message: NormalizedMessage): { topic?: { provider: "lark"; id: string; rootMessageId?: string } } {
+  const id = message.threadId ?? message.rootId;
+  if (!id) return {};
+  return {
+    topic: {
+      provider: "lark",
+      id,
+      ...(message.rootId ? { rootMessageId: message.rootId } : {}),
+    },
   };
 }
 

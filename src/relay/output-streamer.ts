@@ -9,6 +9,7 @@ import { pagedOutputKeyboard } from "./ui/keyboards.ts";
 import { decoratePagedOutput } from "./ui/pagination.ts";
 import { messageWithTitle } from "./ui/text-parts.ts";
 import type { LiveOutputState, RenderCallbackPageResult, StreamTiming } from "./controller-types.ts";
+import { parseChatScopeKey } from "../domain/scope.ts";
 
 type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
 
@@ -36,6 +37,7 @@ export class OutputStreamer {
   }
 
   async buffer(sessionKeyValue: string, conversationId: ConversationId, chunk: string, turnId?: string): Promise<void> {
+    const scope = parseChatScopeKey(String(conversationId));
     let state = this.liveOutput.get(sessionKeyValue);
     if (state?.turnId && turnId && state.turnId !== turnId) {
       await this.finalize(sessionKeyValue);
@@ -43,7 +45,7 @@ export class OutputStreamer {
     }
     if (!state) {
       state = {
-        conversationId,
+        conversationId: scope.scopeKey,
         text: "",
         startedAt: Date.now(),
         segmentId: this.nextOutputSegmentId++,
@@ -58,7 +60,8 @@ export class OutputStreamer {
 
     outputState.text += chunk;
     this.deps.logger.debug("router.agent_output_buffered", {
-      conversation_id: conversationId,
+      conversation_id: scope.conversationId,
+      scope_key: scope.scopeKey,
       session_key: sessionKeyValue,
       chunk_len: chunk.length,
       buffered_len: outputState.text.length,
@@ -71,7 +74,8 @@ export class OutputStreamer {
     outputState.timer = setTimeout(() => {
       void this.flush(sessionKeyValue, segmentId).catch((error) => {
         this.deps.logger.error("router.agent_output_send_failed", {
-          conversation_id: conversationId,
+        conversation_id: scope.conversationId,
+        scope_key: scope.scopeKey,
           session_key: sessionKeyValue,
           text_len: state?.text.length ?? 0,
           error: error instanceof Error ? error : new Error(String(error)),
@@ -134,7 +138,8 @@ export class OutputStreamer {
     const rendered = renderCodexMarkdownForTelegram(snapshotText);
     const chunks = splitRenderedForTelegram(rendered, PAGE_MAX_CHARS);
     this.deps.logger.debug("router.agent_output_flushed", {
-      conversation_id: state.conversationId,
+      conversation_id: parseChatScopeKey(String(state.conversationId)).conversationId,
+      scope_key: state.conversationId,
       session_key: sessionKeyValue,
       text_len: snapshotText.length,
       chunks: chunks.length,
@@ -174,7 +179,8 @@ export class OutputStreamer {
       state.pageToken = token;
       this.deps.store.setPagedOutput({
         token,
-        conversationId: state.conversationId,
+        scopeKey: String(state.conversationId),
+        conversationId: parseChatScopeKey(String(state.conversationId)).conversationId,
         sessionKey: sessionKeyValue,
         text: snapshotText,
         createdAt: state.startedAt,
@@ -216,7 +222,8 @@ export class OutputStreamer {
     const [, token, rawPage] = payload.split(":");
     const pageIndex = Number(rawPage);
     const output = token ? this.deps.store.getPagedOutput(token) : undefined;
-    if (!output || String(output.conversationId) !== String(message.conversationId) || output.expiresAt < Date.now()) {
+    const callbackScope = parseChatScopeKey(String(message.conversationId));
+    if (!output || String(output.scopeKey ?? output.conversationId) !== callbackScope.scopeKey || output.expiresAt < Date.now()) {
       if (token) this.deps.store.deletePagedOutput(token);
       await this.deps.renderCallbackPage(message, messageWithTitle("Page expired."), { inline_keyboard: [] });
       return;

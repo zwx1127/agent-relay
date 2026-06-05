@@ -96,6 +96,7 @@ export interface AgentExitEvent {
 export interface AgentSessionStatus {
   sessionKey: string;
   conversationId: ConversationId;
+  scopeKey?: string;
   workspaceName: string;
   workspacePath: string;
   running: boolean;
@@ -124,6 +125,7 @@ export interface AgentSessionStatus {
 
 export interface StartAgentOptions {
   conversationId: ConversationId;
+  scopeKey?: string;
   workspaceName: string;
   workspacePath: string;
   threadId?: string;

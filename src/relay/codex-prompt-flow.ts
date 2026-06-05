@@ -9,6 +9,7 @@ import type {
 import type { ImAdapter, InboundMessage, InlineKeyboardMarkup, SendMessageOptions } from "../ports/im.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
 import { parseSessionKey } from "../domain/session.ts";
+import { parseChatScopeKey } from "../domain/scope.ts";
 import type { RelayStore } from "../storage/store.ts";
 import { CODEX_PROMPT_TTL_MS } from "./ui/constants.ts";
 import { codexRequestKey, shortToken } from "./ui/callback-data.ts";
@@ -31,6 +32,7 @@ type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
 
 interface PendingPrompt {
   conversationId: ConversationId;
+  scopeKey?: string;
   promptMessageId: MessageId;
   kind: "workspace_name" | "codex_user_input" | "codex_approval" | "relay_command";
   createdAt: number;
@@ -69,7 +71,7 @@ export class CodexPromptFlow {
 
     const first = event.questions[0];
     if (!first) throw new Error("Codex requested user input without questions.");
-    await this.sendCodexQuestion(parsed.conversationId, event.sessionKey, event.requestId, first, 0, token, expiresAt);
+    await this.sendCodexQuestion(parsed.scopeKey, event.sessionKey, event.requestId, first, 0, token, expiresAt);
   }
 
   async handleApprovalRequest(event: AgentApprovalRequestEvent): Promise<void> {
@@ -77,13 +79,14 @@ export class CodexPromptFlow {
     if (!parsed) return;
     const token = shortToken();
     const expiresAt = Date.now() + CODEX_PROMPT_TTL_MS;
-    const result = await this.deps.sendRendered(parsed.conversationId, formatApprovalMessage(event.title, event.body), {
+    const result = await this.deps.sendRendered(parsed.scopeKey, formatApprovalMessage(event.title, event.body), {
       replyMarkup: approvalKeyboard(token),
       disableWebPagePreview: true,
     });
     if (!result.messageId) throw new Error("IM adapter did not return an approval prompt message id.");
     this.deps.store.setPendingPrompt({
       conversationId: parsed.conversationId,
+      scopeKey: parsed.scopeKey,
       promptMessageId: result.messageId,
       kind: "codex_approval",
       createdAt: Date.now(),
@@ -110,6 +113,7 @@ export class CodexPromptFlow {
     token: string,
     expiresAt: number,
   ): Promise<void> {
+    const scope = parseChatScopeKey(String(conversationId));
     const options = question.options ?? [];
     const request = this.codexRequests.get(codexRequestKey(sessionKeyValue, requestId));
     const totalQuestions = request?.questions.length ?? 1;
@@ -126,13 +130,14 @@ export class CodexPromptFlow {
       totalQuestions,
     });
     const useInlineOptions = !question.isSecret && options.length > 0 && this.deps.adapter.capabilities.inlineActions;
-    const result = await this.deps.sendRendered(conversationId, formatCodexQuestion(question, questionIndex, totalQuestions), {
+    const result = await this.deps.sendRendered(scope.scopeKey, formatCodexQuestion(question, questionIndex, totalQuestions), {
       ...(useInlineOptions ? { replyMarkup: codexQuestionKeyboard(token, options, Boolean(question.isOther)) } : { forceReply: true }),
       disableWebPagePreview: true,
     });
     if (!result.messageId) throw new Error("IM adapter did not return a prompt message id.");
     this.deps.store.setPendingPrompt({
-      conversationId,
+      conversationId: scope.conversationId,
+      scopeKey: scope.scopeKey,
       promptMessageId: result.messageId,
       kind: "codex_user_input",
       createdAt: Date.now(),
@@ -239,7 +244,8 @@ export class CodexPromptFlow {
     if (!result.messageId) throw new Error("IM adapter did not return a note prompt message id.");
     this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
     this.deps.store.setPendingPrompt({
-      conversationId: message.conversationId,
+      conversationId: parseChatScopeKey(String(message.conversationId)).conversationId,
+      scopeKey: String(message.conversationId),
       promptMessageId: result.messageId,
       kind: "codex_user_input",
       createdAt: Date.now(),
@@ -263,7 +269,8 @@ export class CodexPromptFlow {
     if (!result.messageId) throw new Error("IM adapter did not return an other-answer prompt message id.");
     this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
     this.deps.store.setPendingPrompt({
-      conversationId: message.conversationId,
+      conversationId: parseChatScopeKey(String(message.conversationId)).conversationId,
+      scopeKey: String(message.conversationId),
       promptMessageId: result.messageId,
       kind: "codex_user_input",
       createdAt: Date.now(),
@@ -322,13 +329,14 @@ export class CodexPromptFlow {
 
     const request = this.codexRequests.get(codexRequestKey(pending.sessionKey, requestId));
     if (!request) {
-      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-      await this.deps.sendRendered(pending.conversationId, expiredQuestionMessage());
+      const scopeKey = pending.scopeKey ?? pending.conversationId;
+      this.deps.store.deletePendingPrompt(scopeKey, pending.promptMessageId);
+      await this.deps.sendRendered(scopeKey, expiredQuestionMessage());
       return "expired";
     }
 
     request.answers[questionId] = { answers };
-    this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+    this.deps.store.deletePendingPrompt(pending.scopeKey ?? pending.conversationId, pending.promptMessageId);
     if (Object.keys(request.answers).length !== request.questions.length) return undefined;
     this.codexRequests.delete(codexRequestKey(pending.sessionKey, requestId));
     return { sessionKey: pending.sessionKey, requestId, result: { answers: request.answers } };

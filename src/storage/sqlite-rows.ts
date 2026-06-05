@@ -8,18 +8,21 @@ export interface WorkspaceRow {
 }
 
 export interface BindingRow {
+  scope_key: string;
   conversation_id: string;
   workspace_name: string;
   updated_at: number;
 }
 
 export interface TranscriptRow {
+  scope_key?: string | null;
   conversation_id: string;
   text: string;
   created_at?: number;
 }
 
 export interface PendingPromptRow {
+  scope_key?: string | null;
   conversation_id: string;
   prompt_message_id: string;
   kind: string;
@@ -31,6 +34,7 @@ export interface PendingPromptRow {
 
 export interface AgentSessionRow {
   session_key: string;
+  scope_key?: string | null;
   conversation_id: string;
   workspace_name: string;
   status: string;
@@ -43,6 +47,7 @@ export interface AgentSessionRow {
 
 export interface PagedOutputRow {
   token: string;
+  scope_key?: string | null;
   conversation_id: string;
   session_key: string;
   text: string;
@@ -51,6 +56,7 @@ export interface PagedOutputRow {
 }
 
 export interface ChatUiStateRow {
+  scope_key?: string | null;
   conversation_id: string;
   console_message_id?: string | null;
   home_status_mode?: string | null;
@@ -58,6 +64,7 @@ export interface ChatUiStateRow {
 
 export interface TaskRow {
   id: number;
+  scope_key?: string | null;
   conversation_id: string;
   workspace_name: string;
   text: string;
@@ -72,6 +79,7 @@ export interface TaskRow {
 
 export interface PagedOutput {
   token: string;
+  scopeKey?: string;
   conversationId: ConversationId;
   sessionKey: string;
   text: string;
@@ -86,6 +94,7 @@ export function rowToWorkspace(row: WorkspaceRow): WorkspaceRecord {
 export function rowToPendingPrompt(row: PendingPromptRow): PendingPrompt {
   return {
     conversationId: row.conversation_id,
+    ...(row.scope_key && row.scope_key !== row.conversation_id ? { scopeKey: row.scope_key } : {}),
     promptMessageId: row.prompt_message_id,
     kind: row.kind as PendingPromptKind,
     createdAt: row.created_at,
@@ -98,6 +107,7 @@ export function rowToPendingPrompt(row: PendingPromptRow): PendingPrompt {
 export function rowToPagedOutput(row: PagedOutputRow): PagedOutput {
   return {
     token: row.token,
+    ...(row.scope_key && row.scope_key !== row.conversation_id ? { scopeKey: row.scope_key } : {}),
     conversationId: row.conversation_id,
     sessionKey: row.session_key,
     text: row.text,
@@ -110,6 +120,7 @@ export function rowToTask(row: TaskRow): RelayTask {
   return {
     id: row.id,
     conversationId: row.conversation_id,
+    ...(row.scope_key && row.scope_key !== row.conversation_id ? { scopeKey: row.scope_key } : {}),
     workspaceName: row.workspace_name,
     text: row.text,
     ...(row.input_json ? { inputJson: row.input_json } : {}),

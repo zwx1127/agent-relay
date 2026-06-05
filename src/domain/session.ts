@@ -1,22 +1,23 @@
 import type { ConversationId, ProviderId } from "./ids.ts";
+import { parseChatScopeKey } from "./scope.ts";
 
 const DEFAULT_AGENT_PROVIDER = "codex";
 
-export function sessionKey(conversationId: ConversationId, workspaceName: string, agentProvider: ProviderId = DEFAULT_AGENT_PROVIDER): string {
-  return `${encodePart(agentProvider)}:${encodePart(String(conversationId))}:${encodePart(workspaceName)}`;
+export function sessionKey(scopeKey: ConversationId, workspaceName: string, agentProvider: ProviderId = DEFAULT_AGENT_PROVIDER): string {
+  return `${encodePart(agentProvider)}:${encodePart(String(scopeKey))}:${encodePart(workspaceName)}`;
 }
 
-export function parseSessionKey(key: string): { agentProvider: string; conversationId: ConversationId; workspaceName: string } | undefined {
+export function parseSessionKey(key: string): { agentProvider: string; conversationId: ConversationId; scopeKey: string; workspaceName: string } | undefined {
   const parts = key.split(":");
   if (parts.length === 3) {
-    const [agentProvider, conversationId, workspaceName] = parts.map(decodePart);
-    if (!agentProvider || !conversationId || !workspaceName) return undefined;
-    return { agentProvider, conversationId, workspaceName };
+    const [agentProvider, scopeKey, workspaceName] = parts.map(decodePart);
+    if (!agentProvider || !scopeKey || !workspaceName) return undefined;
+    return { agentProvider, conversationId: parseChatScopeKey(scopeKey).conversationId, scopeKey, workspaceName };
   }
   if (parts.length === 2) {
-    const [conversationId, workspaceName] = parts;
-    if (!conversationId || !workspaceName) return undefined;
-    return { agentProvider: DEFAULT_AGENT_PROVIDER, conversationId, workspaceName };
+    const [scopeKey, workspaceName] = parts;
+    if (!scopeKey || !workspaceName) return undefined;
+    return { agentProvider: DEFAULT_AGENT_PROVIDER, conversationId: parseChatScopeKey(scopeKey).conversationId, scopeKey, workspaceName };
   }
   return undefined;
 }

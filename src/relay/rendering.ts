@@ -5,6 +5,7 @@ import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
 import { ensureRendered } from "./ui/text-parts.ts";
 import type { RenderCallbackPageResult } from "./controller-types.ts";
 import type { InboundMessage } from "../ports/im.ts";
+import { parseChatScopeKey } from "../domain/scope.ts";
 
 type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
 type RenderingAdapter = Pick<ImAdapter, "sendMessage" | "editMessageText" | "answerCallbackQuery">;
@@ -20,8 +21,10 @@ export class RelayMessageRenderer {
     rendered: RenderedTelegramText,
     options: Omit<SendMessageOptions, "entities" | "parseMode"> = {},
   ): Promise<{ messageId?: MessageId }> {
-    return await this.adapter.sendMessage(conversationId, rendered.text, {
+    const scope = parseChatScopeKey(String(conversationId));
+    return await this.adapter.sendMessage(scope.conversationId, rendered.text, {
       ...options,
+      topic: options.topic ?? scope.topic,
       entities: rendered.entities,
       disableWebPagePreview: options.disableWebPagePreview ?? true,
     });
@@ -38,7 +41,8 @@ export class RelayMessageRenderer {
       await this.sendRendered(conversationId, rendered, options);
     } catch (error) {
       this.logger.warn(failureEvent, {
-        conversation_id: conversationId,
+        conversation_id: parseChatScopeKey(String(conversationId)).conversationId,
+        scope_key: String(conversationId),
         ...fields,
         error: error instanceof Error ? error : new Error(String(error)),
       });
@@ -51,8 +55,10 @@ export class RelayMessageRenderer {
     options: Omit<EditMessageTextOptions, "entities" | "parseMode">,
   ): Promise<void> {
     if (!this.adapter.editMessageText) throw new Error("IM adapter cannot edit messages.");
-    await this.adapter.editMessageText(conversationId, rendered.text, {
+    const scope = parseChatScopeKey(String(conversationId));
+    await this.adapter.editMessageText(scope.conversationId, rendered.text, {
       ...options,
+      topic: options.topic ?? scope.topic,
       entities: rendered.entities,
       disableWebPagePreview: options.disableWebPagePreview ?? true,
     });
@@ -76,7 +82,8 @@ export class RelayMessageRenderer {
       return { method: "edit", messageId: message.messageId };
     } catch (error) {
       this.logger.warn("router.callback_edit_fallback", {
-        conversation_id: message.conversationId,
+        conversation_id: parseChatScopeKey(String(message.conversationId)).conversationId,
+        scope_key: String(message.conversationId),
         message_id: message.messageId,
         error: error instanceof Error ? error : new Error(String(error)),
       });
@@ -109,7 +116,8 @@ export class RelayMessageRenderer {
       await this.renderCallbackPage(message, body, replyMarkup);
     } catch (error) {
       this.logger.warn(failureEvent, {
-        conversation_id: message.conversationId,
+        conversation_id: parseChatScopeKey(String(message.conversationId)).conversationId,
+        scope_key: String(message.conversationId),
         callback_query_id: message.callbackQueryId,
         error: error instanceof Error ? error : new Error(String(error)),
       });

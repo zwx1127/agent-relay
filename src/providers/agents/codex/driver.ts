@@ -118,7 +118,8 @@ export class CodexDriver implements AgentDriver {
   ) {}
 
   async start(options: StartAgentOptions): Promise<AgentSessionStatus> {
-    const key = sessionKey(options.conversationId, options.workspaceName, this.providerId);
+    const scopeKey = options.scopeKey ?? String(options.conversationId);
+    const key = sessionKey(scopeKey, options.workspaceName, this.providerId);
     const existing = this.sessions.get(key);
     if (existing) {
       this.logger.info("codex.session_reused", {
@@ -135,6 +136,7 @@ export class CodexDriver implements AgentDriver {
     const status: AgentSessionStatus = {
       sessionKey: key,
       conversationId: options.conversationId,
+      scopeKey,
       workspaceName: options.workspaceName,
       workspacePath: options.workspacePath,
       running: true,

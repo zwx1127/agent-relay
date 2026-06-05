@@ -58,24 +58,24 @@ export class SQLiteStore implements RelayStore {
     this.repositories.workspaces.delete(name);
   }
 
-  bindConversation(conversationId: ConversationId, workspaceName: string, updatedAt = Date.now()): void {
-    this.repositories.bindings.bind(conversationId, workspaceName, updatedAt);
+  bindConversation(scopeKey: ConversationId, workspaceName: string, updatedAt = Date.now(), conversationId?: ConversationId): void {
+    this.repositories.bindings.bind(scopeKey, workspaceName, updatedAt, conversationId);
   }
 
-  getBinding(conversationId: ConversationId): ConversationBinding | undefined {
-    return this.repositories.bindings.get(conversationId);
+  getBinding(scopeKey: ConversationId): ConversationBinding | undefined {
+    return this.repositories.bindings.get(scopeKey);
   }
 
-  clearBinding(conversationId: ConversationId): void {
-    this.repositories.bindings.clear(conversationId);
+  clearBinding(scopeKey: ConversationId): void {
+    this.repositories.bindings.clear(scopeKey);
   }
 
   clearBindingsForWorkspace(workspaceName: string): void {
     this.repositories.bindings.clearForWorkspace(workspaceName);
   }
 
-  markSessionStarted(sessionKey: string, conversationId: ConversationId, workspaceName: string, startedAt = Date.now(), threadId?: string): void {
-    this.repositories.sessions.markStarted(sessionKey, conversationId, workspaceName, startedAt, threadId);
+  markSessionStarted(sessionKey: string, conversationId: ConversationId, workspaceName: string, startedAt = Date.now(), threadId?: string, scopeKey?: string): void {
+    this.repositories.sessions.markStarted(sessionKey, conversationId, workspaceName, startedAt, threadId, scopeKey);
   }
 
   markSessionStopped(sessionKey: string, stoppedAt = Date.now()): void {
@@ -110,24 +110,24 @@ export class SQLiteStore implements RelayStore {
     this.repositories.transcripts.append(event);
   }
 
-  latestTranscriptEvent(conversationId: ConversationId, workspaceName: string, role: TranscriptRole): TranscriptEvent | undefined {
-    return this.repositories.transcripts.latest(conversationId, workspaceName, role);
+  latestTranscriptEvent(scopeKey: ConversationId, workspaceName: string, role: TranscriptRole): TranscriptEvent | undefined {
+    return this.repositories.transcripts.latest(scopeKey, workspaceName, role);
   }
 
   setPendingPrompt(prompt: PendingPrompt): void {
     this.repositories.prompts.set(prompt);
   }
 
-  getPendingPrompt(conversationId: ConversationId, promptMessageId: MessageId): PendingPrompt | undefined {
-    return this.repositories.prompts.get(conversationId, promptMessageId);
+  getPendingPrompt(scopeKey: ConversationId, promptMessageId: MessageId): PendingPrompt | undefined {
+    return this.repositories.prompts.get(scopeKey, promptMessageId);
   }
 
-  latestPendingPrompt(conversationId: ConversationId, kinds: PendingPrompt["kind"][] = [], now = Date.now()): PendingPrompt | undefined {
-    return this.repositories.prompts.latest(conversationId, kinds, now);
+  latestPendingPrompt(scopeKey: ConversationId, kinds: PendingPrompt["kind"][] = [], now = Date.now()): PendingPrompt | undefined {
+    return this.repositories.prompts.latest(scopeKey, kinds, now);
   }
 
-  deletePendingPrompt(conversationId: ConversationId, promptMessageId: MessageId): void {
-    this.repositories.prompts.delete(conversationId, promptMessageId);
+  deletePendingPrompt(scopeKey: ConversationId, promptMessageId: MessageId): void {
+    this.repositories.prompts.delete(scopeKey, promptMessageId);
   }
 
   deletePendingPromptsForSession(sessionKey: string, kinds: PendingPrompt["kind"][] = []): number {
@@ -150,24 +150,33 @@ export class SQLiteStore implements RelayStore {
     this.repositories.pagedOutputs.prune(now);
   }
 
-  getConsoleMessageId(conversationId: ConversationId): MessageId | undefined {
-    return this.repositories.chatUi.getConsoleMessageId(conversationId);
+  getConsoleMessageId(scopeKey: ConversationId): MessageId | undefined {
+    return this.repositories.chatUi.getConsoleMessageId(scopeKey);
   }
 
-  setConsoleMessageId(conversationId: ConversationId, messageId: MessageId): void {
-    this.repositories.chatUi.setConsoleMessageId(conversationId, messageId);
+  setConsoleMessageId(scopeKey: ConversationId, messageId: MessageId, conversationId?: ConversationId): void {
+    this.repositories.chatUi.setConsoleMessageId(scopeKey, messageId, conversationId);
   }
 
-  getHomeStatusMode(conversationId: ConversationId): HomeStatusMode {
-    return this.repositories.chatUi.getHomeStatusMode(conversationId);
+  getHomeStatusMode(scopeKey: ConversationId): HomeStatusMode {
+    return this.repositories.chatUi.getHomeStatusMode(scopeKey);
   }
 
-  setHomeStatusMode(conversationId: ConversationId, mode: HomeStatusMode): void {
-    this.repositories.chatUi.setHomeStatusMode(conversationId, mode);
+  setHomeStatusMode(scopeKey: ConversationId, mode: HomeStatusMode, conversationId?: ConversationId): void {
+    this.repositories.chatUi.setHomeStatusMode(scopeKey, mode, conversationId);
+  }
+
+  setControlMessage(conversationId: ConversationId, messageId: MessageId, scopeKey: string, kind?: string): void {
+    this.repositories.chatUi.setControlMessage(conversationId, messageId, scopeKey, kind);
+  }
+
+  getControlMessageScopeKey(conversationId: ConversationId, messageId: MessageId): string | undefined {
+    return this.repositories.chatUi.getControlMessageScopeKey(conversationId, messageId);
   }
 
   createTask(task: {
     conversationId: ConversationId;
+    scopeKey?: string;
     workspaceName: string;
     text: string;
     input?: AgentTaskInput;

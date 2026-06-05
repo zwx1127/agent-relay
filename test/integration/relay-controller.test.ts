@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sessionKey } from "../../src/domain/session.ts";
+import { chatScopeKey } from "../../src/domain/scope.ts";
 import { workspaceCallbackToken } from "../../src/relay/ui/callback-data.ts";
 import type { AppConfig } from "../../src/runtime/config.ts";
 import { RelayController } from "../../src/relay/controller.ts";
@@ -123,6 +124,52 @@ describe("relay controller", () => {
 
     expect(agent.sent).toEqual([sentPrompt("hello codex")]);
     expect(agent.getStatus("codex:1:demo")?.running).toBe(true);
+  });
+
+  test("routes two topics in the same conversation to independent workspaces", async () => {
+    const { router, store, agent, adapter, root } = fixture();
+    const pathA = join(root, "alpha");
+    const pathB = join(root, "beta");
+    mkdirSync(pathA);
+    mkdirSync(pathB);
+    store.upsertWorkspace({ name: "alpha", path: pathA, createdAt: 1 });
+    store.upsertWorkspace({ name: "beta", path: pathB, createdAt: 1 });
+    const topicA = { provider: "telegram" as const, id: "10" };
+    const topicB = { provider: "telegram" as const, id: "20" };
+    const scopeA = chatScopeKey("1", topicA);
+    const scopeB = chatScopeKey("1", topicB);
+    store.bindConversation(scopeA, "alpha", 1, "1");
+    store.bindConversation(scopeB, "beta", 1, "1");
+
+    await router.handle({ ...textMessage("work on alpha", 7, undefined, "1"), topic: topicA });
+    await router.handle({ ...textMessage("work on beta", 7, undefined, "1"), topic: topicB });
+    await router.handleAgentOutput({ sessionKey: sessionKey(scopeA, "alpha"), chunk: "alpha done", turnId: "turn-a" });
+    await waitForStreamFlush();
+
+    expect(agent.sent.map((item) => ({ key: item.key, text: item.text }))).toEqual([
+      { key: sessionKey(scopeA, "alpha"), text: "work on alpha" },
+      { key: sessionKey(scopeB, "beta"), text: "work on beta" },
+    ]);
+    expect(adapter.sent.at(-1)?.conversationId).toBe("1");
+    expect(adapter.sent.at(-1)?.options?.topic).toEqual(topicA);
+  });
+
+  test("uses control message mapping to route thread callbacks without provider topic metadata", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    const topic = { provider: "lark" as const, id: "thread-1", rootMessageId: "root-1" };
+    const scope = chatScopeKey("1", topic);
+    store.bindConversation(scope, "demo", 1, "1");
+
+    await router.handle({ ...textMessage("/relay", 7, undefined, "1"), topic });
+    const home = adapter.sent.at(-1)!;
+    await router.handle(callbackMessage("ar:status", 7, "cb-thread", home.messageId, "1"));
+
+    expect(adapter.sent.at(-1)?.options?.topic).toEqual(topic);
+    expect(adapter.edited.at(-1)?.conversationId).toBe("1");
+    expect(store.getHomeStatusMode(scope)).toBe("details");
   });
 
   test("agent capability can mention a configured peer agent in the active chat", async () => {

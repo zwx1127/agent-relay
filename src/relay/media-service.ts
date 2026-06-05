@@ -3,6 +3,7 @@ import { basename, extname, isAbsolute, resolve } from "node:path";
 import { isAuthorized, type AppConfig } from "../runtime/config.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
 import { parseSessionKey } from "../domain/session.ts";
+import { parseChatScopeKey } from "../domain/scope.ts";
 import { isRealDirectory } from "../domain/workspace.ts";
 import type { AgentDriver, AgentImageInput, AgentImageOutputEvent, AgentSessionStatus, AgentTaskInput } from "../ports/agent.ts";
 import type { FileInboundMessage, ImAdapter, MediaInboundMessage } from "../ports/im.ts";
@@ -49,8 +50,10 @@ export class MediaRelayService {
   constructor(private readonly deps: MediaRelayDeps) {}
 
   async handleMediaMessage(message: MediaInboundMessage): Promise<void> {
+    const scope = parseChatScopeKey(String(message.conversationId));
     this.deps.logger.info("router.media_received", {
-      conversation_id: message.conversationId,
+      conversation_id: scope.conversationId,
+      scope_key: scope.scopeKey,
       user_id: message.userId,
       message_id: message.id,
       caption_len: message.caption?.length ?? 0,
@@ -58,31 +61,33 @@ export class MediaRelayService {
       media_group_id: message.mediaGroupId,
     });
 
-    if (!isAuthorized(this.deps.config, message.userId, message.conversationId)) {
+    if (!isAuthorized(this.deps.config, message.userId, scope.conversationId)) {
       this.deps.logger.warn("router.unauthorized_media", {
-        conversation_id: message.conversationId,
+        conversation_id: scope.conversationId,
         user_id: message.userId,
         message_id: message.id,
       });
-      await this.deps.sendRendered(message.conversationId, textMessage("Unauthorized."));
+      await this.deps.sendRendered(scope.scopeKey, textMessage("Unauthorized."));
       return;
     }
 
     if (message.mediaGroupId) {
-      this.bufferMediaGroup(message);
+      this.bufferMediaGroup({ ...message, conversationId: scope.scopeKey });
       return;
     }
 
     try {
-      await this.submitMediaMessages(message.conversationId, [message]);
+      await this.submitMediaMessages(scope.scopeKey, [message]);
     } catch (error) {
-      await this.handleMediaError(message.conversationId, message.id, error);
+      await this.handleMediaError(scope.scopeKey, message.id, error);
     }
   }
 
   async handleFileMessage(message: FileInboundMessage): Promise<void> {
+    const scope = parseChatScopeKey(String(message.conversationId));
     this.deps.logger.info("router.file_received", {
-      conversation_id: message.conversationId,
+      conversation_id: scope.conversationId,
+      scope_key: scope.scopeKey,
       user_id: message.userId,
       message_id: message.id,
       file_name: message.file.fileName,
@@ -91,28 +96,29 @@ export class MediaRelayService {
       caption_len: message.caption?.length ?? 0,
     });
 
-    if (!isAuthorized(this.deps.config, message.userId, message.conversationId)) {
+    if (!isAuthorized(this.deps.config, message.userId, scope.conversationId)) {
       this.deps.logger.warn("router.unauthorized_file", {
-        conversation_id: message.conversationId,
+        conversation_id: scope.conversationId,
         user_id: message.userId,
         message_id: message.id,
       });
-      await this.deps.sendRendered(message.conversationId, textMessage("Unauthorized."));
+      await this.deps.sendRendered(scope.scopeKey, textMessage("Unauthorized."));
       return;
     }
 
     try {
-      await this.submitFileMessage(message);
+      await this.submitFileMessage({ ...message, conversationId: scope.scopeKey });
     } catch (error) {
-      await this.handleFileError(message.conversationId, message.id, error);
+      await this.handleFileError(scope.scopeKey, message.id, error);
     }
   }
 
   private bufferMediaGroup(message: MediaInboundMessage): void {
-    const key = `${message.conversationId}:${message.mediaGroupId}`;
+    const scope = parseChatScopeKey(String(message.conversationId));
+    const key = `${scope.scopeKey}:${message.mediaGroupId}`;
     const existing = this.mediaGroups.get(key);
     if (existing?.timer) clearTimeout(existing.timer);
-    const state = existing ?? { conversationId: message.conversationId, messages: [] };
+    const state = existing ?? { conversationId: scope.scopeKey, messages: [] };
     state.messages.push(message);
     // Telegram/Lark album items arrive as separate updates. A short quiet window
     // lets the relay submit them to Codex as one prompt with multiple images.
@@ -125,14 +131,15 @@ export class MediaRelayService {
   }
 
   private async submitMediaMessages(conversationId: ConversationId, messages: MediaInboundMessage[]): Promise<void> {
-    const workspace = this.deps.currentWorkspace(conversationId);
+    const scope = parseChatScopeKey(String(conversationId));
+    const workspace = this.deps.currentWorkspace(scope.scopeKey);
     if (!workspace) {
-      await this.deps.renderConsole(conversationId);
+      await this.deps.renderConsole(scope.scopeKey);
       return;
     }
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
-    const status = await this.deps.ensureAgentStarted(conversationId, workspace);
-    if (await this.deps.sendWaitingPromptNotice(conversationId, status)) return;
+    const status = await this.deps.ensureAgentStarted(scope.scopeKey, workspace);
+    if (await this.deps.sendWaitingPromptNotice(scope.scopeKey, status)) return;
 
     // Preserve provider message order so image references in captions match the
     // order of localImage inputs sent to Codex.
@@ -142,7 +149,7 @@ export class MediaRelayService {
     for (const media of sorted) {
       images.push(await this.downloadAndSavePhoto(workspace, media));
     }
-    await this.deps.submitTask(conversationId, prompt, sorted[0]?.messageId, "auto", { text: prompt, images });
+    await this.deps.submitTask(scope.scopeKey, prompt, sorted[0]?.messageId, "auto", { text: prompt, images });
   }
 
   private async downloadAndSavePhoto(workspace: WorkspaceRecord, message: MediaInboundMessage): Promise<AgentImageInput> {
@@ -181,14 +188,15 @@ export class MediaRelayService {
   }
 
   private async submitFileMessage(message: FileInboundMessage): Promise<void> {
-    const workspace = this.deps.currentWorkspace(message.conversationId);
+    const scope = parseChatScopeKey(String(message.conversationId));
+    const workspace = this.deps.currentWorkspace(scope.scopeKey);
     if (!workspace) {
-      await this.deps.renderConsole(message.conversationId);
+      await this.deps.renderConsole(scope.scopeKey);
       return;
     }
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
-    const status = await this.deps.ensureAgentStarted(message.conversationId, workspace);
-    if (await this.deps.sendWaitingPromptNotice(message.conversationId, status)) return;
+    const status = await this.deps.ensureAgentStarted(scope.scopeKey, workspace);
+    if (await this.deps.sendWaitingPromptNotice(scope.scopeKey, status)) return;
 
     const stored = await this.downloadAndSaveFile(workspace, message);
     const prompt = formatAttachedFilePrompt({
@@ -198,7 +206,7 @@ export class MediaRelayService {
       mimeType: stored.mimeType,
       caption: message.caption,
     });
-    await this.deps.submitTask(message.conversationId, prompt, message.messageId);
+    await this.deps.submitTask(scope.scopeKey, prompt, message.messageId);
   }
 
   private async downloadAndSaveFile(workspace: WorkspaceRecord, message: FileInboundMessage): Promise<{ path: string; filename: string; fileSize: number; mimeType?: string }> {
@@ -243,14 +251,14 @@ export class MediaRelayService {
   async sendAgentImageOutput(event: AgentImageOutputEvent): Promise<void> {
     const parsed = parseSessionKey(event.sessionKey);
     if (!parsed) return;
-    const workspace = this.deps.currentWorkspace(parsed.conversationId);
+    const workspace = this.deps.currentWorkspace(parsed.scopeKey);
     if (!workspace || workspace.name !== parsed.workspaceName) return;
     try {
       // All outbound images are copied under the selected workspace before being
       // sent so the relay enforces one media location and size policy.
       const path = event.path ? await this.copyOutgoingImage(workspace.path, event.path) : event.data ? await saveGeneratedImage(workspace.path, event.data) : undefined;
       if (!path) throw new Error("Codex image output did not include image data.");
-      await this.sendStoredImage(parsed.conversationId, parsed.workspaceName, path, event.caption, this.deps.lastUserMessageId(event.sessionKey));
+      await this.sendStoredImage(parsed.scopeKey, parsed.workspaceName, path, event.caption, this.deps.lastUserMessageId(event.sessionKey));
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       this.deps.logger.error("router.agent_image_send_failed", {
@@ -259,12 +267,12 @@ export class MediaRelayService {
         error: error instanceof Error ? error : new Error(detail),
       });
       await this.deps.trySendRendered(
-        parsed.conversationId,
+        parsed.scopeKey,
         formatErrorMessage(`Could not send image: ${detail}`),
         "router.agent_image_error_notice_failed",
         { session_key: event.sessionKey },
       );
-      this.deps.appendSystem(parsed.conversationId, `Error: Could not send image: ${detail}\n`);
+      this.deps.appendSystem(parsed.scopeKey, `Error: Could not send image: ${detail}\n`);
     }
   }
 
@@ -274,7 +282,7 @@ export class MediaRelayService {
     const path = await this.copyOutgoingImage(workspace.path, input.path);
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) throw new Error("Invalid session key.");
-    await this.sendStoredImage(parsed.conversationId, parsed.workspaceName, path, input.caption, this.deps.lastUserMessageId(sessionKeyValue));
+    await this.sendStoredImage(parsed.scopeKey, parsed.workspaceName, path, input.caption, this.deps.lastUserMessageId(sessionKeyValue));
     this.deps.logger.info("router.debug_image_sent", {
       conversation_id: parsed.conversationId,
       workspace: parsed.workspaceName,
@@ -291,7 +299,7 @@ export class MediaRelayService {
     const path = await this.copyOutgoingFile(workspace.path, input.path);
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) throw new Error("Invalid session key.");
-    await this.sendStoredFile(parsed.conversationId, parsed.workspaceName, path, input.caption, this.deps.lastUserMessageId(sessionKeyValue));
+    await this.sendStoredFile(parsed.scopeKey, parsed.workspaceName, path, input.caption, this.deps.lastUserMessageId(sessionKeyValue));
     this.deps.logger.info("router.debug_file_sent", {
       conversation_id: parsed.conversationId,
       workspace: parsed.workspaceName,
@@ -368,13 +376,16 @@ export class MediaRelayService {
 
   private async sendStoredImage(conversationId: ConversationId, workspaceName: string, path: string, caption?: string, replyToMessageId?: MessageId): Promise<void> {
     if (!this.deps.adapter.sendPhoto) throw new Error("IM adapter cannot send images.");
+    const scope = parseChatScopeKey(String(conversationId));
     const blob = await imageBlobFromPath(path);
-    await this.deps.adapter.sendPhoto(conversationId, blob, {
+    await this.deps.adapter.sendPhoto(scope.conversationId, blob, {
       ...(caption ? { caption: truncateTelegramCaption(caption) } : {}),
       ...(replyToMessageId ? { replyToMessageId } : {}),
+      ...(scope.topic ? { topic: scope.topic } : {}),
     });
     this.deps.store.appendTranscript({
-      conversationId,
+      conversationId: scope.conversationId,
+      scopeKey: scope.scopeKey,
       workspaceName,
       role: "agent",
       text: `[image: ${path}]\n`,
@@ -384,14 +395,17 @@ export class MediaRelayService {
 
   private async sendStoredFile(conversationId: ConversationId, workspaceName: string, path: string, caption?: string, replyToMessageId?: MessageId): Promise<void> {
     if (!this.deps.adapter.sendFile) throw new Error("IM adapter cannot send files.");
+    const scope = parseChatScopeKey(String(conversationId));
     const blob = await fileBlobFromPath(path);
-    await this.deps.adapter.sendFile(conversationId, blob, {
+    await this.deps.adapter.sendFile(scope.conversationId, blob, {
       filename: basename(path),
       ...(caption ? { caption: truncateTelegramCaption(caption) } : {}),
       ...(replyToMessageId ? { replyToMessageId } : {}),
+      ...(scope.topic ? { topic: scope.topic } : {}),
     });
     this.deps.store.appendTranscript({
-      conversationId,
+      conversationId: scope.conversationId,
+      scopeKey: scope.scopeKey,
       workspaceName,
       role: "agent",
       text: `[file: ${path}]\n`,
