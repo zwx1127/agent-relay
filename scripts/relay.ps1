@@ -28,6 +28,85 @@ function Write-ErrorLine {
   [Console]::Error.WriteLine($Message)
 }
 
+function Test-PathEnvironmentName {
+  param([string]$Name)
+  return [string]::Equals($Name, "Path", [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Join-PathEnvironmentValues {
+  param([string[]]$Values)
+
+  $seen = New-Object "System.Collections.Generic.HashSet[string]" ([StringComparer]::OrdinalIgnoreCase)
+  $entries = New-Object "System.Collections.Generic.List[string]"
+
+  foreach ($value in $Values) {
+    if ([string]::IsNullOrWhiteSpace($value)) {
+      continue
+    }
+
+    foreach ($entry in ($value -split ";")) {
+      if ([string]::IsNullOrWhiteSpace($entry)) {
+        continue
+      }
+
+      $normalized = [Environment]::ExpandEnvironmentVariables($entry.Trim())
+      if ($seen.Add($normalized)) {
+        $entries.Add($normalized)
+      }
+    }
+  }
+
+  return [string]::Join(";", $entries)
+}
+
+function Import-WindowsEnvironment {
+  if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+    return
+  }
+
+  $machineVars = [Environment]::GetEnvironmentVariables("Machine")
+  $userVars = [Environment]::GetEnvironmentVariables("User")
+  $processVars = [Environment]::GetEnvironmentVariables("Process")
+  $processNames = New-Object "System.Collections.Generic.HashSet[string]" ([StringComparer]::OrdinalIgnoreCase)
+  $registryVars = New-Object "System.Collections.Hashtable" ([StringComparer]::OrdinalIgnoreCase)
+
+  foreach ($name in $processVars.Keys) {
+    [void]$processNames.Add([string]$name)
+  }
+
+  foreach ($scopeVars in @($machineVars, $userVars)) {
+    foreach ($name in $scopeVars.Keys) {
+      $envName = [string]$name
+      if (Test-PathEnvironmentName $envName) {
+        continue
+      }
+
+      $registryVars[$envName] = [string]$scopeVars[$name]
+    }
+  }
+
+  foreach ($name in $registryVars.Keys) {
+    $envName = [string]$name
+    if (-not $processNames.Contains($envName) -or [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($envName, "Process"))) {
+      [Environment]::SetEnvironmentVariable($envName, [string]$registryVars[$name], "Process")
+    }
+  }
+
+  $pathValue = Join-PathEnvironmentValues @(
+    [Environment]::GetEnvironmentVariable("Path", "Process"),
+    [Environment]::GetEnvironmentVariable("PATH", "Process"),
+    [Environment]::GetEnvironmentVariable("Path", "Machine"),
+    [Environment]::GetEnvironmentVariable("Path", "User")
+  )
+
+  if (-not [string]::IsNullOrEmpty($pathValue)) {
+    [Environment]::SetEnvironmentVariable("Path", $pathValue, "Process")
+    $env:Path = $pathValue
+  }
+}
+
+Import-WindowsEnvironment
+
 function Get-EnvSeconds {
   param(
     [string]$Name,
@@ -90,15 +169,7 @@ function Ensure-Bun {
 }
 
 function Normalize-ProcessPathEnvironment {
-  $pathValue = [Environment]::GetEnvironmentVariable("Path", "Process")
-  if ([string]::IsNullOrEmpty($pathValue)) {
-    $pathValue = [Environment]::GetEnvironmentVariable("PATH", "Process")
-  }
-
-  if (-not [string]::IsNullOrEmpty($pathValue)) {
-    [Environment]::SetEnvironmentVariable("Path", $pathValue, "Process")
-  }
-  [Environment]::SetEnvironmentVariable("PATH", $null, "Process")
+  Import-WindowsEnvironment
 }
 
 function Test-PidIsAlive {
