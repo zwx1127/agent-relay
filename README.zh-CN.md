@@ -22,8 +22,6 @@
     </td>
     <td width="50%" valign="top">
       <video src="https://github.com/user-attachments/assets/48aca05e-20f4-47f8-ac80-d93c6a4ecf60" width="360" controls></video>
-      <br>
-      <a href="https://github.com/user-attachments/assets/48aca05e-20f4-47f8-ac80-d93c6a4ecf60">打开视频</a>
     </td>
   </tr>
 </table>
