@@ -11,9 +11,22 @@
 
 ## 演示
 
-| 单聊 | 群聊 topic 模式：多 workspace 并行工作 |
-| --- | --- |
-| <img src="https://github.com/user-attachments/assets/f9dfb5ac-15b8-4a4c-87b1-f6ebf0cc70e3" alt="单聊演示" width="360"> | https://github.com/user-attachments/assets/48aca05e-20f4-47f8-ac80-d93c6a4ecf60 |
+<table>
+  <tr>
+    <th>单聊</th>
+    <th>群聊 topic 模式：多 workspace 并行工作</th>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="https://github.com/user-attachments/assets/f9dfb5ac-15b8-4a4c-87b1-f6ebf0cc70e3" alt="单聊演示" width="360">
+    </td>
+    <td width="50%" valign="top">
+      <video src="https://github.com/user-attachments/assets/48aca05e-20f4-47f8-ac80-d93c6a4ecf60" width="360" controls></video>
+      <br>
+      <a href="https://github.com/user-attachments/assets/48aca05e-20f4-47f8-ac80-d93c6a4ecf60">打开视频</a>
+    </td>
+  </tr>
+</table>
 
 ## 能做什么
 
