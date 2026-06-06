@@ -11,13 +11,19 @@
 
 ## 演示
 
-### 单聊
+<details open>
+<summary><strong>单聊</strong></summary>
 
-<img src="docs/assets/showcase.png" alt="单聊演示" width="320">
+<img src="docs/assets/showcase.png" alt="单聊演示" width="360">
 
-### 群聊 topic 模式：多 workspace 并行工作
+</details>
 
-[观看群聊 topic 模式演示](https://github.com/user-attachments/assets/48aca05e-20f4-47f8-ac80-d93c6a4ecf60)
+<details open>
+<summary><strong>群聊 topic 模式：多 workspace 并行工作</strong></summary>
+
+https://github.com/user-attachments/assets/48aca05e-20f4-47f8-ac80-d93c6a4ecf60
+
+</details>
 
 ## 能做什么
 
