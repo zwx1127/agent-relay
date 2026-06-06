@@ -11,19 +11,9 @@ The goal is simple: keep the agent close to your code, while letting you operate
 
 ## Showcase
 
-<details open>
-<summary><strong>Direct chat</strong></summary>
-
-<img src="docs/assets/showcase.png" alt="Direct chat demo" width="360">
-
-</details>
-
-<details open>
-<summary><strong>Group topic mode: multi-workspace parallel work</strong></summary>
-
-https://github.com/user-attachments/assets/48aca05e-20f4-47f8-ac80-d93c6a4ecf60
-
-</details>
+| Direct chat | Group topic mode: multi-workspace parallel work |
+| --- | --- |
+| <img src="https://github.com/user-attachments/assets/f9dfb5ac-15b8-4a4c-87b1-f6ebf0cc70e3" alt="Direct chat demo" width="360"> | https://github.com/user-attachments/assets/48aca05e-20f4-47f8-ac80-d93c6a4ecf60 |
 
 ## What you can do
 
