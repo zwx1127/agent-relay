@@ -9,6 +9,16 @@ English | [中文](README.zh-CN.md)
 
 The goal is simple: keep the agent close to your code, while letting you operate it from the chat app you already use.
 
+## Showcase
+
+### Direct chat
+
+![Direct chat demo](docs/assets/showcase.png)
+
+### Group topic mode: multi-workspace parallel work
+
+https://github.com/user-attachments/assets/48aca05e-20f4-47f8-ac80-d93c6a4ecf60
+
 ## What you can do
 
 - Remote-control local Codex sessions from Telegram or Lark/Feishu.
@@ -81,6 +91,7 @@ agent-relay works in private chats and group chats. Group chats are useful when 
 - Add the bot to the group and allow the group with `ALLOWED_CONVERSATION_IDS`.
 - Mention the bot in text, image/file captions, and slash commands, with spaces around `@bot` or `@BotName` when it is a normal mention.
 - Unmentioned group messages are ignored before authorization checks.
+- Telegram forum topics and Lark/Feishu threads are treated as separate scopes, so each topic or thread can select its own workspace and run its own Codex session in parallel.
 - Run one agent-relay process per agent bot when you want several agents in the same group.
 - Configure peer agents and enable the local relay capability API when you want Codex to mention another agent bot.
 

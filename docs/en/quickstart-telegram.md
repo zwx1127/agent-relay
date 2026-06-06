@@ -72,6 +72,20 @@ Then in Telegram:
 
 In groups, mention the bot when sending text, images, files, or slash commands. Use spaces around a normal `@bot` mention; Telegram's native `/relay@relay_bot` command form is also accepted for compatibility.
 
+## 6. Topic and multi-workspace usage
+
+In Telegram forum groups, each topic is an independent relay scope. `ALLOWED_CONVERSATION_IDS` still uses the group chat ID, not the topic ID.
+
+To run multiple workspaces in parallel:
+
+1. Enable Topics in the Telegram group.
+2. Create one topic per workspace or workstream.
+3. In each topic, send `/relay@relay_bot` or another bot-targeted command that Telegram delivers to the bot.
+4. Select a workspace from Relay Home in that topic.
+5. Send prompts in each topic. Replies, buttons, tasks, and Codex output stay in the same topic.
+
+Stopping a session from Relay Home stops only that topic's session and clears that topic's current workspace binding. Other topics in the same group keep their own sessions.
+
 ## Useful commands
 
 - `/help`: show commands.

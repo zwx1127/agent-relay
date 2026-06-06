@@ -72,6 +72,20 @@ bun run start
 
 在群聊里发送文本、图片或 slash command 时，需要提及 bot。普通 `@bot` 前后需要用空格分隔；Telegram 原生的 `/relay@relay_bot` 命令格式也会兼容。
 
+## 6. Topic 和多 workspace 用法
+
+在 Telegram 论坛群组中，每个 topic 都是独立的 relay scope。`ALLOWED_CONVERSATION_IDS` 仍然配置群聊 chat ID，不配置 topic ID。
+
+多 workspace 并行使用时：
+
+1. 在 Telegram 群组里开启 Topics。
+2. 按 workspace 或工作流创建不同 topic。
+3. 在每个 topic 中发送 `/relay@relay_bot`，或其它 Telegram 会投递给 bot 的定向命令。
+4. 在该 topic 的 Relay Home 中选择 workspace。
+5. 分别在不同 topic 中发送提示词。回复、按钮、任务和 Codex 输出都会留在对应 topic 内。
+
+从 Relay Home 停止会话时，只会停止当前 topic 的 session，并清除当前 topic 的 workspace 绑定。同群里的其它 topic 会保留各自的 session。
+
 ## 常用命令
 
 - `/help`：查看命令。

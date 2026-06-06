@@ -60,10 +60,21 @@ Check:
 - The message mentions the bot directly. Keep normal mentions separated by spaces, such as `/relay @relay_bot` or `@relay_bot /relay`; Telegram's native `/relay@relay_bot` command form is also accepted.
 - Both the user and the group are allowed when `ALLOWED_CONVERSATION_IDS` is set.
 - Slash commands, image/file captions, and normal text all include the bot mention.
-- If there is no `telegram.update_received`, `router.message_received`, or `router.group_message_ignored` log entry after sending a group message, Telegram did not deliver that update to the bot. Check the command format, bot privacy mode, and group permissions.
+- If there is no `router.message_received` or `router.group_message_ignored` log entry after sending a group message, Telegram did not deliver that update to the bot. Check the command format, bot privacy mode, and group permissions.
 - For multi-agent groups, each bot has its own relay process and its own credentials.
 
 Telegram Privacy Mode is a server-side filter. With Privacy Mode enabled, Telegram only sends a bot messages that it considers relevant, so a normal group message or a mention-first message such as `@relay_bot /relay` may never reach agent-relay. Use Telegram's native bot command form `/relay@relay_bot` when you need the command to target one bot reliably. The relay also accepts `/relay @relay_bot` if Telegram delivers the update. To receive normal group text that only mentions the bot, disable Privacy Mode in BotFather and re-add the bot to the group, or make the bot a group administrator. See Telegram's official Privacy Mode docs: https://core.telegram.org/bots/features#privacy-mode
+
+## Topic or thread routing looks wrong
+
+Telegram forum topics and Lark/Feishu threads are scoped separately from the parent group. `ALLOWED_CONVERSATION_IDS` should contain the parent group chat ID only.
+
+Check:
+
+- Logs for messages from different topics or threads show different `scope_key` values, such as `-100123|telegram|15|` for Telegram or `oc_xxx|lark|thread_xxx|root_xxx` for Lark/Feishu.
+- The message was sent inside the topic or thread, not in the parent group timeline.
+- Relay Home was opened and a workspace was selected inside that same topic or thread.
+- If a stopped topic or thread no longer shows a workspace, open `/relay` in that topic or thread and select the workspace again.
 
 ## Buttons stop working
 

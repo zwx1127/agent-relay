@@ -76,6 +76,19 @@ Then in Lark or Feishu:
 
 In groups, mention the bot when sending text, image/file captions, or slash commands. Keep `@BotName` as a separate token with spaces around it.
 
+## 6. Thread and multi-workspace usage
+
+In Lark or Feishu groups, each message thread is an independent relay scope. `ALLOWED_CONVERSATION_IDS` still uses the group `chat_id`, not the thread ID.
+
+To run multiple workspaces in parallel:
+
+1. Start a separate thread for each workspace or workstream.
+2. Mention the bot in the thread and send `/relay`.
+3. Select a workspace from Relay Home in that thread.
+4. Send prompts in each thread. Replies, card buttons, tasks, and Codex output stay in the same thread.
+
+Stopping a session from Relay Home stops only that thread's session and clears that thread's current workspace binding. Other threads in the same group keep their own sessions.
+
 ## Useful commands
 
 - `/help`: show commands.

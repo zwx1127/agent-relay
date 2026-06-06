@@ -76,6 +76,19 @@ bun run start
 
 在群聊里发送文本、图片 caption 或 slash command 时，需要提及 bot。`@BotName` 应作为独立 token，前后用空格分隔。
 
+## 6. Thread 和多 workspace 用法
+
+在 Lark 或飞书群聊中，每个消息 thread 都是独立的 relay scope。`ALLOWED_CONVERSATION_IDS` 仍然配置群聊 `chat_id`，不配置 thread ID。
+
+多 workspace 并行使用时：
+
+1. 按 workspace 或工作流创建不同 thread。
+2. 在 thread 中提及 bot 并发送 `/relay`。
+3. 在该 thread 的 Relay Home 中选择 workspace。
+4. 分别在不同 thread 中发送提示词。回复、卡片按钮、任务和 Codex 输出都会留在对应 thread 内。
+
+从 Relay Home 停止会话时，只会停止当前 thread 的 session，并清除当前 thread 的 workspace 绑定。同群里的其它 thread 会保留各自的 session。
+
 ## 常用命令
 
 - `/help`：查看命令。

@@ -9,6 +9,16 @@
 
 它的目标很直接：让 agent 留在代码所在的机器上，同时让你可以从常用聊天工具里操作它。
 
+## 演示
+
+### 单聊
+
+![单聊演示](docs/assets/showcase.png)
+
+### 群聊 topic 模式：多 workspace 并行工作
+
+https://github.com/user-attachments/assets/48aca05e-20f4-47f8-ac80-d93c6a4ecf60
+
 ## 能做什么
 
 - 通过 Telegram 或 Lark/飞书远程控制本地 Codex 会话。
@@ -81,6 +91,7 @@ agent-relay 支持私聊，也支持群聊。群聊适合作为一个共享的 a
 - 把 bot 加入群聊，并用 `ALLOWED_CONVERSATION_IDS` 允许这个群。
 - 发送文本、图片 caption 和 slash command 时提及 bot；普通 `@bot` 或 `@BotName` 前后用空格分隔。
 - 未提及 bot 的群聊消息会在授权检查前被忽略。
+- Telegram 论坛话题和 Lark/飞书线程会被视为独立 scope，因此同一个群里的不同话题或线程可以各自选择 workspace，并行运行独立 Codex 会话。
 - 如果希望多个 agent 在同一个群里协作，每个 agent bot 运行一个 agent-relay 进程。
 - 如果希望 Codex 主动提及另一个 agent bot，需要配置 peer agents 并开启本地 relay 能力 API。
 
