@@ -245,6 +245,76 @@ describe("lark adapter", () => {
     }]);
   });
 
+  test("routes lark group slash commands with a separated bot mention", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+    const received: unknown[] = [];
+
+    await adapter.start(async (message) => {
+      received.push(message);
+    });
+    await channel.handlers.message?.(normalizedMessage({
+      content: "/relay @RelayBot",
+      rawContentType: "text",
+      mentionedBot: true,
+      mentions: [{ key: "@RelayBot", name: "RelayBot", openId: "ou_bot", isBot: true }],
+    }));
+
+    expect(received).toMatchObject([{
+      kind: "message",
+      text: "/relay",
+      conversationType: "group",
+      mentionedBot: true,
+    }]);
+  });
+
+  test("does not strip concatenated lark bot mentions", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+    const received: unknown[] = [];
+
+    await adapter.start(async (message) => {
+      received.push(message);
+    });
+    await channel.handlers.message?.(normalizedMessage({
+      content: "@RelayBot/relay",
+      rawContentType: "text",
+      mentionedBot: true,
+      mentions: [{ key: "@RelayBot", name: "RelayBot", openId: "ou_bot", isBot: true }],
+    }));
+
+    expect(received).toMatchObject([{
+      kind: "message",
+      text: "@RelayBot/relay",
+      conversationType: "group",
+      mentionedBot: true,
+    }]);
+  });
+
+  test("strips separated lark bot mentions from file captions", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+    const received: unknown[] = [];
+
+    await adapter.start(async (message) => {
+      received.push(message);
+    });
+    await channel.handlers.message?.(normalizedMessage({
+      content: "@RelayBot inspect",
+      rawContentType: "file",
+      mentionedBot: true,
+      mentions: [{ key: "@RelayBot", name: "RelayBot", openId: "ou_bot", isBot: true }],
+      resources: [{ type: "file", fileKey: "file_key", fileName: "report.txt" }],
+    }));
+
+    expect(received).toMatchObject([{
+      kind: "file",
+      caption: "inspect",
+      conversationType: "group",
+      mentionedBot: true,
+    }]);
+  });
+
   test("routes card button actions as callback queries", async () => {
     const channel = new FakeLarkChannel();
     const adapter = adapterWith(channel, { cardActionDispatchDelayMs: 0 });

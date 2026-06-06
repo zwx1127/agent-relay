@@ -50,16 +50,17 @@ Check:
 - `ALLOWED_USER_IDS` uses sender `open_id` values.
 - `ALLOWED_CONVERSATION_IDS` uses chat `chat_id` values.
 - Bot messaging, message receive events, and card action events are enabled.
-- In groups, the message mentions the bot.
+- In groups, the message mentions the bot. Keep `@BotName` separated by spaces, such as `/relay @RelayBot` or `@RelayBot /relay`.
 
 ## Group chat messages are ignored
 
 Check:
 
 - The bot is actually a member of the group.
-- The message mentions the bot directly.
+- The message mentions the bot directly. Keep normal mentions separated by spaces, such as `/relay @relay_bot` or `@relay_bot /relay`; Telegram's native `/relay@relay_bot` command form is also accepted.
 - Both the user and the group are allowed when `ALLOWED_CONVERSATION_IDS` is set.
 - Slash commands, image/file captions, and normal text all include the bot mention.
+- If there is no `router.message_received` or `router.group_message_ignored` log entry after sending a group message, Telegram did not deliver that update to the bot. Check the command format, bot privacy mode, and group permissions.
 - For multi-agent groups, each bot has its own relay process and its own credentials.
 
 ## Buttons stop working

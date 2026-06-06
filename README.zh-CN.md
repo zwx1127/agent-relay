@@ -72,14 +72,14 @@ bun run start
 | `/ps` | 查看 Codex 后台终端。 |
 | `/stop` | 要求 Codex 清理后台终端。 |
 
-在群聊里发送文本、图片或 slash command 时，需要提及 bot。如果 bot 只应该在指定群里工作，请配置 `ALLOWED_CONVERSATION_IDS`。
+在群聊里发送文本、图片或 slash command 时，需要提及 bot。普通 bot 提及应作为独立 token 使用，例如 `/relay @relay_bot` 或 `@relay_bot review this change`；Telegram 原生的 `/relay@relay_bot` 命令格式也会兼容。如果 bot 只应该在指定群里工作，请配置 `ALLOWED_CONVERSATION_IDS`。
 
 ## 群聊和 agent 团队
 
 agent-relay 支持私聊，也支持群聊。群聊适合作为一个共享的 agent 操作室。
 
 - 把 bot 加入群聊，并用 `ALLOWED_CONVERSATION_IDS` 允许这个群。
-- 发送文本、图片 caption 和 slash command 时提及 bot。
+- 发送文本、图片 caption 和 slash command 时提及 bot；普通 `@bot` 或 `@BotName` 前后用空格分隔。
 - 未提及 bot 的群聊消息会在授权检查前被忽略。
 - 如果希望多个 agent 在同一个群里协作，每个 agent bot 运行一个 agent-relay 进程。
 - 如果希望 Codex 主动提及另一个 agent bot，需要配置 peer agents 并开启本地 relay 能力 API。

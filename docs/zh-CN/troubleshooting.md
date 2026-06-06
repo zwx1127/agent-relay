@@ -50,16 +50,17 @@ relay 启动时会跳过离线期间积压的 Telegram 消息。
 - `ALLOWED_USER_IDS` 使用发送者 `open_id`。
 - `ALLOWED_CONVERSATION_IDS` 使用 chat `chat_id`。
 - 已启用机器人消息、消息接收事件和卡片 action 事件。
-- 群聊消息提及了 bot。
+- 群聊消息提及了 bot。普通 `@BotName` 需要用空格分隔，例如 `/relay @RelayBot` 或 `@RelayBot /relay`。
 
 ## 群聊消息被忽略
 
 检查：
 
 - bot 确实已经加入群聊。
-- 消息直接提及了 bot。
+- 消息直接提及了 bot。普通 `@bot` 提及需要用空格分隔，例如 `/relay @relay_bot` 或 `@relay_bot /relay`；Telegram 原生的 `/relay@relay_bot` 命令格式也会兼容。
 - 如果设置了 `ALLOWED_CONVERSATION_IDS`，用户和群聊都需要命中 allowlist。
 - slash command、图片 caption 和普通文本都需要包含 bot 提及。
+- 如果发送群聊消息后没有 `router.message_received` 或 `router.group_message_ignored` 日志，说明 Telegram 没有把 update 投递给 bot，需要检查命令格式、bot privacy mode 和群权限。
 - 多 agent 群聊中，每个 bot 都需要独立 relay 进程和独立凭证。
 
 ## 按钮失效

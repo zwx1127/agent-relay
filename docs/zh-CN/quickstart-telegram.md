@@ -53,7 +53,7 @@ ALLOWED_CONVERSATION_IDS=-100123456
 1. 把 bot 加入群聊。
 2. 将 `ALLOWED_CONVERSATION_IDS` 设置为这个群的 chat ID。
 3. 如果当前环境中 bot username 自动发现不稳定，可以手动配置 `TELEGRAM_BOT_USERNAME`。
-4. 发送文本、图片 caption 和 slash command 时提及 bot。
+4. 发送文本、图片 caption 和 slash command 时提及 bot。普通 `@bot` 提及需要用空格分隔，例如 `/relay @relay_bot` 或 `@relay_bot inspect this`。
 
 未提及 bot 的群聊消息会在授权检查前被忽略，因此普通群消息不会触发 relay。
 
@@ -70,7 +70,7 @@ bun run start
 3. 像平常一样向 Codex 发送消息。
 4. 用按钮回答问题或审批操作。
 
-在群聊里发送文本、图片或 slash command 时，需要提及 bot。
+在群聊里发送文本、图片或 slash command 时，需要提及 bot。普通 `@bot` 前后需要用空格分隔；Telegram 原生的 `/relay@relay_bot` 命令格式也会兼容。
 
 ## 常用命令
 

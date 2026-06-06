@@ -72,14 +72,14 @@ Common commands:
 | `/ps` | List Codex background terminals. |
 | `/stop` | Ask Codex to clean background terminals. |
 
-In group chats, mention the bot when sending text, images, files, or slash commands. Use `ALLOWED_CONVERSATION_IDS` when a bot should only respond in specific groups.
+In group chats, mention the bot when sending text, images, files, or slash commands. Keep normal bot mentions as separate tokens, such as `/relay @relay_bot` or `@relay_bot review this change`. Telegram's native `/relay@relay_bot` command form is also accepted. Use `ALLOWED_CONVERSATION_IDS` when a bot should only respond in specific groups.
 
 ## Group chats and agent teams
 
 agent-relay works in private chats and group chats. Group chats are useful when you want a shared operator room for one or more local agents.
 
 - Add the bot to the group and allow the group with `ALLOWED_CONVERSATION_IDS`.
-- Mention the bot in text, image/file captions, and slash commands.
+- Mention the bot in text, image/file captions, and slash commands, with spaces around `@bot` or `@BotName` when it is a normal mention.
 - Unmentioned group messages are ignored before authorization checks.
 - Run one agent-relay process per agent bot when you want several agents in the same group.
 - Configure peer agents and enable the local relay capability API when you want Codex to mention another agent bot.

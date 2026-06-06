@@ -153,6 +153,55 @@ describe("telegram adapter", () => {
     });
   });
 
+  test("marks telegram group slash commands with a separated bot mention", async () => {
+    const adapter = new TelegramAdapter("token", async () => Response.json({ ok: true, result: [] }), noopLogger, {
+      botUsername: "relay_bot",
+    });
+    const inbound = (adapter as any).toInboundMessage({
+      update_id: 5,
+      message: {
+        message_id: 9,
+        date: 1,
+        text: "/relay @relay_bot",
+        entities: [
+          { type: "bot_command", offset: 0, length: 6 },
+          { type: "mention", offset: 7, length: 10 },
+        ],
+        chat: { id: -2, type: "supergroup" },
+        from: { id: 3 },
+      },
+    });
+
+    expect(inbound).toMatchObject({
+      text: "/relay",
+      conversationType: "group",
+      mentionedBot: true,
+    });
+  });
+
+  test("does not mark concatenated telegram bot mentions as addressed to the bot", async () => {
+    const adapter = new TelegramAdapter("token", async () => Response.json({ ok: true, result: [] }), noopLogger, {
+      botUsername: "relay_bot",
+    });
+    const inbound = (adapter as any).toInboundMessage({
+      update_id: 5,
+      message: {
+        message_id: 9,
+        date: 1,
+        text: "@relay_bot/relay",
+        entities: [{ type: "mention", offset: 0, length: 10 }],
+        chat: { id: -2, type: "supergroup" },
+        from: { id: 3 },
+      },
+    });
+
+    expect(inbound).toMatchObject({
+      text: "@relay_bot/relay",
+      conversationType: "group",
+      mentionedBot: false,
+    });
+  });
+
   test("marks telegram group text without bot mention as unmentioned", async () => {
     const adapter = new TelegramAdapter("token", async () => Response.json({ ok: true, result: [] }), noopLogger, {
       botUsername: "relay_bot",

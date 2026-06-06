@@ -53,7 +53,7 @@ For group chats:
 1. Add the bot to the group.
 2. Set `ALLOWED_CONVERSATION_IDS` to the group chat ID.
 3. Set `TELEGRAM_BOT_USERNAME` if automatic username discovery is not reliable in your environment.
-4. Mention the bot in text, image/file captions, and slash commands.
+4. Mention the bot in text, image/file captions, and slash commands. Keep normal mentions separated by spaces, for example `/relay @relay_bot` or `@relay_bot inspect this`.
 
 Unmentioned group messages are ignored before authorization checks, so normal group traffic will not trigger the relay.
 
@@ -70,7 +70,7 @@ Then in Telegram:
 3. Send a normal message to Codex.
 4. Use buttons to answer questions or approve actions.
 
-In groups, mention the bot when sending text, images, files, or slash commands.
+In groups, mention the bot when sending text, images, files, or slash commands. Use spaces around a normal `@bot` mention; Telegram's native `/relay@relay_bot` command form is also accepted for compatibility.
 
 ## Useful commands
 

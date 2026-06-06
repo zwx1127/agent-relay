@@ -538,10 +538,33 @@ function stripLarkBotMentions(text: string, message: NormalizedMessage): string 
   for (const mention of message.mentions.filter((item) => item.isBot)) {
     const candidates = [mention.key, mention.name ? `@${mention.name}` : undefined, mention.name].filter((item): item is string => Boolean(item));
     for (const candidate of candidates) {
-      next = next.replace(candidate, "");
+      next = stripStandaloneLarkBotMentionCandidate(next, candidate);
     }
   }
   return next.trim();
+}
+
+function stripStandaloneLarkBotMentionCandidate(text: string, candidate: string): string {
+  let next = text;
+  let searchFrom = 0;
+  while (searchFrom < next.length) {
+    const index = next.indexOf(candidate, searchFrom);
+    if (index < 0) break;
+    if (isStandaloneTextToken(next, index, candidate.length)) {
+      next = `${next.slice(0, index)}${next.slice(index + candidate.length)}`;
+      searchFrom = Math.max(0, index - 1);
+    } else {
+      searchFrom = index + candidate.length;
+    }
+  }
+  return next;
+}
+
+function isStandaloneTextToken(text: string, offset: number, length: number): boolean {
+  const before = offset > 0 ? text[offset - 1] : undefined;
+  const afterIndex = offset + length;
+  const after = afterIndex < text.length ? text[afterIndex] : undefined;
+  return (!before || /\s/.test(before)) && (!after || /\s/.test(after));
 }
 
 function reactionForEmoji(emoji: string): string {

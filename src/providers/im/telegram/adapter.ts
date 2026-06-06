@@ -622,11 +622,18 @@ function mentionContextForTelegram(
 
 function entityMentionsBot(text: string, entity: TelegramMessageEntity, botUsername: string): boolean {
   const value = text.slice(entity.offset, entity.offset + entity.length);
-  if (entity.type === "mention") return normalizeBotUsername(value) === botUsername;
-  if (entity.type === "text_mention") return normalizeBotUsername(entity.user?.username) === botUsername;
+  if (entity.type === "mention") return normalizeBotUsername(value) === botUsername && isStandaloneMentionToken(text, entity);
+  if (entity.type === "text_mention") return normalizeBotUsername(entity.user?.username) === botUsername && isStandaloneMentionToken(text, entity);
   if (entity.type !== "bot_command") return false;
   const atIndex = value.indexOf("@");
   return atIndex >= 0 && normalizeBotUsername(value.slice(atIndex + 1)) === botUsername;
+}
+
+function isStandaloneMentionToken(text: string, entity: TelegramMessageEntity): boolean {
+  const before = entity.offset > 0 ? text[entity.offset - 1] : undefined;
+  const afterIndex = entity.offset + entity.length;
+  const after = afterIndex < text.length ? text[afterIndex] : undefined;
+  return (!before || /\s/.test(before)) && (!after || /\s/.test(after));
 }
 
 function stripBotMentions(text: string, entities: TelegramMessageEntity[]): string {

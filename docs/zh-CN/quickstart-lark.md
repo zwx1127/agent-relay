@@ -57,7 +57,7 @@ WORKSPACE_ROOT=/absolute/path/to/workspaces
 1. 把 bot 加入群聊。
 2. `ALLOWED_USER_IDS` 使用发送者 `open_id`。
 3. `ALLOWED_CONVERSATION_IDS` 使用群聊 `chat_id`。
-4. 发送文本、图片 caption 和 slash command 时提及 bot。
+4. 发送文本、图片 caption 和 slash command 时提及 bot。普通 `@BotName` 需要用空格分隔，例如 `/relay @RelayBot` 或 `@RelayBot inspect this`。
 
 未提及 bot 的群聊消息会在授权检查前被忽略，因此普通群消息不会触发 relay。
 
@@ -74,7 +74,7 @@ bun run start
 3. 像平常一样向 Codex 发送消息。
 4. 用卡片按钮回答问题或审批操作。
 
-在群聊里发送文本、图片 caption 或 slash command 时，需要提及 bot。
+在群聊里发送文本、图片 caption 或 slash command 时，需要提及 bot。`@BotName` 应作为独立 token，前后用空格分隔。
 
 ## 常用命令
 

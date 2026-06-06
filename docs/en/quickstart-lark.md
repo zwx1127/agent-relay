@@ -57,7 +57,7 @@ For group chats:
 1. Add the bot to the group.
 2. Use sender `open_id` values in `ALLOWED_USER_IDS`.
 3. Use the group `chat_id` in `ALLOWED_CONVERSATION_IDS`.
-4. Mention the bot in text, image/file captions, and slash commands.
+4. Mention the bot in text, image/file captions, and slash commands. Keep the bot mention separated by spaces, for example `/relay @RelayBot` or `@RelayBot inspect this`.
 
 Unmentioned group messages are ignored before authorization checks, so normal group traffic will not trigger the relay.
 
@@ -74,7 +74,7 @@ Then in Lark or Feishu:
 3. Send a normal message to Codex.
 4. Use card buttons to answer questions or approve actions.
 
-In groups, mention the bot when sending text, image/file captions, or slash commands.
+In groups, mention the bot when sending text, image/file captions, or slash commands. Keep `@BotName` as a separate token with spaces around it.
 
 ## Useful commands
 
