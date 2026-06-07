@@ -34,7 +34,7 @@ interface PendingPrompt {
   conversationId: ConversationId;
   scopeKey?: string;
   promptMessageId: MessageId;
-  kind: "workspace_name" | "codex_user_input" | "codex_approval" | "relay_command";
+  kind: "workspace_name" | "codex_user_input" | "codex_approval" | "relay_command" | "media_action";
   createdAt: number;
   sessionKey?: string;
   payloadJson?: string;

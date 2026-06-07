@@ -116,7 +116,7 @@ export class RelayController {
       ensureAgentStarted: (conversationId, workspace) => this.ensureAgentStarted(conversationId, workspace),
       sendWaitingPromptNotice: (conversationId, status) => this.sendWaitingPromptNotice(conversationId, status),
       submitTask: (conversationId, text, userMessageId, preference, input) => this.submitTask(conversationId, text, userMessageId, preference, input),
-      sendRendered: (conversationId, rendered) => this.sendRendered(conversationId, rendered),
+      sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
       trySendRendered: (conversationId, rendered, failureEvent, fields) => this.trySendRendered(conversationId, rendered, failureEvent, fields),
       appendSystem: (conversationId, text) => this.appendSystem(conversationId, text),
       lastUserMessageId: (sessionKeyValue) => this.lastUserMessageIds.get(sessionKeyValue),
@@ -267,6 +267,8 @@ export class RelayController {
           await this.workspaceFlow.createWorkspaceFromPrompt(message.conversationId, message.replyToMessageId!, text);
         } else if (pending?.kind === "codex_user_input") {
           await this.codexPromptFlow.answerFreeText(message.conversationId, message.replyToMessageId!, text);
+        } else if (pending?.kind === "media_action") {
+          await this.mediaRelay.answerMediaActionPrompt(message.conversationId, message.replyToMessageId!, text);
         } else if (pending?.kind === "relay_command") {
           await this.threadCommands.answerRelayCommandPrompt(message.conversationId, message.replyToMessageId!, text);
         } else {

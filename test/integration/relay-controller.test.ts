@@ -11,6 +11,7 @@ import { SQLiteStore } from "../../src/storage/sqlite-store.ts";
 import { TextLogger, type LogLevel } from "../../src/domain/logger.ts";
 import type { MessageId } from "../../src/domain/ids.ts";
 import { FakeAgent, FakeImAdapter, sleep } from "../support/fakes.ts";
+import { MEDIA_GROUP_QUIET_MS } from "../../src/relay/ui/constants.ts";
 
 
 let dirs: string[] = [];
@@ -1513,8 +1514,8 @@ describe("relay controller", () => {
     expect(agent.sent[0]?.options?.images?.[0]?.caption).toBe("inspect this");
   });
 
-  test("photo prompt without caption uses default image prompt", async () => {
-    const { router, store, agent, root } = fixture();
+  test("photo prompt without caption is saved and asks how to handle it", async () => {
+    const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
@@ -1522,8 +1523,49 @@ describe("relay controller", () => {
 
     await router.handle(mediaMessage());
 
-    expect(agent.sent[0]?.text).toBe("Please inspect the attached image(s).");
-    expect(agent.sent[0]?.options?.images).toHaveLength(1);
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Received an image.");
+    expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
+    const promptId = adapter.sent.at(-1)?.messageId!;
+    const pending = store.getPendingPrompt("1", promptId);
+    expect(pending?.kind).toBe("media_action");
+    const payload = JSON.parse(pending!.payloadJson!);
+    expect(payload.kind).toBe("image");
+    expect(payload.images).toHaveLength(1);
+    expect(payload.images[0].path).toContain(join(path, ".agent-relay", "media", "incoming"));
+    expect(existsSync(payload.images[0].path)).toBe(true);
+
+    await router.handle(textMessage("extract the text", 7, promptId));
+
+    expect(agent.sent).toHaveLength(1);
+    expect(agent.sent[0]?.text).toBe("extract the text");
+    expect(agent.sent[0]?.options?.images?.[0]?.path).toBe(payload.images[0].path);
+    expect(store.getPendingPrompt("1", promptId)).toBeUndefined();
+  });
+
+  test("media group without caption asks once and submits all images after reply", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle({ ...mediaMessage(), id: "1", messageId: "1", mediaGroupId: "album-1" });
+    await router.handle({ ...mediaMessage(), id: "2", messageId: "2", mediaGroupId: "album-1" });
+    await sleep(MEDIA_GROUP_QUIET_MS + 50);
+
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Received 2 images.");
+    const promptId = adapter.sent.at(-1)?.messageId!;
+    const pending = store.getPendingPrompt("1", promptId);
+    const payload = JSON.parse(pending!.payloadJson!);
+    expect(payload.images).toHaveLength(2);
+
+    await router.handle(textMessage("compare these screenshots", 7, promptId));
+
+    expect(agent.sent).toHaveLength(1);
+    expect(agent.sent[0]?.text).toBe("compare these screenshots");
+    expect(agent.sent[0]?.options?.images).toHaveLength(2);
   });
 
   test("file prompt is saved under relay files and sent to agent as a path prompt", async () => {
@@ -1545,6 +1587,37 @@ describe("relay controller", () => {
     expect(existsSync(join(path, ".agent-relay", ".gitignore"))).toBe(true);
     const incomingDayDirs = readdirSync(join(path, ".agent-relay", "files", "incoming"));
     expect(incomingDayDirs).toHaveLength(1);
+  });
+
+  test("file prompt without caption is saved and asks how to handle it", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    adapter.downloads.set("file-doc", new TextEncoder().encode("hello").buffer);
+
+    await router.handle(fileMessage());
+
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Received file: file.txt");
+    expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
+    const promptId = adapter.sent.at(-1)?.messageId!;
+    const pending = store.getPendingPrompt("1", promptId);
+    expect(pending?.kind).toBe("media_action");
+    const payload = JSON.parse(pending!.payloadJson!);
+    expect(payload.kind).toBe("file");
+    expect(payload.path).toContain(join(path, ".agent-relay", "files", "incoming"));
+    expect(existsSync(payload.path)).toBe(true);
+
+    await router.handle(textMessage("summarize this file", 7, promptId));
+
+    expect(agent.sent).toHaveLength(1);
+    expect(agent.sent[0]?.text).toContain("User attached a file");
+    expect(agent.sent[0]?.text).toContain("Filename: file.txt");
+    expect(agent.sent[0]?.text).toContain("User caption: summarize this file");
+    expect(agent.sent[0]?.text).toContain(payload.path);
+    expect(store.getPendingPrompt("1", promptId)).toBeUndefined();
   });
 
   test("codex image output is sent as photo and copied to outgoing media", async () => {

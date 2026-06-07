@@ -6,17 +6,17 @@ import { parseSessionKey } from "../domain/session.ts";
 import { parseChatScopeKey } from "../domain/scope.ts";
 import { isRealDirectory } from "../domain/workspace.ts";
 import type { AgentDriver, AgentImageInput, AgentImageOutputEvent, AgentSessionStatus, AgentTaskInput } from "../ports/agent.ts";
-import type { FileInboundMessage, ImAdapter, MediaInboundMessage } from "../ports/im.ts";
+import type { FileInboundMessage, ImAdapter, MediaInboundMessage, SendMessageOptions } from "../ports/im.ts";
 import type { RelayStore } from "../storage/store.ts";
 import type { Logger, LogFields } from "../domain/logger.ts";
 import type { SendImageCapabilityRequest } from "./capabilities/send-image.ts";
 import type { SendFileCapabilityRequest } from "./capabilities/send-file.ts";
 import type { TaskSubmitPreference } from "./task-coordinator.ts";
 import type { WorkspaceRecord } from "./types.ts";
-import { DEFAULT_IMAGE_PROMPT, MEDIA_GROUP_QUIET_MS } from "./ui/constants.ts";
+import { CODEX_PROMPT_TTL_MS, MEDIA_GROUP_QUIET_MS } from "./ui/constants.ts";
 import { bestPhoto, formatBytes, pathContains, truncateTelegramCaption } from "./ui/media-format.ts";
 import { formatErrorMessage } from "./ui/messages.ts";
-import { textMessage } from "./ui/text-parts.ts";
+import { messageWithTitle, textMessage } from "./ui/text-parts.ts";
 import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
 import { extensionFromTelegramPath, fileBlobFromPath, imageBlobFromPath, safeFilename, saveGeneratedImage, saveRelayFile, saveRelayMedia } from "./media.ts";
 
@@ -26,6 +26,23 @@ interface MediaGroupState {
   /** Reset on every album message so the group is submitted after a quiet window. */
   timer?: Timer;
 }
+
+interface PendingImageActionPayload {
+  kind: "image";
+  images: AgentImageInput[];
+  originalMessageId?: MessageId;
+}
+
+interface PendingFileActionPayload {
+  kind: "file";
+  path: string;
+  filename: string;
+  fileSize: number;
+  mimeType?: string;
+  originalMessageId?: MessageId;
+}
+
+type PendingMediaActionPayload = PendingImageActionPayload | PendingFileActionPayload;
 
 export interface MediaRelayDeps {
   config: AppConfig;
@@ -38,7 +55,7 @@ export interface MediaRelayDeps {
   ensureAgentStarted(conversationId: ConversationId, workspace: WorkspaceRecord): Promise<AgentSessionStatus>;
   sendWaitingPromptNotice(conversationId: ConversationId, status: AgentSessionStatus): Promise<boolean>;
   submitTask(conversationId: ConversationId, text: string, userMessageId?: MessageId, preference?: TaskSubmitPreference, input?: AgentTaskInput): Promise<void>;
-  sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText): Promise<{ messageId?: MessageId }>;
+  sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
   trySendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, failureEvent: string, fields?: LogFields): Promise<void>;
   appendSystem(conversationId: ConversationId, text: string): void;
   lastUserMessageId(sessionKey: string): MessageId | undefined;
@@ -138,16 +155,26 @@ export class MediaRelayService {
       return;
     }
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
-    const status = await this.deps.ensureAgentStarted(scope.scopeKey, workspace);
-    if (await this.deps.sendWaitingPromptNotice(scope.scopeKey, status)) return;
 
     // Preserve provider message order so image references in captions match the
     // order of localImage inputs sent to Codex.
     const sorted = [...messages].sort((a, b) => Number(a.messageId) - Number(b.messageId));
-    const prompt = sorted.map((item) => item.caption?.trim()).find(Boolean) ?? DEFAULT_IMAGE_PROMPT;
+    const prompt = sorted.map((item) => item.caption?.trim()).find(Boolean);
+    if (prompt) {
+      const status = await this.deps.ensureAgentStarted(scope.scopeKey, workspace);
+      if (await this.deps.sendWaitingPromptNotice(scope.scopeKey, status)) return;
+    }
     const images: AgentImageInput[] = [];
     for (const media of sorted) {
       images.push(await this.downloadAndSavePhoto(workspace, media));
+    }
+    if (!prompt) {
+      await this.promptForMediaAction(scope.scopeKey, {
+        kind: "image",
+        images,
+        ...(sorted[0]?.messageId ? { originalMessageId: sorted[0].messageId } : {}),
+      }, sorted[0]?.messageId);
+      return;
     }
     await this.deps.submitTask(scope.scopeKey, prompt, sorted[0]?.messageId, "auto", { text: prompt, images });
   }
@@ -195,16 +222,30 @@ export class MediaRelayService {
       return;
     }
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
-    const status = await this.deps.ensureAgentStarted(scope.scopeKey, workspace);
-    if (await this.deps.sendWaitingPromptNotice(scope.scopeKey, status)) return;
 
+    const caption = message.caption?.trim();
+    if (caption) {
+      const status = await this.deps.ensureAgentStarted(scope.scopeKey, workspace);
+      if (await this.deps.sendWaitingPromptNotice(scope.scopeKey, status)) return;
+    }
     const stored = await this.downloadAndSaveFile(workspace, message);
+    if (!caption) {
+      await this.promptForMediaAction(scope.scopeKey, {
+        kind: "file",
+        path: stored.path,
+        filename: stored.filename,
+        fileSize: stored.fileSize,
+        ...(stored.mimeType ? { mimeType: stored.mimeType } : {}),
+        originalMessageId: message.messageId,
+      }, message.messageId);
+      return;
+    }
     const prompt = formatAttachedFilePrompt({
       path: stored.path,
       filename: stored.filename,
       fileSize: stored.fileSize,
       mimeType: stored.mimeType,
-      caption: message.caption,
+      caption,
     });
     await this.deps.submitTask(scope.scopeKey, prompt, message.messageId);
   }
@@ -246,6 +287,41 @@ export class MediaRelayService {
       { message_id: messageId },
     );
     this.deps.appendSystem(conversationId, `Error: ${detail}\n`);
+  }
+
+  async answerMediaActionPrompt(conversationId: ConversationId, promptMessageId: MessageId, text: string): Promise<void> {
+    const scope = parseChatScopeKey(String(conversationId));
+    const pending = this.deps.store.getPendingPrompt(scope.scopeKey, promptMessageId);
+    const payload = parseMediaActionPayload(pending?.payloadJson);
+    if (!pending || pending.kind !== "media_action" || !payload || isPromptExpired(pending)) {
+      this.deps.store.deletePendingPrompt(scope.scopeKey, promptMessageId);
+      await this.deps.sendRendered(scope.scopeKey, messageWithTitle("Attachment prompt expired.", "Resend the image or file with a description."));
+      return;
+    }
+    this.deps.store.deletePendingPrompt(scope.scopeKey, promptMessageId);
+    const prompt = text.trim();
+    if (!prompt) {
+      await this.deps.sendRendered(scope.scopeKey, messageWithTitle("Attachment not submitted.", "Reply with how you want Codex to handle it."));
+      return;
+    }
+    if (payload.kind === "image") {
+      await this.deps.submitTask(scope.scopeKey, prompt, payload.originalMessageId ?? promptMessageId, "auto", {
+        text: prompt,
+        images: payload.images.map((image) => ({ path: image.path, ...(image.caption ? { caption: image.caption } : {}) })),
+      });
+      return;
+    }
+    await this.deps.submitTask(
+      scope.scopeKey,
+      formatAttachedFilePrompt({
+        path: payload.path,
+        filename: payload.filename,
+        fileSize: payload.fileSize,
+        mimeType: payload.mimeType,
+        caption: prompt,
+      }),
+      payload.originalMessageId ?? promptMessageId,
+    );
   }
 
   async sendAgentImageOutput(event: AgentImageOutputEvent): Promise<void> {
@@ -412,6 +488,28 @@ export class MediaRelayService {
       createdAt: Date.now(),
     });
   }
+
+  private async promptForMediaAction(conversationId: ConversationId, payload: PendingMediaActionPayload, replyToMessageId?: MessageId): Promise<void> {
+    const scope = parseChatScopeKey(String(conversationId));
+    const title = payload.kind === "image"
+      ? `Received ${payload.images.length === 1 ? "an image" : `${payload.images.length} images`}.`
+      : `Received file: ${payload.filename}`;
+    const result = await this.deps.sendRendered(scope.scopeKey, messageWithTitle(title, "Reply to this message with what you want Codex to do with it."), {
+      forceReply: true,
+      disableWebPagePreview: true,
+      ...(replyToMessageId ? { replyToMessageId } : {}),
+    });
+    if (!result.messageId) throw new Error("IM adapter did not return an attachment prompt message id.");
+    this.deps.store.setPendingPrompt({
+      conversationId: scope.conversationId,
+      scopeKey: scope.scopeKey,
+      promptMessageId: result.messageId,
+      kind: "media_action",
+      createdAt: Date.now(),
+      payloadJson: JSON.stringify(payload),
+      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
+    });
+  }
 }
 
 function formatAttachedFilePrompt(input: { path: string; filename: string; fileSize: number; mimeType?: string; caption?: string }): string {
@@ -426,4 +524,53 @@ function formatAttachedFilePrompt(input: { path: string; filename: string; fileS
     "",
     "Use the local path above to inspect or process the file if needed.",
   ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function parseMediaActionPayload(payloadJson: string | undefined): PendingMediaActionPayload | undefined {
+  if (!payloadJson) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const record = parsed as Record<string, unknown>;
+  if (record.kind === "image") {
+    const images = Array.isArray(record.images)
+      ? record.images
+        .filter((image): image is Record<string, unknown> => Boolean(image) && typeof image === "object")
+        .map((image) => ({
+          path: typeof image.path === "string" ? image.path : "",
+          ...(typeof image.caption === "string" && image.caption ? { caption: image.caption } : {}),
+        }))
+        .filter((image): image is AgentImageInput => image.path.length > 0)
+      : [];
+    if (images.length === 0) return undefined;
+    return {
+      kind: "image",
+      images,
+      ...(isMessageId(record.originalMessageId) ? { originalMessageId: record.originalMessageId } : {}),
+    };
+  }
+  if (record.kind === "file") {
+    if (typeof record.path !== "string" || typeof record.filename !== "string" || typeof record.fileSize !== "number") return undefined;
+    return {
+      kind: "file",
+      path: record.path,
+      filename: record.filename,
+      fileSize: record.fileSize,
+      ...(typeof record.mimeType === "string" ? { mimeType: record.mimeType } : {}),
+      ...(isMessageId(record.originalMessageId) ? { originalMessageId: record.originalMessageId } : {}),
+    };
+  }
+  return undefined;
+}
+
+function isPromptExpired(prompt: { expiresAt?: number }): boolean {
+  return typeof prompt.expiresAt === "number" && prompt.expiresAt < Date.now();
+}
+
+function isMessageId(value: unknown): value is MessageId {
+  return typeof value === "string" || typeof value === "number";
 }
