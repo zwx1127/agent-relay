@@ -96,6 +96,11 @@ Check:
 
 - A workspace is selected.
 - The image is under `MEDIA_MAX_BYTES`.
+- For Lark/Feishu inbound images, the app can access message resources and the bot is in the same chat as the message.
+
+## Lark or Feishu reaction errors
+
+If logs show `Access denied` for `im:message.reactions:write_only` or `im:message`, enable one of those app permissions and republish or reinstall the app. This only affects task status reactions; it is separate from image and file downloads.
 
 ## Files fail
 

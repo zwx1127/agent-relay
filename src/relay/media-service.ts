@@ -159,7 +159,7 @@ export class MediaRelayService {
       throw new Error(`Image is too large (${formatBytes(photo.fileSize)}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
     }
     if (!this.deps.adapter.downloadFile) throw new Error("IM adapter cannot download media.");
-    const downloaded = await this.deps.adapter.downloadFile(photo.fileId);
+    const downloaded = await this.deps.adapter.downloadFile(photo.fileId, { messageId: message.messageId });
     const size = downloaded.fileSize ?? downloaded.bytes.byteLength;
     if (size > this.deps.config.mediaMaxBytes || downloaded.bytes.byteLength > this.deps.config.mediaMaxBytes) {
       throw new Error(`Image is too large (${formatBytes(Math.max(size, downloaded.bytes.byteLength))}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
@@ -214,7 +214,7 @@ export class MediaRelayService {
       throw new Error(`File is too large (${formatBytes(message.file.fileSize)}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
     }
     if (!this.deps.adapter.downloadFile) throw new Error("IM adapter cannot download files.");
-    const downloaded = await this.deps.adapter.downloadFile(message.file.fileId, { kind: "file" });
+    const downloaded = await this.deps.adapter.downloadFile(message.file.fileId, { kind: "file", messageId: message.messageId });
     const size = downloaded.fileSize ?? downloaded.bytes.byteLength;
     if (size > this.deps.config.mediaMaxBytes || downloaded.bytes.byteLength > this.deps.config.mediaMaxBytes) {
       throw new Error(`File is too large (${formatBytes(Math.max(size, downloaded.bytes.byteLength))}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);

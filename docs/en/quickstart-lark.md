@@ -24,6 +24,7 @@ Enable:
 - Bot messaging.
 - Message receive events.
 - Card action events.
+- The message reaction permission (`im:message.reactions:write_only` or `im:message`) if you want task status reactions.
 
 agent-relay uses long-connection delivery, so it does not need a public callback URL.
 

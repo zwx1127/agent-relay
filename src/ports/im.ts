@@ -89,6 +89,7 @@ export interface DownloadedFile {
 
 export interface DownloadFileOptions {
   kind?: "image" | "file";
+  messageId?: MessageId;
 }
 
 export type ConversationType = "direct" | "group" | "unknown";

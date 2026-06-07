@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import * as lark from "@larksuiteoapi/node-sdk";
+import { Readable } from "node:stream";
 import { TextLogger } from "../../src/domain/logger.ts";
 import { LarkAdapter, larkChannelOptions, larkDomainForSdk, type LarkChannelClient } from "../../src/providers/im/lark/adapter.ts";
 import type { CardActionEvent, NormalizedMessage, SendInput, SendOptions } from "@larksuiteoapi/node-sdk";
 
 class FakeLarkChannel implements LarkChannelClient {
+  rawClient?: lark.Client;
   handlers: Parameters<LarkChannelClient["on"]>[0] = {};
   connected = false;
   disconnected = false;
@@ -18,7 +20,32 @@ class FakeLarkChannel implements LarkChannelClient {
   reactions: Array<{ messageId: string; emojiType: string }> = [];
   removedReactions: Array<{ messageId: string; emojiType: string }> = [];
   resources = new Map<string, Buffer>();
+  resourceDownloads: Array<{ fileKey: string; type: "image" | "file" }> = [];
+  messageResourceDownloads: Array<{ messageId: string; fileKey: string; type: "image" | "file" }> = [];
   nextMessageId = 1;
+
+  useRawClient(): void {
+    this.rawClient = {
+      im: {
+        v1: {
+          messageResource: {
+            get: async (payload: { params: { type: "image" | "file" }; path: { message_id: string; file_key: string } }) => {
+              this.messageResourceDownloads.push({
+                messageId: payload.path.message_id,
+                fileKey: payload.path.file_key,
+                type: payload.params.type,
+              });
+              const body = this.resources.get(payload.path.file_key) ?? Buffer.from([1, 2, 3]);
+              return {
+                getReadableStream: () => Readable.from(body),
+                headers: {},
+              };
+            },
+          },
+        },
+      },
+    } as unknown as lark.Client;
+  }
 
   async connect(): Promise<void> {
     this.connected = true;
@@ -58,7 +85,8 @@ class FakeLarkChannel implements LarkChannelClient {
     this.recalled.push(messageId);
   }
 
-  async downloadResource(fileKey: string): Promise<Buffer> {
+  async downloadResource(fileKey: string, type: "image" | "file" = "image"): Promise<Buffer> {
+    this.resourceDownloads.push({ fileKey, type });
     return this.resources.get(fileKey) ?? Buffer.from([1, 2, 3]);
   }
 
@@ -146,6 +174,7 @@ describe("lark adapter", () => {
 
   test("routes image messages and downloads resources", async () => {
     const channel = new FakeLarkChannel();
+    channel.useRawClient();
     channel.resources.set("img_key", Buffer.from([4, 5, 6]));
     const adapter = adapterWith(channel);
     const received: unknown[] = [];
@@ -159,7 +188,7 @@ describe("lark adapter", () => {
       resources: [{ type: "image", fileKey: "img_key" }],
       replyToMessageId: "om_parent",
     }));
-    const file = await adapter.downloadFile("img_key");
+    const file = await adapter.downloadFile("img_key", { messageId: "om_in" });
 
     expect(received).toEqual([{
       kind: "media",
@@ -177,10 +206,13 @@ describe("lark adapter", () => {
     expect([...new Uint8Array(file.bytes)]).toEqual([4, 5, 6]);
     expect(file.filePath).toBe("img_key.jpg");
     expect(file.fileSize).toBe(3);
+    expect(channel.messageResourceDownloads).toEqual([{ messageId: "om_in", fileKey: "img_key", type: "image" }]);
+    expect(channel.resourceDownloads).toEqual([]);
   });
 
   test("routes file messages and downloads file resources", async () => {
     const channel = new FakeLarkChannel();
+    channel.useRawClient();
     channel.resources.set("file_key", Buffer.from([7, 8, 9]));
     const adapter = adapterWith(channel);
     const received: unknown[] = [];
@@ -194,7 +226,7 @@ describe("lark adapter", () => {
       resources: [{ type: "file", fileKey: "file_key", fileName: "report.txt" }],
       replyToMessageId: "om_parent",
     }));
-    const file = await adapter.downloadFile("file_key", { kind: "file" });
+    const file = await adapter.downloadFile("file_key", { kind: "file", messageId: "om_in" });
 
     expect(received).toEqual([{
       kind: "file",
@@ -213,6 +245,22 @@ describe("lark adapter", () => {
     expect([...new Uint8Array(file.bytes)]).toEqual([7, 8, 9]);
     expect(file.filePath).toBe("file_key");
     expect(file.fileSize).toBe(3);
+    expect(channel.messageResourceDownloads).toEqual([{ messageId: "om_in", fileKey: "file_key", type: "file" }]);
+    expect(channel.resourceDownloads).toEqual([]);
+  });
+
+  test("falls back to channel resource downloads without message context", async () => {
+    const channel = new FakeLarkChannel();
+    channel.resources.set("img_key", Buffer.from([4, 5, 6]));
+    const adapter = adapterWith(channel);
+
+    const file = await adapter.downloadFile("img_key");
+
+    expect([...new Uint8Array(file.bytes)]).toEqual([4, 5, 6]);
+    expect(file.filePath).toBe("img_key.jpg");
+    expect(file.fileSize).toBe(3);
+    expect(channel.resourceDownloads).toEqual([{ fileKey: "img_key", type: "image" }]);
+    expect(channel.messageResourceDownloads).toEqual([]);
   });
 
   test("routes mentioned group messages with cleaned text", async () => {

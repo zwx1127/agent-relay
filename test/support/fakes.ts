@@ -53,7 +53,7 @@ export class FakeImAdapter {
     return { messageId };
   }
 
-  async downloadFile(fileId: string, options: { kind?: "image" | "file" } = {}): Promise<{ bytes: ArrayBuffer; filePath?: string; fileName?: string; fileSize?: number }> {
+  async downloadFile(fileId: string, options: { kind?: "image" | "file"; messageId?: MessageId } = {}): Promise<{ bytes: ArrayBuffer; filePath?: string; fileName?: string; fileSize?: number }> {
     const kind = options.kind ?? "image";
     return {
       bytes: this.downloads.get(fileId) ?? new TextEncoder().encode(kind).buffer,

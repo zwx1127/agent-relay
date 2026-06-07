@@ -1,4 +1,5 @@
 import * as lark from "@larksuiteoapi/node-sdk";
+import type { Readable } from "node:stream";
 import type { ConversationId, MessageId } from "../../../domain/ids.ts";
 import { noopLogger, type Logger } from "../../../domain/logger.ts";
 import { createLarkCard, renderLarkMarkdown } from "../../../presentation/lark/text.ts";
@@ -55,6 +56,7 @@ const CARD_UPDATE_MAX_ATTEMPTS = 3;
 const CARD_UPDATE_RETRY_DELAY_MS = 250;
 
 export interface LarkChannelClient {
+  rawClient?: lark.Client;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   on(handlers: LarkEventHandlers): () => void;
@@ -207,7 +209,9 @@ export class LarkAdapter implements ImAdapter {
 
   async downloadFile(fileId: string, options: DownloadFileOptions = {}): Promise<DownloadedFile> {
     const kind = options.kind ?? "image";
-    const buffer = await this.channel.downloadResource(fileId, kind);
+    const buffer = options.messageId && this.channel.rawClient
+      ? await downloadMessageResource(this.channel.rawClient, String(options.messageId), fileId, kind)
+      : await this.channel.downloadResource(fileId, kind);
     const bytes = new ArrayBuffer(buffer.byteLength);
     new Uint8Array(bytes).set(buffer);
     return {
@@ -388,6 +392,27 @@ export class LarkAdapter implements ImAdapter {
       date: Math.floor(message.createTime / 1000),
     };
   }
+}
+
+async function downloadMessageResource(client: lark.Client, messageId: string, fileKey: string, kind: "image" | "file"): Promise<Buffer> {
+  const resource = await client.im.v1.messageResource.get({
+    params: {
+      type: kind,
+    },
+    path: {
+      message_id: messageId,
+      file_key: fileKey,
+    },
+  });
+  return await bufferFromReadable(resource.getReadableStream());
+}
+
+async function bufferFromReadable(stream: Readable): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
 }
 
 function sendOptionsFor(options: Pick<SendMessageOptions | SendPhotoOptions | SendFileOptions, "replyToMessageId" | "topic"> & Partial<Pick<SendMessageOptions, "mentions">>): SendOptions {
