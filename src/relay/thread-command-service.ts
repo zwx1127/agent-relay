@@ -145,8 +145,9 @@ export class ThreadCommandService {
     const normalized = prompt.trim();
     if (!normalized) {
       this.deps.requireCurrentWorkspace(conversationId);
-      const result = await this.deps.sendRendered(conversationId, textMessage("Reply with the side question."), {
+      const result = await this.deps.sendRendered(conversationId, textMessage("Reply to this prompt, or send your next message with the side question."), {
         forceReply: true,
+        inputFieldPlaceholder: "Side question",
         disableWebPagePreview: true,
       });
       if (!result.messageId) throw new Error("IM adapter did not return a side conversation prompt message id.");
@@ -190,8 +191,9 @@ export class ThreadCommandService {
       await this.renameCurrentThread(conversationId, name.trim());
       return;
     }
-    const result = await this.deps.sendRendered(conversationId, textMessage("Reply with the new chat name."), {
+    const result = await this.deps.sendRendered(conversationId, textMessage("Reply to this prompt, or send your next message with the new chat name."), {
       forceReply: true,
+      inputFieldPlaceholder: "New chat name",
       disableWebPagePreview: true,
     });
     if (!result.messageId) throw new Error("IM adapter did not return a rename prompt message id.");

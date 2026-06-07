@@ -132,6 +132,7 @@ export class CodexPromptFlow {
     const useInlineOptions = !question.isSecret && options.length > 0 && this.deps.adapter.capabilities.inlineActions;
     const result = await this.deps.sendRendered(scope.scopeKey, formatCodexQuestion(question, questionIndex, totalQuestions), {
       ...(useInlineOptions ? { replyMarkup: codexQuestionKeyboard(token, options, Boolean(question.isOther)) } : { forceReply: true }),
+      ...(!useInlineOptions ? { inputFieldPlaceholder: "Answer" } : {}),
       disableWebPagePreview: true,
     });
     if (!result.messageId) throw new Error("IM adapter did not return a prompt message id.");
@@ -239,7 +240,7 @@ export class CodexPromptFlow {
     const result = await this.deps.sendRendered(message.conversationId, formatCodexAnswerNotePrompt(), {
       forceReply: true,
       disableWebPagePreview: true,
-      replyToMessageId: pending.promptMessageId,
+      inputFieldPlaceholder: "Note to include",
     });
     if (!result.messageId) throw new Error("IM adapter did not return a note prompt message id.");
     this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
@@ -261,10 +262,10 @@ export class CodexPromptFlow {
     data: Record<string, unknown>,
   ): Promise<void> {
     await this.deps.renderStrictCallbackPage(message, formatCodexSelectedAnswerSummary("Other"), { inline_keyboard: [] });
-    const result = await this.deps.sendRendered(message.conversationId, messageWithTitle("Other answer", "Reply with the answer to use."), {
+    const result = await this.deps.sendRendered(message.conversationId, messageWithTitle("Other answer", "Reply to this prompt with the answer to use."), {
       forceReply: true,
       disableWebPagePreview: true,
-      replyToMessageId: pending.promptMessageId,
+      inputFieldPlaceholder: "Answer to use",
     });
     if (!result.messageId) throw new Error("IM adapter did not return an other-answer prompt message id.");
     this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);

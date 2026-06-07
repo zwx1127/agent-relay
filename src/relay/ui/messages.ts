@@ -197,7 +197,7 @@ export function formatCodexAnswerNotePrompt(): RenderedTelegramText {
   return renderTelegramText([
     bold("Add note"),
     "\n\n",
-    "Reply with the extra details to include.",
+    "Reply to this prompt with any note to include.",
   ]);
 }
 

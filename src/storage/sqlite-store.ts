@@ -17,7 +17,7 @@ import type {
 import type { AgentSessionRow, PagedOutput } from "./sqlite-rows.ts";
 import { createSQLiteRepositories, type SQLiteRepositories } from "./sqlite-repositories.ts";
 import { migrateSQLiteSchema } from "./sqlite-schema.ts";
-import type { RelayStore } from "./store.ts";
+import type { ControlMessageRecord, RelayStore } from "./store.ts";
 
 export class SQLiteStore implements RelayStore {
   readonly db: Database;
@@ -116,6 +116,8 @@ export class SQLiteStore implements RelayStore {
 
   setPendingPrompt(prompt: PendingPrompt): void {
     this.repositories.prompts.set(prompt);
+    const scopeKey = prompt.scopeKey ?? String(prompt.conversationId);
+    this.repositories.chatUi.setControlMessage(prompt.conversationId, prompt.promptMessageId, scopeKey, prompt.kind);
   }
 
   getPendingPrompt(scopeKey: ConversationId, promptMessageId: MessageId): PendingPrompt | undefined {
@@ -172,6 +174,10 @@ export class SQLiteStore implements RelayStore {
 
   getControlMessageScopeKey(conversationId: ConversationId, messageId: MessageId): string | undefined {
     return this.repositories.chatUi.getControlMessageScopeKey(conversationId, messageId);
+  }
+
+  getControlMessage(conversationId: ConversationId, messageId: MessageId): ControlMessageRecord | undefined {
+    return this.repositories.chatUi.getControlMessage(conversationId, messageId);
   }
 
   createTask(task: {

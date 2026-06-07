@@ -3,6 +3,11 @@ import type { AgentCollaborationMode, AgentTaskInput } from "../ports/agent.ts";
 import type { ConversationBinding, HomeStatusMode, PendingPrompt, RelayTask, TaskStatus, TranscriptEvent, TranscriptRole, WorkspaceRecord } from "../relay/types.ts";
 import type { AgentSessionRow, PagedOutput } from "./sqlite-rows.ts";
 
+export interface ControlMessageRecord {
+  scopeKey: string;
+  kind?: string;
+}
+
 export interface RelayStore {
   close(): void;
   migrate(): void;
@@ -38,6 +43,7 @@ export interface RelayStore {
   getHomeStatusMode(scopeKey: ConversationId): HomeStatusMode;
   setHomeStatusMode(scopeKey: ConversationId, mode: HomeStatusMode, conversationId?: ConversationId): void;
   setControlMessage(conversationId: ConversationId, messageId: MessageId, scopeKey: string, kind?: string): void;
+  getControlMessage(conversationId: ConversationId, messageId: MessageId): ControlMessageRecord | undefined;
   getControlMessageScopeKey(conversationId: ConversationId, messageId: MessageId): string | undefined;
   createTask(task: {
     conversationId: ConversationId;

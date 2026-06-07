@@ -115,6 +115,8 @@ export interface InboundMessageContext {
   mentions?: InboundMention[];
   topic?: ImTopicContext;
   scopeKey?: string;
+  /** Root message for provider reply/reference trees. This is not a topic id. */
+  replyRootMessageId?: MessageId;
 }
 
 export interface MediaInboundMessage extends InboundMessageContext {

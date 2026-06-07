@@ -173,6 +173,30 @@ describe("relay controller", () => {
     expect(store.getHomeStatusMode(scope)).toBe("details");
   });
 
+  test("uses control message mapping before provider topic metadata for callbacks", async () => {
+    const { router, store, adapter, root } = fixture();
+    const pathA = join(root, "alpha");
+    const pathB = join(root, "beta");
+    mkdirSync(pathA);
+    mkdirSync(pathB);
+    store.upsertWorkspace({ name: "alpha", path: pathA, createdAt: 1 });
+    store.upsertWorkspace({ name: "beta", path: pathB, createdAt: 1 });
+    const topicA = { provider: "lark" as const, id: "thread-a", rootMessageId: "root-a" };
+    const topicB = { provider: "lark" as const, id: "thread-b", rootMessageId: "root-b" };
+    const scopeA = chatScopeKey("1", topicA);
+    const scopeB = chatScopeKey("1", topicB);
+    store.bindConversation(scopeA, "alpha", 1, "1");
+    store.bindConversation(scopeB, "beta", 1, "1");
+
+    await router.handle({ ...textMessage("/relay", 7, undefined, "1"), topic: topicA });
+    const home = adapter.sent.at(-1)!;
+    await router.handle({ ...callbackMessage("ar:status", 7, "cb-thread", home.messageId, "1"), topic: topicB });
+
+    expect(adapter.sent.at(-1)?.options?.topic).toEqual(topicA);
+    expect(store.getHomeStatusMode(scopeA)).toBe("details");
+    expect(store.getHomeStatusMode(scopeB)).toBe("compact");
+  });
+
   test("agent capability can mention a configured peer agent in the active chat", async () => {
     const { router, store, adapter, agent, root } = fixture("info", {
       relayPeerAgents: [{ id: "designer", name: "Designer", telegramUsername: "designer_bot" }],
@@ -701,7 +725,7 @@ describe("relay controller", () => {
     expect(adapter.sent.map((message) => message.text)).toEqual([
       "Side conversation\n\nside: where is config?",
       "Side conversation\n\nside: what changed?",
-      "Reply with the side question.",
+      "Reply to this prompt, or send your next message with the side question.",
     ]);
     expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
   });
@@ -1534,11 +1558,50 @@ describe("relay controller", () => {
     expect(payload.images).toHaveLength(1);
     expect(payload.images[0].path).toContain(join(path, ".agent-relay", "media", "incoming"));
     expect(existsSync(payload.images[0].path)).toBe(true);
+    expect(adapter.sent.at(-1)?.options?.replyToMessageId).toBeUndefined();
 
     await router.handle(textMessage("extract the text", 7, promptId));
 
     expect(agent.sent).toHaveLength(1);
     expect(agent.sent[0]?.text).toBe("extract the text");
+    expect(agent.sent[0]?.options?.images?.[0]?.path).toBe(payload.images[0].path);
+    expect(store.getPendingPrompt("1", promptId)).toBeUndefined();
+  });
+
+  test("photo prompt without caption accepts the next normal message in the same scope", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(mediaMessage());
+    const promptId = adapter.sent.at(-1)?.messageId!;
+    const payload = JSON.parse(store.getPendingPrompt("1", promptId)!.payloadJson!);
+
+    await router.handle(textMessage("extract the text"));
+
+    expect(agent.sent).toHaveLength(1);
+    expect(agent.sent[0]?.text).toBe("extract the text");
+    expect(agent.sent[0]?.options?.images?.[0]?.path).toBe(payload.images[0].path);
+    expect(store.getPendingPrompt("1", promptId)).toBeUndefined();
+  });
+
+  test("managed prompt replies with Lark reply roots route back to the original base scope", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(mediaMessage());
+    const promptId = adapter.sent.at(-1)?.messageId!;
+    const payload = JSON.parse(store.getPendingPrompt("1", promptId)!.payloadJson!);
+
+    await router.handle({ ...textMessage("describe it", 7, undefined, "1"), replyRootMessageId: promptId });
+
+    expect(agent.sent).toHaveLength(1);
+    expect(agent.sent[0]?.key).toBe("codex:1:demo");
     expect(agent.sent[0]?.options?.images?.[0]?.path).toBe(payload.images[0].path);
     expect(store.getPendingPrompt("1", promptId)).toBeUndefined();
   });
@@ -2393,8 +2456,8 @@ describe("relay controller", () => {
     expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
     const notePrompt = adapter.sent.at(-1)!;
     expect(notePrompt.options?.forceReply).toBe(true);
-    expect(notePrompt.options?.replyToMessageId).toBe(String(prompt.messageId));
-    expect(notePrompt.text).toBe("Add note\n\nReply with the extra details to include.");
+    expect(notePrompt.options?.replyToMessageId).toBeUndefined();
+    expect(notePrompt.text).toBe("Add note\n\nReply to this prompt with any note to include.");
     expect(notePrompt.text).not.toContain("Selected:");
     await router.handle(textMessage("Prefer minimal changes", 7, notePrompt.messageId));
 
@@ -2473,7 +2536,7 @@ describe("relay controller", () => {
     const otherPrompt = adapter.sent.at(-1)!;
     expect(adapter.edited.at(-1)?.text).toBe("Selected: Other");
     expect(otherPrompt.options?.forceReply).toBe(true);
-    expect(otherPrompt.options?.replyToMessageId).toBe(String(prompt.messageId));
+    expect(otherPrompt.options?.replyToMessageId).toBeUndefined();
     expect(adapter.sent.filter((message) => message.text.includes("Other answer"))).toHaveLength(1);
     await router.handle(textMessage("Use a hybrid approach", 7, otherPrompt.messageId));
 
@@ -2521,7 +2584,7 @@ describe("relay controller", () => {
     expect(adapter.sent.filter((message) => message.text.includes("Other answer"))).toHaveLength(1);
     expect(adapter.edited.at(-1)?.text).toBe("Selected: Other");
     expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
-    expect(adapter.sent.at(-1)?.options?.replyToMessageId).toBe(String(prompt.messageId));
+    expect(adapter.sent.at(-1)?.options?.replyToMessageId).toBeUndefined();
     expect(store.getPendingPrompt("1", prompt.messageId!)).toBeUndefined();
   });
 

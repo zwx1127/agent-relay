@@ -368,12 +368,16 @@ export class ChatUiRepository {
     `).run(String(conversationId), String(messageId), scopeKey, kind, Date.now());
   }
 
-  getControlMessageScopeKey(conversationId: ConversationId, messageId: MessageId): string | undefined {
-    const row = this.db.query<{ scope_key: string }, [string, string]>(`
-      SELECT scope_key FROM control_messages
+  getControlMessage(conversationId: ConversationId, messageId: MessageId): { scopeKey: string; kind?: string } | undefined {
+    const row = this.db.query<{ scope_key: string; kind: string | null }, [string, string]>(`
+      SELECT scope_key, kind FROM control_messages
       WHERE conversation_id = ? AND message_id = ?
     `).get(String(conversationId), String(messageId));
-    return row?.scope_key;
+    return row ? { scopeKey: row.scope_key, ...(row.kind ? { kind: row.kind } : {}) } : undefined;
+  }
+
+  getControlMessageScopeKey(conversationId: ConversationId, messageId: MessageId): string | undefined {
+    return this.getControlMessage(conversationId, messageId)?.scopeKey;
   }
 }
 

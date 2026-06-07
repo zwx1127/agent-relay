@@ -175,6 +175,62 @@ describe("lark adapter", () => {
     expect(received).toEqual([]);
   });
 
+  test("separates Lark topic ids from reply roots", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+    const received: unknown[] = [];
+
+    await adapter.start(async (message) => {
+      received.push(message);
+    });
+    await channel.handlers.message?.(normalizedMessage({
+      content: "referenced",
+      rawContentType: "text",
+      rootId: "om_root",
+      replyToMessageId: "om_parent",
+    }));
+    await channel.handlers.message?.(normalizedMessage({
+      messageId: "om_thread",
+      content: "thread reply",
+      rawContentType: "text",
+      threadId: "omt_thread",
+      rootId: "om_root",
+      replyToMessageId: "om_parent",
+    }));
+
+    expect(received).toEqual([
+      {
+        kind: "message",
+        id: "om_in",
+        messageId: "om_in",
+        conversationId: "oc_chat",
+        userId: "ou_user",
+        conversationType: "group",
+        mentionedBot: false,
+        mentionAll: false,
+        text: "referenced",
+        replyToMessageId: "om_parent",
+        replyRootMessageId: "om_root",
+        date: 2,
+      },
+      {
+        kind: "message",
+        id: "om_thread",
+        messageId: "om_thread",
+        conversationId: "oc_chat",
+        userId: "ou_user",
+        conversationType: "group",
+        mentionedBot: false,
+        mentionAll: false,
+        topic: { provider: "lark", id: "omt_thread", rootMessageId: "om_root" },
+        text: "thread reply",
+        replyToMessageId: "om_parent",
+        replyRootMessageId: "om_root",
+        date: 2,
+      },
+    ]);
+  });
+
   test("routes image messages and downloads message resources", async () => {
     const channel = new FakeLarkChannel();
     channel.useRawClient();
@@ -590,19 +646,21 @@ describe("lark adapter", () => {
     const adapter = adapterWith(channel);
 
     await expect(adapter.sendMessage("oc_chat", "hello", { replyToMessageId: "om_parent" })).resolves.toEqual({ messageId: "om_1" });
+    await expect(adapter.sendMessage("oc_chat", "thread", { topic: { provider: "lark", id: "omt_thread", rootMessageId: "om_root" } })).resolves.toEqual({ messageId: "om_2" });
     await expect(adapter.sendMessage("oc_chat", "choose", {
       replyMarkup: { inline_keyboard: [[{ text: "Status", callback_data: "ar:s" }]] },
-    })).resolves.toEqual({ messageId: "om_2" });
-    await adapter.editMessageText("oc_chat", "updated", { messageId: "om_2", replyMarkup: { inline_keyboard: [] } });
+    })).resolves.toEqual({ messageId: "om_3" });
+    await adapter.editMessageText("oc_chat", "updated", { messageId: "om_3", replyMarkup: { inline_keyboard: [] } });
     await adapter.editMessageText("oc_chat", "plain edit", { messageId: "om_1" });
-    await expect(adapter.sendPhoto("oc_chat", new Blob([new Uint8Array([1, 2, 3])]), { caption: "caption" })).resolves.toEqual({ messageId: "om_3" });
-    await expect(adapter.sendFile("oc_chat", new Blob([new Uint8Array([4, 5, 6])]), { filename: "report.txt", caption: "file caption" })).resolves.toEqual({ messageId: "om_5" });
+    await expect(adapter.sendPhoto("oc_chat", new Blob([new Uint8Array([1, 2, 3])]), { caption: "caption" })).resolves.toEqual({ messageId: "om_4" });
+    await expect(adapter.sendFile("oc_chat", new Blob([new Uint8Array([4, 5, 6])]), { filename: "report.txt", caption: "file caption" })).resolves.toEqual({ messageId: "om_6" });
     await adapter.deleteMessage("oc_chat", "om_1");
     await adapter.setMessageReaction("oc_chat", "om_1", "😎");
     await adapter.setMessageReaction("oc_chat", "om_1", "🤔");
 
     expect(channel.sent[0]).toEqual({ to: "oc_chat", input: { markdown: "hello" }, options: { replyTo: "om_parent" } });
-    const sentCard = expectLarkCard(channel.sent[1]?.input);
+    expect(channel.sent[1]).toEqual({ to: "oc_chat", input: { markdown: "thread" }, options: { replyTo: "om_root", replyInThread: true } });
+    const sentCard = expectLarkCard(channel.sent[2]?.input);
     expectNoLarkCardFooter(sentCard);
     expect(sentCard).toMatchObject({
       schema: "2.0",
@@ -625,13 +683,13 @@ describe("lark adapter", () => {
         ],
       },
     });
-    expect(channel.updated[0]).toMatchObject({ messageId: "om_2" });
+    expect(channel.updated[0]).toMatchObject({ messageId: "om_3" });
     expectNoLarkCardFooter(channel.updated[0]!.card);
     expect(channel.edited).toEqual([{ messageId: "om_1", text: "plain edit" }]);
-    expect(channel.sent[2]?.input).toHaveProperty("image");
-    expect(channel.sent[3]).toEqual({ to: "oc_chat", input: { text: "caption" }, options: { replyTo: "om_3" } });
-    expect(channel.sent[4]?.input).toHaveProperty("file");
-    expect(channel.sent[5]).toEqual({ to: "oc_chat", input: { text: "file caption" }, options: { replyTo: "om_5" } });
+    expect(channel.sent[3]?.input).toHaveProperty("image");
+    expect(channel.sent[4]).toEqual({ to: "oc_chat", input: { text: "caption" }, options: { replyTo: "om_4" } });
+    expect(channel.sent[5]?.input).toHaveProperty("file");
+    expect(channel.sent[6]).toEqual({ to: "oc_chat", input: { text: "file caption" }, options: { replyTo: "om_6" } });
     expect(channel.recalled).toEqual(["om_1"]);
     expect(channel.reactions).toEqual([
       { messageId: "om_1", emojiType: "DONE" },
@@ -791,7 +849,7 @@ describe("lark adapter", () => {
     const card = expectLarkCard(channel.sent[0]?.input);
     expectNoLarkCardFooter(card);
     const payload = JSON.stringify(card);
-    expect(payload).toContain("Reply to this message.");
+    expect(payload).toContain("Reply to this prompt, or send your next message as the answer.");
     expect(payload).toContain("repo name under WORKSPACE_ROOT");
   });
 });

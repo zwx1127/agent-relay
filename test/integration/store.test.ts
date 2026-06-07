@@ -86,6 +86,7 @@ describe("store", () => {
       payloadJson: "{\"ok\":true}",
       expiresAt: 5,
     });
+    expect(store.getControlMessage(123, 9)).toEqual({ scopeKey: "123", kind: "codex_user_input" });
     store.setPendingPrompt({
       conversationId: "123",
       promptMessageId: "10",

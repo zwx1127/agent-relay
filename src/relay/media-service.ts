@@ -173,7 +173,7 @@ export class MediaRelayService {
         kind: "image",
         images,
         ...(sorted[0]?.messageId ? { originalMessageId: sorted[0].messageId } : {}),
-      }, sorted[0]?.messageId);
+      });
       return;
     }
     await this.deps.submitTask(scope.scopeKey, prompt, sorted[0]?.messageId, "auto", { text: prompt, images });
@@ -237,7 +237,7 @@ export class MediaRelayService {
         fileSize: stored.fileSize,
         ...(stored.mimeType ? { mimeType: stored.mimeType } : {}),
         originalMessageId: message.messageId,
-      }, message.messageId);
+      });
       return;
     }
     const prompt = formatAttachedFilePrompt({
@@ -301,7 +301,7 @@ export class MediaRelayService {
     this.deps.store.deletePendingPrompt(scope.scopeKey, promptMessageId);
     const prompt = text.trim();
     if (!prompt) {
-      await this.deps.sendRendered(scope.scopeKey, messageWithTitle("Attachment not submitted.", "Reply with how you want Codex to handle it."));
+      await this.deps.sendRendered(scope.scopeKey, messageWithTitle("Attachment not submitted.", "Reply to this prompt, or send your next message with what you want Codex to do."));
       return;
     }
     if (payload.kind === "image") {
@@ -489,15 +489,15 @@ export class MediaRelayService {
     });
   }
 
-  private async promptForMediaAction(conversationId: ConversationId, payload: PendingMediaActionPayload, replyToMessageId?: MessageId): Promise<void> {
+  private async promptForMediaAction(conversationId: ConversationId, payload: PendingMediaActionPayload): Promise<void> {
     const scope = parseChatScopeKey(String(conversationId));
     const title = payload.kind === "image"
       ? `Received ${payload.images.length === 1 ? "an image" : `${payload.images.length} images`}.`
       : `Received file: ${payload.filename}`;
-    const result = await this.deps.sendRendered(scope.scopeKey, messageWithTitle(title, "Reply to this message with what you want Codex to do with it."), {
+    const result = await this.deps.sendRendered(scope.scopeKey, messageWithTitle(title, "Reply to this prompt, or send your next message with what you want Codex to do."), {
       forceReply: true,
       disableWebPagePreview: true,
-      ...(replyToMessageId ? { replyToMessageId } : {}),
+      inputFieldPlaceholder: "What should Codex do?",
     });
     if (!result.messageId) throw new Error("IM adapter did not return an attachment prompt message id.");
     this.deps.store.setPendingPrompt({

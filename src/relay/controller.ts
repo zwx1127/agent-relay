@@ -45,6 +45,12 @@ import { RelayMessageRenderer } from "./rendering.ts";
 import { RelaySessionService } from "./session-service.ts";
 import { pathContains } from "./ui/media-format.ts";
 
+interface InboundRoute {
+  scopeKey: string;
+  promptMessageId?: MessageId;
+  promptScopeMismatch?: boolean;
+}
+
 export class RelayController {
   private readonly logger: Logger;
   private readonly slashCommands: SlashCommandRouter;
@@ -194,17 +200,17 @@ export class RelayController {
   }
 
   async handle(message: InboundMessage): Promise<void> {
-    const scopeKey = this.scopeKeyForInbound(message);
-    await this.conversationQueue.run(scopeKey, () => this.handleSerial(this.scopedMessage(message, scopeKey)));
+    const route = this.routeForInbound(message);
+    await this.conversationQueue.run(route.scopeKey, () => this.handleSerial(this.scopedMessage(message, route.scopeKey), route));
   }
 
-  private async handleSerial(message: InboundMessage): Promise<void> {
+  private async handleSerial(message: InboundMessage, route: InboundRoute): Promise<void> {
     const scope = parseChatScopeKey(String(message.conversationId));
     if (message.kind === "callback_query") {
       await this.handleCallback(message);
       return;
     }
-    if (this.shouldIgnoreUnmentionedGroupMessage(message)) {
+    if (this.shouldIgnoreUnmentionedGroupMessage(message) && !route.promptMessageId && !route.promptScopeMismatch) {
       this.logger.info("router.group_message_ignored", {
         conversation_id: scope.conversationId,
         scope_key: scope.scopeKey,
@@ -252,6 +258,10 @@ export class RelayController {
     }
 
     try {
+      if (route.promptScopeMismatch) {
+        await this.sendRendered(message.conversationId, textMessage("This prompt belongs to another topic. Reply in that topic to continue."));
+        return;
+      }
       if (command === "/relay") {
         await this.renderConsole(message.conversationId, { forceNewMessage: true });
       } else if (command && await this.slashCommands.handle(message, command, text)) {
@@ -260,17 +270,18 @@ export class RelayController {
         // ForceReply answers are keyed by the prompt message id. Ordinary text is
         // never treated as an answer to a Codex question unless it replies to the
         // prompt, which avoids accidentally submitting direct messages as secrets.
-        const pending = message.replyToMessageId
-          ? this.deps.store.getPendingPrompt(message.conversationId, message.replyToMessageId)
-          : undefined;
+        const promptMessageId = route.promptMessageId ?? message.replyToMessageId;
+        const pending = promptMessageId
+          ? this.deps.store.getPendingPrompt(message.conversationId, promptMessageId)
+          : this.latestNextMessagePrompt(message.conversationId);
         if (pending?.kind === "workspace_name") {
-          await this.workspaceFlow.createWorkspaceFromPrompt(message.conversationId, message.replyToMessageId!, text);
+          await this.workspaceFlow.createWorkspaceFromPrompt(message.conversationId, pending.promptMessageId, text);
         } else if (pending?.kind === "codex_user_input") {
-          await this.codexPromptFlow.answerFreeText(message.conversationId, message.replyToMessageId!, text);
+          await this.codexPromptFlow.answerFreeText(message.conversationId, pending.promptMessageId, text);
         } else if (pending?.kind === "media_action") {
-          await this.mediaRelay.answerMediaActionPrompt(message.conversationId, message.replyToMessageId!, text);
+          await this.mediaRelay.answerMediaActionPrompt(message.conversationId, pending.promptMessageId, text);
         } else if (pending?.kind === "relay_command") {
-          await this.threadCommands.answerRelayCommandPrompt(message.conversationId, message.replyToMessageId!, text);
+          await this.threadCommands.answerRelayCommandPrompt(message.conversationId, pending.promptMessageId, text);
         } else {
           // While Codex is blocked on an explicit question or approval, new
           // direct prompts are held back so they do not bypass the requested gate.
@@ -771,14 +782,57 @@ export class RelayController {
 
   private readonly lastUserMessageIds = new Map<string, MessageId>();
 
-  private scopeKeyForInbound(message: InboundMessage): string {
-    if (message.scopeKey) return message.scopeKey;
-    if (message.topic) return chatScopeKey(message.conversationId, message.topic);
-    if (message.kind === "callback_query" && message.messageId) {
-      return this.deps.store.getControlMessageScopeKey(message.conversationId, message.messageId)
-        ?? chatScopeKey(message.conversationId);
+  private routeForInbound(message: InboundMessage): InboundRoute {
+    if (message.scopeKey) return { scopeKey: message.scopeKey };
+    const currentScopeKey = message.topic ? chatScopeKey(message.conversationId, message.topic) : chatScopeKey(message.conversationId);
+    const managed = this.managedControlForInbound(message);
+    if (managed) {
+      if (message.kind === "callback_query") return { scopeKey: managed.scopeKey, promptMessageId: managed.messageId };
+      if (sameChatLocation(managed.scopeKey, currentScopeKey)) return { scopeKey: managed.scopeKey, promptMessageId: managed.messageId };
+      return { scopeKey: currentScopeKey, promptScopeMismatch: true };
     }
-    return chatScopeKey(message.conversationId);
+    if (message.kind === "callback_query" && message.messageId) {
+      return {
+        scopeKey: this.deps.store.getControlMessageScopeKey(message.conversationId, message.messageId)
+          ?? currentScopeKey,
+      };
+    }
+    return { scopeKey: currentScopeKey };
+  }
+
+  private managedControlForInbound(message: InboundMessage): { scopeKey: string; messageId: MessageId } | undefined {
+    for (const messageId of this.promptCandidateMessageIds(message)) {
+      const control = this.deps.store.getControlMessage(message.conversationId, messageId);
+      if (control && this.isManagedPromptKind(control.kind)) {
+        return { scopeKey: control.scopeKey, messageId };
+      }
+    }
+    return undefined;
+  }
+
+  private promptCandidateMessageIds(message: InboundMessage): MessageId[] {
+    const ids: MessageId[] = [];
+    if ("replyToMessageId" in message && message.replyToMessageId) ids.push(message.replyToMessageId);
+    if ("replyRootMessageId" in message && message.replyRootMessageId) ids.push(message.replyRootMessageId);
+    if (message.topic?.rootMessageId) ids.push(message.topic.rootMessageId);
+    if (message.kind === "callback_query" && message.messageId) ids.push(message.messageId);
+    return [...new Map(ids.map((id) => [String(id), id])).values()];
+  }
+
+  private isManagedPromptKind(kind: string | undefined): boolean {
+    return kind === "workspace_name"
+      || kind === "codex_user_input"
+      || kind === "codex_approval"
+      || kind === "relay_command"
+      || kind === "media_action";
+  }
+
+  private latestNextMessagePrompt(conversationId: ConversationId): PendingPrompt | undefined {
+    const pending = this.deps.store.latestPendingPrompt(conversationId, ["media_action", "workspace_name", "relay_command"]);
+    if (!pending) return undefined;
+    if (pending.kind === "media_action" || pending.kind === "workspace_name") return pending;
+    const data = parseJsonRecord(pending.payloadJson);
+    return data?.command === "side" || data?.command === "rename" ? pending : undefined;
   }
 
   private scopedMessage<T extends InboundMessage>(message: T, scopeKey: string): T {
@@ -801,4 +855,23 @@ export class RelayController {
   private async renderPagedOutputCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): Promise<void> {
     await this.outputStreamer.renderPagedOutputCallback(message, payload);
   }
+}
+
+function parseJsonRecord(json: string | undefined): Record<string, unknown> | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = JSON.parse(json);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sameChatLocation(leftScopeKey: string, rightScopeKey: string): boolean {
+  if (leftScopeKey === rightScopeKey) return true;
+  const left = parseChatScopeKey(leftScopeKey);
+  const right = parseChatScopeKey(rightScopeKey);
+  if (String(left.conversationId) !== String(right.conversationId)) return false;
+  if (!left.topic && !right.topic) return true;
+  return Boolean(left.topic && right.topic && left.topic.provider === right.topic.provider && left.topic.id === right.topic.id);
 }

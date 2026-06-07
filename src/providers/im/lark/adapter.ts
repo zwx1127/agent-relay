@@ -366,6 +366,7 @@ export class LarkAdapter implements ImAdapter {
         photos: imageResources.map(resourceToPhoto),
         ...(captionFromMessage(message) ? { caption: captionFromMessage(message) } : {}),
         ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
+        ...(message.rootId ? { replyRootMessageId: message.rootId } : {}),
         date: Math.floor(message.createTime / 1000),
       };
     }
@@ -386,6 +387,7 @@ export class LarkAdapter implements ImAdapter {
         },
         ...(captionFromMessage(message) ? { caption: captionFromMessage(message) } : {}),
         ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
+        ...(message.rootId ? { replyRootMessageId: message.rootId } : {}),
         date: Math.floor(message.createTime / 1000),
       };
     }
@@ -402,6 +404,7 @@ export class LarkAdapter implements ImAdapter {
       ...larkTopicContext(message),
       text: stripLarkBotMentions(text, message),
       ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
+      ...(message.rootId ? { replyRootMessageId: message.rootId } : {}),
       date: Math.floor(message.createTime / 1000),
     };
   }
@@ -431,7 +434,7 @@ async function bufferFromReadable(stream: Readable): Promise<Buffer> {
 function sendOptionsFor(options: Pick<SendMessageOptions | SendPhotoOptions | SendFileOptions, "replyToMessageId" | "topic"> & Partial<Pick<SendMessageOptions, "mentions">>): SendOptions {
   const topic = options.topic?.provider === "lark" ? options.topic : undefined;
   return {
-    ...(options.replyToMessageId ? { replyTo: String(options.replyToMessageId) } : topic ? { replyTo: String(topic.rootMessageId ?? topic.id) } : {}),
+    ...(options.replyToMessageId ? { replyTo: String(options.replyToMessageId) } : topic?.rootMessageId ? { replyTo: String(topic.rootMessageId) } : {}),
     ...(topic ? { replyInThread: true } : {}),
     ...("mentions" in options && options.mentions?.length ? {
       mentions: options.mentions
@@ -448,12 +451,11 @@ function sendOptionsFor(options: Pick<SendMessageOptions | SendPhotoOptions | Se
 }
 
 function larkTopicContext(message: NormalizedMessage): { topic?: { provider: "lark"; id: string; rootMessageId?: string } } {
-  const id = message.threadId ?? message.rootId;
-  if (!id) return {};
+  if (!message.threadId) return {};
   return {
     topic: {
       provider: "lark",
-      id,
+      id: message.threadId,
       ...(message.rootId ? { rootMessageId: message.rootId } : {}),
     },
   };

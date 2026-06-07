@@ -49,8 +49,9 @@ export function createLarkCard(text: string, options: LarkCardOptions = {}): obj
 }
 
 function replyPromptMarkdown(placeholder: string | undefined): string {
-  if (!placeholder) return "**Reply to this message.**";
-  return `**Reply to this message.**\n${renderLarkMarkdown(placeholder)}`;
+  const instruction = "Reply to this prompt, or send your next message as the answer.";
+  if (!placeholder) return `**${instruction}**`;
+  return `**${instruction}**\n${renderLarkMarkdown(placeholder)}`;
 }
 
 function buttonElement(button: InlineKeyboardButton, callbackNonce: string): object {
