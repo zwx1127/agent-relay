@@ -9,6 +9,12 @@ English | [中文](README.zh-CN.md)
 
 The goal is simple: keep the agent close to your code, while letting you operate it from the chat app you already use.
 
+## Community Group
+
+Scan the Telegram QR code below to join the project community group.
+
+<img src="docs/assets/telegram-group-qr.jpg" alt="Telegram group QR code" width="240">
+
 ## Showcase
 
 <table>

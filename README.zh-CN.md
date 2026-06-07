@@ -9,6 +9,12 @@
 
 它的目标很直接：让 agent 留在代码所在的机器上，同时让你可以从常用聊天工具里操作它。
 
+## 项目交流群
+
+扫描下面的 Telegram 二维码加入项目交流群。
+
+<img src="docs/assets/telegram-group-qr.jpg" alt="Telegram 群组二维码" width="240">
+
 ## 演示
 
 <table>
