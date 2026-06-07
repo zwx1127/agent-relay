@@ -222,17 +222,10 @@ export class LarkAdapter implements ImAdapter {
   }
 
   private async downloadImageResource(fileId: string, options: DownloadFileOptions): Promise<Buffer> {
-    try {
-      return await this.channel.downloadResource(fileId, "image");
-    } catch (error) {
-      if (!options.messageId || !this.channel.rawClient) throw error;
-      this.logger.warn("lark.image_download_fallback", {
-        message_id: String(options.messageId),
-        file_key: fileId,
-        error: errorSummary(error),
-      });
+    if (options.messageId && this.channel.rawClient) {
       return await downloadMessageResource(this.channel.rawClient, String(options.messageId), fileId, "image");
     }
+    return await this.channel.downloadResource(fileId, "image");
   }
 
   private async downloadNonImageResource(fileId: string, kind: "file", options: DownloadFileOptions): Promise<Buffer> {
@@ -535,10 +528,6 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function errorSummary(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function callbackDataFromActionValue(value: unknown): string | undefined {
