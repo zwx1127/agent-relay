@@ -20,6 +20,7 @@ class FakeLarkChannel implements LarkChannelClient {
   reactions: Array<{ messageId: string; emojiType: string }> = [];
   removedReactions: Array<{ messageId: string; emojiType: string }> = [];
   resources = new Map<string, Buffer>();
+  resourceDownloadFailures: Error[] = [];
   resourceDownloads: Array<{ fileKey: string; type: "image" | "file" }> = [];
   messageResourceDownloads: Array<{ messageId: string; fileKey: string; type: "image" | "file" }> = [];
   nextMessageId = 1;
@@ -87,6 +88,8 @@ class FakeLarkChannel implements LarkChannelClient {
 
   async downloadResource(fileKey: string, type: "image" | "file" = "image"): Promise<Buffer> {
     this.resourceDownloads.push({ fileKey, type });
+    const failure = this.resourceDownloadFailures.shift();
+    if (failure) throw failure;
     return this.resources.get(fileKey) ?? Buffer.from([1, 2, 3]);
   }
 
@@ -206,8 +209,28 @@ describe("lark adapter", () => {
     expect([...new Uint8Array(file.bytes)]).toEqual([4, 5, 6]);
     expect(file.filePath).toBe("img_key.jpg");
     expect(file.fileSize).toBe(3);
+    expect(channel.resourceDownloads).toEqual([{ fileKey: "img_key", type: "image" }]);
+    expect(channel.messageResourceDownloads).toEqual([]);
+  });
+
+  test("falls back to message resources when image resource downloads fail", async () => {
+    const channel = new FakeLarkChannel();
+    channel.useRawClient();
+    channel.resources.set("img_key", Buffer.from([4, 5, 6]));
+    channel.resourceDownloadFailures.push(new Error("image endpoint failed"));
+    const logLines: string[] = [];
+    const logger = new TextLogger("warn", (line) => logLines.push(line), () => new Date("2026-05-13T03:24:22.000Z"));
+    const adapter = adapterWith(channel, { logger });
+
+    const file = await adapter.downloadFile("img_key", { messageId: "om_in" });
+
+    expect([...new Uint8Array(file.bytes)]).toEqual([4, 5, 6]);
+    expect(file.filePath).toBe("img_key.jpg");
+    expect(file.fileSize).toBe(3);
+    expect(channel.resourceDownloads).toEqual([{ fileKey: "img_key", type: "image" }]);
     expect(channel.messageResourceDownloads).toEqual([{ messageId: "om_in", fileKey: "img_key", type: "image" }]);
-    expect(channel.resourceDownloads).toEqual([]);
+    expect(logLines.join("\n")).toContain("lark.image_download_fallback");
+    expect(logLines.join("\n")).toContain('error="image endpoint failed"');
   });
 
   test("routes file messages and downloads file resources", async () => {
