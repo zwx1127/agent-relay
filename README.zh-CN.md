@@ -13,15 +13,27 @@
 
 <table>
   <tr>
-    <th>单聊</th>
-    <th>群聊 topic 模式：多 workspace 并行工作</th>
+    <th>Telegram 单聊</th>
+    <th>Telegram 群聊 topic 模式</th>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <img src="https://github.com/user-attachments/assets/f9dfb5ac-15b8-4a4c-87b1-f6ebf0cc70e3" alt="单聊演示" width="360">
+      <video src="https://github.com/user-attachments/assets/2109bbbf-35d5-4f10-b712-409d318fdde6" width="360" controls></video>
     </td>
     <td width="50%" valign="top">
       <video src="https://github.com/user-attachments/assets/48aca05e-20f4-47f8-ac80-d93c6a4ecf60" width="360" controls></video>
+    </td>
+  </tr>
+  <tr>
+    <th>飞书单聊</th>
+    <th>飞书群聊 topic 模式</th>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <video src="https://github.com/user-attachments/assets/b3bda23d-0eb0-402b-996c-b134562e4772" width="360" controls></video>
+    </td>
+    <td width="50%" valign="top">
+      <video src="https://github.com/user-attachments/assets/13889a04-a32b-4ef4-beae-2df48f2a674d" width="360" controls></video>
     </td>
   </tr>
 </table>

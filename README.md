@@ -13,15 +13,27 @@ The goal is simple: keep the agent close to your code, while letting you operate
 
 <table>
   <tr>
-    <th>Direct chat</th>
-    <th>Group topic mode: multi-workspace parallel work</th>
+    <th>Telegram direct chat</th>
+    <th>Telegram group topic mode</th>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <img src="https://github.com/user-attachments/assets/f9dfb5ac-15b8-4a4c-87b1-f6ebf0cc70e3" alt="Direct chat demo" width="360">
+      <video src="https://github.com/user-attachments/assets/2109bbbf-35d5-4f10-b712-409d318fdde6" width="360" controls></video>
     </td>
     <td width="50%" valign="top">
       <video src="https://github.com/user-attachments/assets/48aca05e-20f4-47f8-ac80-d93c6a4ecf60" width="360" controls></video>
+    </td>
+  </tr>
+  <tr>
+    <th>Feishu direct chat</th>
+    <th>Feishu group topic mode</th>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <video src="https://github.com/user-attachments/assets/b3bda23d-0eb0-402b-996c-b134562e4772" width="360" controls></video>
+    </td>
+    <td width="50%" valign="top">
+      <video src="https://github.com/user-attachments/assets/13889a04-a32b-4ef4-beae-2df48f2a674d" width="360" controls></video>
     </td>
   </tr>
 </table>
