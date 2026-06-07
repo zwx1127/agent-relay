@@ -145,8 +145,9 @@ export class ThreadCommandService {
     const normalized = prompt.trim();
     if (!normalized) {
       this.deps.requireCurrentWorkspace(conversationId);
-      const result = await this.deps.sendRendered(conversationId, textMessage("Reply to this prompt, or send your next message with the side question."), {
+      const result = await this.deps.sendRendered(conversationId, textMessage("Side question requested."), {
         forceReply: true,
+        forceReplyInstruction: "Reply to this prompt, or send your next message with the side question.",
         inputFieldPlaceholder: "Side question",
         disableWebPagePreview: true,
       });
@@ -191,8 +192,9 @@ export class ThreadCommandService {
       await this.renameCurrentThread(conversationId, name.trim());
       return;
     }
-    const result = await this.deps.sendRendered(conversationId, textMessage("Reply to this prompt, or send your next message with the new chat name."), {
+    const result = await this.deps.sendRendered(conversationId, textMessage("New chat name requested."), {
       forceReply: true,
+      forceReplyInstruction: "Reply to this prompt, or send your next message with the new chat name.",
       inputFieldPlaceholder: "New chat name",
       disableWebPagePreview: true,
     });

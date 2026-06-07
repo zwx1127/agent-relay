@@ -132,7 +132,7 @@ export class CodexPromptFlow {
     const useInlineOptions = !question.isSecret && options.length > 0 && this.deps.adapter.capabilities.inlineActions;
     const result = await this.deps.sendRendered(scope.scopeKey, formatCodexQuestion(question, questionIndex, totalQuestions), {
       ...(useInlineOptions ? { replyMarkup: codexQuestionKeyboard(token, options, Boolean(question.isOther)) } : { forceReply: true }),
-      ...(!useInlineOptions ? { inputFieldPlaceholder: "Answer" } : {}),
+      ...(!useInlineOptions ? { forceReplyInstruction: "Reply to this prompt with your answer.", inputFieldPlaceholder: "Answer" } : {}),
       disableWebPagePreview: true,
     });
     if (!result.messageId) throw new Error("IM adapter did not return a prompt message id.");
@@ -239,6 +239,7 @@ export class CodexPromptFlow {
     await this.deps.renderStrictCallbackPage(message, formatCodexSelectedAnswerSummary(selectedAnswer), { inline_keyboard: [] });
     const result = await this.deps.sendRendered(message.conversationId, formatCodexAnswerNotePrompt(), {
       forceReply: true,
+      forceReplyInstruction: "Reply to this prompt with any note to include.",
       disableWebPagePreview: true,
       inputFieldPlaceholder: "Note to include",
     });
@@ -262,8 +263,9 @@ export class CodexPromptFlow {
     data: Record<string, unknown>,
   ): Promise<void> {
     await this.deps.renderStrictCallbackPage(message, formatCodexSelectedAnswerSummary("Other"), { inline_keyboard: [] });
-    const result = await this.deps.sendRendered(message.conversationId, messageWithTitle("Other answer", "Reply to this prompt with the answer to use."), {
+    const result = await this.deps.sendRendered(message.conversationId, messageWithTitle("Other answer"), {
       forceReply: true,
+      forceReplyInstruction: "Reply to this prompt with the answer to use.",
       disableWebPagePreview: true,
       inputFieldPlaceholder: "Answer to use",
     });

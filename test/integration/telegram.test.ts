@@ -498,6 +498,7 @@ describe("telegram adapter", () => {
         { type: "code", offset: 5, length: 10 },
       ],
       forceReply: true,
+      forceReplyInstruction: "Reply to this prompt, or send your next message with the workspace name.",
       inputFieldPlaceholder: "repo name under WORKSPACE_ROOT",
     });
 

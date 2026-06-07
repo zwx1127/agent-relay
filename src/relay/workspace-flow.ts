@@ -206,8 +206,9 @@ export class WorkspaceFlow {
 
   async promptForWorkspaceName(message: CallbackMessage, pageIndex: number): Promise<void> {
     await this.deps.renderStrictCallbackPage(message, messageWithTitle("Workspace name requested.", "Reply to the prompt below."), { inline_keyboard: [] });
-    const result = await this.deps.sendRendered(message.conversationId, textMessage("Reply to this prompt, or send your next message with the workspace name. Existing directories under WORKSPACE_ROOT are selected; missing names are created."), {
+    const result = await this.deps.sendRendered(message.conversationId, textMessage("Existing directories under WORKSPACE_ROOT are selected; missing names are created."), {
       forceReply: true,
+      forceReplyInstruction: "Reply to this prompt, or send your next message with the workspace name.",
       inputFieldPlaceholder: "repo name under WORKSPACE_ROOT",
       disableWebPagePreview: true,
     });

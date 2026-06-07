@@ -301,7 +301,7 @@ export class MediaRelayService {
     this.deps.store.deletePendingPrompt(scope.scopeKey, promptMessageId);
     const prompt = text.trim();
     if (!prompt) {
-      await this.deps.sendRendered(scope.scopeKey, messageWithTitle("Attachment not submitted.", "Reply to this prompt, or send your next message with what you want Codex to do."));
+      await this.deps.sendRendered(scope.scopeKey, messageWithTitle("Attachment not submitted.", "Reply to the attachment prompt with what you want Codex to do."));
       return;
     }
     if (payload.kind === "image") {
@@ -494,8 +494,9 @@ export class MediaRelayService {
     const title = payload.kind === "image"
       ? `Received ${payload.images.length === 1 ? "an image" : `${payload.images.length} images`}.`
       : `Received file: ${payload.filename}`;
-    const result = await this.deps.sendRendered(scope.scopeKey, messageWithTitle(title, "Reply to this prompt, or send your next message with what you want Codex to do."), {
+    const result = await this.deps.sendRendered(scope.scopeKey, messageWithTitle(title), {
       forceReply: true,
+      forceReplyInstruction: "Reply to this prompt, or send your next message with what you want Codex to do.",
       disableWebPagePreview: true,
       inputFieldPlaceholder: "What should Codex do?",
     });

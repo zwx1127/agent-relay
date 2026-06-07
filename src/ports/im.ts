@@ -36,6 +36,7 @@ export interface SendMessageOptions {
   mentions?: OutboundMention[];
   replyMarkup?: InlineKeyboardMarkup;
   forceReply?: boolean;
+  forceReplyInstruction?: string;
   inputFieldPlaceholder?: string;
   disableWebPagePreview?: boolean;
   replyToMessageId?: MessageId;

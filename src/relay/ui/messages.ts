@@ -196,8 +196,6 @@ export function formatCodexSelectedAnswerSummary(answer: string): RenderedTelegr
 export function formatCodexAnswerNotePrompt(): RenderedTelegramText {
   return renderTelegramText([
     bold("Add note"),
-    "\n\n",
-    "Reply to this prompt with any note to include.",
   ]);
 }
 

@@ -725,9 +725,10 @@ describe("relay controller", () => {
     expect(adapter.sent.map((message) => message.text)).toEqual([
       "Side conversation\n\nside: where is config?",
       "Side conversation\n\nside: what changed?",
-      "Reply to this prompt, or send your next message with the side question.",
+      "Side question requested.",
     ]);
     expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
+    expect(adapter.sent.at(-1)?.options?.forceReplyInstruction).toBe("Reply to this prompt, or send your next message with the side question.");
   });
 
   test("/ps lists only Codex background terminals tracked by the driver", async () => {
@@ -1144,7 +1145,9 @@ describe("relay controller", () => {
 
     await router.handle(callbackMessage("ar:n"));
     expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
+    expect(adapter.sent.at(-1)?.options?.forceReplyInstruction).toBe("Reply to this prompt, or send your next message with the workspace name.");
     expect(adapter.sent.at(-1)?.options?.inputFieldPlaceholder).toBe("repo name under WORKSPACE_ROOT");
+    expect(adapter.sent.at(-1)?.text).toBe("Existing directories under WORKSPACE_ROOT are selected; missing names are created.");
     const promptId = adapter.sent.length + 99;
 
     await router.handle(textMessage("demo", 7, promptId));
@@ -1548,8 +1551,10 @@ describe("relay controller", () => {
     await router.handle(mediaMessage());
 
     expect(agent.sent).toEqual([]);
-    expect(adapter.sent.at(-1)?.text).toContain("Received an image.");
+    expect(adapter.sent.at(-1)?.text).toBe("Received an image.");
     expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
+    expect(adapter.sent.at(-1)?.options?.forceReplyInstruction).toBe("Reply to this prompt, or send your next message with what you want Codex to do.");
+    expect(adapter.sent.at(-1)?.options?.inputFieldPlaceholder).toBe("What should Codex do?");
     const promptId = adapter.sent.at(-1)?.messageId!;
     const pending = store.getPendingPrompt("1", promptId);
     expect(pending?.kind).toBe("media_action");
@@ -2456,8 +2461,9 @@ describe("relay controller", () => {
     expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
     const notePrompt = adapter.sent.at(-1)!;
     expect(notePrompt.options?.forceReply).toBe(true);
+    expect(notePrompt.options?.forceReplyInstruction).toBe("Reply to this prompt with any note to include.");
     expect(notePrompt.options?.replyToMessageId).toBeUndefined();
-    expect(notePrompt.text).toBe("Add note\n\nReply to this prompt with any note to include.");
+    expect(notePrompt.text).toBe("Add note");
     expect(notePrompt.text).not.toContain("Selected:");
     await router.handle(textMessage("Prefer minimal changes", 7, notePrompt.messageId));
 
@@ -2536,6 +2542,7 @@ describe("relay controller", () => {
     const otherPrompt = adapter.sent.at(-1)!;
     expect(adapter.edited.at(-1)?.text).toBe("Selected: Other");
     expect(otherPrompt.options?.forceReply).toBe(true);
+    expect(otherPrompt.options?.forceReplyInstruction).toBe("Reply to this prompt with the answer to use.");
     expect(otherPrompt.options?.replyToMessageId).toBeUndefined();
     expect(adapter.sent.filter((message) => message.text.includes("Other answer"))).toHaveLength(1);
     await router.handle(textMessage("Use a hybrid approach", 7, otherPrompt.messageId));
@@ -2584,6 +2591,7 @@ describe("relay controller", () => {
     expect(adapter.sent.filter((message) => message.text.includes("Other answer"))).toHaveLength(1);
     expect(adapter.edited.at(-1)?.text).toBe("Selected: Other");
     expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
+    expect(adapter.sent.at(-1)?.options?.forceReplyInstruction).toBe("Reply to this prompt with the answer to use.");
     expect(adapter.sent.at(-1)?.options?.replyToMessageId).toBeUndefined();
     expect(store.getPendingPrompt("1", prompt.messageId!)).toBeUndefined();
   });

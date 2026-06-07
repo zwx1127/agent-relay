@@ -841,16 +841,19 @@ describe("lark adapter", () => {
     const channel = new FakeLarkChannel();
     const adapter = adapterWith(channel);
 
-    await expect(adapter.sendMessage("oc_chat", "Reply with the workspace name.", {
+    await expect(adapter.sendMessage("oc_chat", "Received an image.", {
       forceReply: true,
-      inputFieldPlaceholder: "repo name under WORKSPACE_ROOT",
+      forceReplyInstruction: "Reply to this prompt, or send your next message with what you want Codex to do.",
+      inputFieldPlaceholder: "What should Codex do?",
     })).resolves.toEqual({ messageId: "om_1" });
 
     const card = expectLarkCard(channel.sent[0]?.input);
     expectNoLarkCardFooter(card);
     const payload = JSON.stringify(card);
-    expect(payload).toContain("Reply to this prompt, or send your next message as the answer.");
-    expect(payload).toContain("repo name under WORKSPACE_ROOT");
+    expect(countOccurrences(payload, "Received an image.")).toBe(1);
+    expect(countOccurrences(payload, "Reply to this prompt, or send your next message with what you want Codex to do.")).toBe(1);
+    expect(countOccurrences(payload, "What should Codex do?")).toBe(1);
+    expect(payload).not.toContain("Reply to this prompt, or send your next message as the answer.");
   });
 });
 
@@ -870,6 +873,10 @@ function expectLarkCardShape(card: object): void {
   expect(value.schema).toBe("2.0");
   expect(value.config).toEqual({ update_multi: true, width_mode: "fill" });
   expect(Array.isArray(value.body?.elements)).toBe(true);
+}
+
+function countOccurrences(text: string, search: string): number {
+  return text.split(search).length - 1;
 }
 
 function firstButtonValue(card: object): { callback_nonce?: string; callback_data?: string } {

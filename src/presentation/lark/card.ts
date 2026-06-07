@@ -6,6 +6,7 @@ export interface LarkCardOptions {
   entities?: TextEntity[];
   replyMarkup?: InlineKeyboardMarkup;
   forceReply?: boolean;
+  forceReplyInstruction?: string;
   inputFieldPlaceholder?: string;
 }
 
@@ -23,7 +24,7 @@ export function createLarkCard(text: string, options: LarkCardOptions = {}): obj
   if (options.forceReply) {
     elements.push({
       tag: "markdown",
-      content: replyPromptMarkdown(options.inputFieldPlaceholder),
+      content: replyPromptMarkdown(options.forceReplyInstruction, options.inputFieldPlaceholder),
       text_align: "left",
       text_size: "normal",
     });
@@ -48,10 +49,10 @@ export function createLarkCard(text: string, options: LarkCardOptions = {}): obj
   };
 }
 
-function replyPromptMarkdown(placeholder: string | undefined): string {
-  const instruction = "Reply to this prompt, or send your next message as the answer.";
-  if (!placeholder) return `**${instruction}**`;
-  return `**${instruction}**\n${renderLarkMarkdown(placeholder)}`;
+function replyPromptMarkdown(instruction: string | undefined, placeholder: string | undefined): string {
+  const text = instruction?.trim() || "Reply to this prompt.";
+  if (!placeholder) return `**${text}**`;
+  return `**${text}**\n${renderLarkMarkdown(placeholder)}`;
 }
 
 function buttonElement(button: InlineKeyboardButton, callbackNonce: string): object {
