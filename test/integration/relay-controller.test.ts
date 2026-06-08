@@ -1723,6 +1723,22 @@ describe("relay controller", () => {
     expect(adapter.photos[0]?.options).toEqual({ caption: "home screen", replyToMessageId: "1" });
   });
 
+  test("send_image capability resolves relative screenshot paths from cwd", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("debug h5"));
+    writeFileSync(join(path, "screen.png"), new Uint8Array([1, 2, 3]));
+
+    const result = await router.sendDebugImage({ path: "screen.png", cwd: path, caption: "home screen" });
+
+    expect(result.path).toContain(join(path, ".agent-relay", "media", "outgoing"));
+    expect(adapter.photos).toHaveLength(1);
+    expect(adapter.photos[0]?.options).toEqual({ caption: "home screen", replyToMessageId: "1" });
+  });
+
   test("send_file capability sends workspace file", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
@@ -1740,6 +1756,22 @@ describe("relay controller", () => {
     expect(adapter.files[0]?.options).toEqual({ filename: result.path.split(/[\\/]/).at(-1), caption: "report", replyToMessageId: "1" });
   });
 
+  test("send_file capability resolves relative file paths from cwd", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("make report"));
+    writeFileSync(join(path, "report.txt"), "hello");
+
+    const result = await router.sendDebugFile({ path: "report.txt", cwd: path, caption: "report" });
+
+    expect(result.path).toContain(join(path, ".agent-relay", "files", "outgoing"));
+    expect(adapter.files).toHaveLength(1);
+    expect(adapter.files[0]?.options).toEqual({ filename: result.path.split(/[\\/]/).at(-1), caption: "report", replyToMessageId: "1" });
+  });
+
   test("send_file capability rejects paths outside workspace", async () => {
     const { router, store, root } = fixture();
     const path = join(root, "demo");
@@ -1751,6 +1783,18 @@ describe("relay controller", () => {
     writeFileSync(report, "hello");
 
     await expect(router.sendDebugFile({ path: report, cwd: path })).rejects.toThrow("inside the selected workspace");
+  });
+
+  test("send_image capability rejects relative paths escaping the workspace", async () => {
+    const { router, store, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("debug h5"));
+    writeFileSync(join(root, "outside.png"), new Uint8Array([1, 2, 3]));
+
+    await expect(router.sendDebugImage({ path: "..\\outside.png", cwd: path })).rejects.toThrow("inside the selected workspace");
   });
 
   test("send_image capability rejects paths outside workspace", async () => {

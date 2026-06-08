@@ -1,5 +1,5 @@
 import { lstat, readFile } from "node:fs/promises";
-import { basename, extname, isAbsolute, resolve } from "node:path";
+import { basename, extname, resolve } from "node:path";
 import { isAuthorized, type AppConfig } from "../runtime/config.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
 import { parseSessionKey } from "../domain/session.ts";
@@ -354,8 +354,9 @@ export class MediaRelayService {
 
   async sendDebugImage(input: SendImageCapabilityRequest): Promise<{ path: string }> {
     const { sessionKey: sessionKeyValue, workspace } = this.resolveCapabilitySession(input, "image");
-    await this.validateDebugImagePath(input.path, workspace.path);
-    const path = await this.copyOutgoingImage(workspace.path, input.path);
+    const sourcePath = this.resolveCapabilityPath(input, workspace.path);
+    await this.validateDebugImagePath(sourcePath, workspace.path);
+    const path = await this.copyOutgoingImage(workspace.path, sourcePath);
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) throw new Error("Invalid session key.");
     await this.sendStoredImage(parsed.scopeKey, parsed.workspaceName, path, input.caption, this.deps.lastUserMessageId(sessionKeyValue));
@@ -364,6 +365,7 @@ export class MediaRelayService {
       workspace: parsed.workspaceName,
       session_key: sessionKeyValue,
       source_path: input.path,
+      resolved_source_path: sourcePath,
       stored_path: path,
     });
     return { path };
@@ -371,8 +373,9 @@ export class MediaRelayService {
 
   async sendDebugFile(input: SendFileCapabilityRequest): Promise<{ path: string }> {
     const { sessionKey: sessionKeyValue, workspace } = this.resolveCapabilitySession(input, "file");
-    await this.validateDebugFilePath(input.path, workspace.path);
-    const path = await this.copyOutgoingFile(workspace.path, input.path);
+    const sourcePath = this.resolveCapabilityPath(input, workspace.path);
+    await this.validateDebugFilePath(sourcePath, workspace.path);
+    const path = await this.copyOutgoingFile(workspace.path, sourcePath);
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) throw new Error("Invalid session key.");
     await this.sendStoredFile(parsed.scopeKey, parsed.workspaceName, path, input.caption, this.deps.lastUserMessageId(sessionKeyValue));
@@ -381,6 +384,7 @@ export class MediaRelayService {
       workspace: parsed.workspaceName,
       session_key: sessionKeyValue,
       source_path: input.path,
+      resolved_source_path: sourcePath,
       stored_path: path,
     });
     return { path };
@@ -414,9 +418,11 @@ export class MediaRelayService {
     throw new Error(`Multiple running relay sessions match this ${kind} request; pass --session-key.`);
   }
 
-  private async validateDebugImagePath(path: string, workspacePath: string): Promise<void> {
-    if (!isAbsolute(path)) throw new Error("Image path must be absolute.");
-    const resolvedPath = resolve(path);
+  private resolveCapabilityPath(input: Pick<SendImageCapabilityRequest | SendFileCapabilityRequest, "path" | "cwd">, workspacePath: string): string {
+    return resolve(input.cwd ?? workspacePath, input.path);
+  }
+
+  private async validateDebugImagePath(resolvedPath: string, workspacePath: string): Promise<void> {
     // The control API is local-only, but still treats workspace containment as
     // the authorization boundary for agent-produced debug images.
     if (!pathContains(workspacePath, resolvedPath)) throw new Error("Image path must stay inside the selected workspace.");
@@ -431,9 +437,7 @@ export class MediaRelayService {
     }
   }
 
-  private async validateDebugFilePath(path: string, workspacePath: string): Promise<void> {
-    if (!isAbsolute(path)) throw new Error("File path must be absolute.");
-    const resolvedPath = resolve(path);
+  private async validateDebugFilePath(resolvedPath: string, workspacePath: string): Promise<void> {
     if (!pathContains(workspacePath, resolvedPath)) throw new Error("File path must stay inside the selected workspace.");
     const stat = await lstat(resolvedPath);
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("File path must be a regular file.");
