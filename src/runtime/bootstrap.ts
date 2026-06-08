@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.ts";
 import { SQLiteStore } from "../storage/sqlite-store.ts";
@@ -11,6 +11,7 @@ import { parseSendFileRequest, RELAY_CAPABILITY_SEND_FILE } from "../relay/capab
 import { parseMentionAgentRequest, RELAY_CAPABILITY_MENTION_AGENT } from "../relay/capabilities/mention-agent.ts";
 import { mentionAgentCapabilityInstructions, relayCapabilityInstructions, sendFileCapabilityInstructions, sendImageCapabilityInstructions } from "../relay/control/skills.ts";
 import { startControlServer, type RunningControlServer } from "../relay/control/server.ts";
+import { resolveRelayHelperPath } from "../relay/control/helper.ts";
 import { createImAdapter } from "../providers/im/factory.ts";
 import { createAgentDriver } from "../providers/agents/factory.ts";
 
@@ -21,7 +22,7 @@ export async function main(): Promise<void> {
   const imAdapter = createImAdapter(config, logger);
   let router: RelayController;
   let control: RunningControlServer | undefined;
-  const helperPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin", "agent-relay-helper");
+  const helperPath = resolveRelayHelperPath(dirname(fileURLToPath(import.meta.url)));
   const controlToken = randomBytes(32).toString("hex");
   const controlEnv: Record<string, string> = {};
   const capabilities = new CapabilityRegistry();
@@ -76,6 +77,7 @@ export async function main(): Promise<void> {
     controlEnv.AGENT_RELAY_CONTROL_URL = control.url;
     controlEnv.AGENT_RELAY_CONTROL_TOKEN = controlToken;
     controlEnv.AGENT_RELAY_HELPER = helperPath;
+    controlEnv.AGENT_RELAY_BUN_PATH = process.execPath;
   }
 
   const shutdown = (signal: string): void => {

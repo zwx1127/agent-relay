@@ -9,17 +9,17 @@ export function relayInteractionInstructions(): string {
   ].join("\n");
 }
 
-export function relayCapabilityInstructions(helperPath: string, capabilityInstructions?: string): string {
+export function relayCapabilityInstructions(helperPath: string, capabilityInstructions?: string, platform = process.platform): string {
   return [
     "## Agent Relay Capabilities",
     "",
     "This Codex session can call local agent-relay capabilities through the helper exposed in `AGENT_RELAY_HELPER`.",
     "",
-    capabilityInstructions ?? [sendImageCapabilityInstructions(helperPath), sendFileCapabilityInstructions(helperPath)].join("\n\n"),
+    capabilityInstructions ?? [sendImageCapabilityInstructions(helperPath, platform), sendFileCapabilityInstructions(helperPath, platform)].join("\n\n"),
   ].join("\n");
 }
 
-export function mentionAgentCapabilityInstructions(helperPath: string, agentName: string | undefined, peerIds: string[]): string {
+export function mentionAgentCapabilityInstructions(helperPath: string, agentName: string | undefined, peerIds: string[], platform = process.platform): string {
   return [
     "### mention_agent",
     "",
@@ -31,9 +31,7 @@ export function mentionAgentCapabilityInstructions(helperPath: string, agentName
     "1. Write a concise message naming the concrete work you need from the peer.",
     "2. Send it with:",
     "",
-    "```bash",
-    '\"$AGENT_RELAY_HELPER\" mention-agent <peer-id> \"message\" --cwd \"$PWD\"',
-    "```",
+    helperCommandExample("mention-agent <peer-id> \"message\" --cwd \"$PWD\"", platform),
     "",
     `If AGENT_RELAY_HELPER is unavailable, the helper path for this relay is: ${helperPath}`,
     "",
@@ -41,7 +39,7 @@ export function mentionAgentCapabilityInstructions(helperPath: string, agentName
   ].filter((line): line is string => line !== undefined).join("\n");
 }
 
-export function sendImageCapabilityInstructions(helperPath: string): string {
+export function sendImageCapabilityInstructions(helperPath: string, platform = process.platform): string {
   return [
     "### send_image",
     "",
@@ -52,9 +50,7 @@ export function sendImageCapabilityInstructions(helperPath: string): string {
     "2. Save the screenshot as a PNG, JPG, WEBP, or GIF file inside the current workspace.",
     "3. Send it to the user with:",
     "",
-    "```bash",
-    '\"$AGENT_RELAY_HELPER\" send-image <screenshot-path> --cwd \"$PWD\" --caption \"short description\"',
-    "```",
+    helperCommandExample("send-image <screenshot-path> --cwd \"$PWD\" --caption \"short description\"", platform),
     "",
     `If AGENT_RELAY_HELPER is unavailable, the helper path for this relay is: ${helperPath}`,
     "",
@@ -62,7 +58,7 @@ export function sendImageCapabilityInstructions(helperPath: string): string {
   ].join("\n");
 }
 
-export function sendFileCapabilityInstructions(helperPath: string): string {
+export function sendFileCapabilityInstructions(helperPath: string, platform = process.platform): string {
   return [
     "### send_file",
     "",
@@ -72,12 +68,25 @@ export function sendFileCapabilityInstructions(helperPath: string): string {
     "1. Create or locate the file inside the current workspace.",
     "2. Send it to the user with:",
     "",
-    "```bash",
-    '\"$AGENT_RELAY_HELPER\" send-file <file-path> --cwd \"$PWD\" --caption \"short description\"',
-    "```",
+    helperCommandExample("send-file <file-path> --cwd \"$PWD\" --caption \"short description\"", platform),
     "",
     `If AGENT_RELAY_HELPER is unavailable, the helper path for this relay is: ${helperPath}`,
     "",
     "After sending the file, briefly summarize what the file contains.",
+  ].join("\n");
+}
+
+function helperCommandExample(args: string, platform: string): string {
+  if (platform === "win32") {
+    return [
+      "```powershell",
+      `& "$env:AGENT_RELAY_HELPER" ${args}`,
+      "```",
+    ].join("\n");
+  }
+  return [
+    "```bash",
+    `"$AGENT_RELAY_HELPER" ${args}`,
+    "```",
   ].join("\n");
 }
