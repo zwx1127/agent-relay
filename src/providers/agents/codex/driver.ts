@@ -233,6 +233,7 @@ export class CodexDriver implements AgentDriver {
       result = await this.request("turn/start", { threadId: running.status.threadId, input, ...(collaborationMode ? { collaborationMode } : {}) });
     }
     updateActiveTurnFromResult(running, result);
+    clearRecentError(running);
     return { turnId: getTurnId(result) };
   }
 
@@ -651,6 +652,7 @@ export class CodexDriver implements AgentDriver {
       if (turnId) running.status.activeTurnId = turnId;
       running.status.waitingForApproval = false;
       running.status.waitingForUserInput = false;
+      clearRecentError(running);
       return;
     }
 
@@ -659,6 +661,7 @@ export class CodexDriver implements AgentDriver {
       running.status.activeTurnId = undefined;
       running.status.waitingForApproval = false;
       running.status.waitingForUserInput = false;
+      clearRecentError(running);
       await this.onOutput({ type: "turn_completed", sessionKey: key, turnId });
       return;
     }
@@ -900,4 +903,8 @@ function sideBoundaryPromptItem(): unknown {
 
 function sideDeveloperInstructions(existing: string | undefined): string {
   return [existing, SIDE_DEVELOPER_INSTRUCTIONS].filter(Boolean).join("\n\n");
+}
+
+function clearRecentError(running: RunningSession): void {
+  running.status.recentError = undefined;
 }

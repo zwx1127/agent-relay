@@ -16,7 +16,7 @@ describe("CodexDriver app-server protocol", () => {
   test("resets failed app-server startup so a later start can retry", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agent-relay-fake-codex-"));
     dirs.push(dir);
-    const fake = join(dir, "codex-fake.js");
+    const fake = fakeCodexCommandPath(dir);
     const driver = new CodexDriver(
       { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
       () => undefined,
@@ -35,12 +35,11 @@ describe("CodexDriver app-server protocol", () => {
   test("includes recent app-server stderr when startup exits", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agent-relay-failing-codex-"));
     dirs.push(dir);
-    const fake = join(dir, "codex-fake.js");
-    writeFileSync(fake, `#!/usr/bin/env node
+    const fake = fakeCodexCommandPath(dir);
+    writeNodeCommand(fake, `#!/usr/bin/env node
 process.stderr.write("startup failed\\nmore detail\\n");
 setTimeout(() => process.exit(1), 20);
 `);
-    chmodSync(fake, 0o755);
     const driver = new CodexDriver(
       { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
       () => undefined,
@@ -490,14 +489,36 @@ setTimeout(() => process.exit(1), 20);
     expect(updated.recentError).toBeUndefined();
     await driver.stop(status.sessionKey);
   });
+
+  test("clears transient app-server errors after a turn recovers", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => {
+        events.push(event);
+      },
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "recovering error");
+    await sleep(100);
+
+    const updated = driver.getStatus(status.sessionKey)!;
+    expect(updated.recentError).toBeUndefined();
+    expect(events).toContainEqual({ type: "message", sessionKey: "codex:1:demo", chunk: "recovered", turnId: "turn-1", itemId: "m1" });
+    expect(events).toContainEqual({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    await driver.stop(status.sessionKey);
+  });
 });
 
 function fakeCodexBin(scriptPath?: string): string {
   const dir = scriptPath ? dirname(scriptPath) : mkdtempSync(join(tmpdir(), "agent-relay-fake-codex-"));
   if (!scriptPath) dirs.push(dir);
-  const script = scriptPath ?? join(dir, "codex-fake.js");
+  const script = scriptPath ?? fakeCodexCommandPath(dir);
   const log = join(dir, "messages.log");
-  writeFileSync(script, `#!/usr/bin/env node
+  writeNodeCommand(script, `#!/usr/bin/env node
 const fs = require("fs");
 const readline = require("readline");
 const log = ${JSON.stringify(log)};
@@ -527,6 +548,10 @@ rl.on("line", (line) => {
       send({ method: "thread/tokenUsage/updated", params: { threadId, turnId, tokenUsage: { last: { totalTokens: 7 }, total: { totalTokens: 42 }, modelContextWindow: 100 } } });
     } else if (inputText === "warn please") {
       send({ method: "warning", params: { threadId, message: "Under-development features enabled: goals" } });
+      send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
+    } else if (inputText === "recovering error") {
+      send({ method: "error", params: { threadId, error: { message: "Reconnecting... 5/5", codexErrorInfo: { message: "Stream disconnected before completion: remote host closed the connection (os error 10054)" } } } });
+      send({ method: "item/agentMessage/delta", params: { threadId, turnId, itemId: "m1", delta: "recovered" } });
       send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
     } else if (inputText === "ask") {
       send({ id: 900, method: "item/tool/requestUserInput", params: { threadId, turnId, itemId: "item-1", questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [{ label: "Fast", description: "Quick" }] }] } });
@@ -596,8 +621,23 @@ rl.on("line", (line) => {
   }
 });
 `);
-  chmodSync(script, 0o755);
   return script;
+}
+
+function fakeCodexCommandPath(dir: string): string {
+  return join(dir, process.platform === "win32" ? "codex-fake" : "codex-fake.js");
+}
+
+function writeNodeCommand(commandPath: string, scriptText: string): void {
+  if (process.platform !== "win32") {
+    writeFileSync(commandPath, scriptText);
+    chmodSync(commandPath, 0o755);
+    return;
+  }
+  const commandFile = commandPath.toLowerCase().endsWith(".cmd") ? commandPath : `${commandPath}.cmd`;
+  const scriptPath = commandFile.replace(/\.cmd$/i, ".js");
+  writeFileSync(scriptPath, scriptText);
+  writeFileSync(commandFile, `@echo off\r\n"${process.execPath}" "%~dp0${scriptPath.split(/[\\/]/).at(-1)}" %*\r\n`);
 }
 
 function readLog(fakeBin: string): string {
