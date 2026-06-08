@@ -568,19 +568,21 @@ export class ThreadCommandService {
     if (completedTurnId && this.interruptedPlanTurns.delete(`${sessionKeyValue}:${completedTurnId}`)) return;
     const threadId = this.deps.agent.getStatus(sessionKeyValue)?.threadId ?? this.deps.store.getSession(sessionKeyValue)?.thread_id ?? undefined;
     const token = shortToken();
-    const result = await this.deps.sendRendered(parsed.conversationId, messageWithTitle("Plan ready.", "Choose whether to implement it now or keep refining the plan."), {
+    const result = await this.deps.sendRendered(parsed.scopeKey, messageWithTitle("Plan ready.", "Choose whether to implement it now or keep refining the plan."), {
       replyMarkup: planReadyKeyboard(token),
       disableWebPagePreview: true,
     });
     if (!result.messageId) return;
     this.deps.logger.info("router.plan_ready_prompt_sent", {
       conversation_id: parsed.conversationId,
+      scope_key: parsed.scopeKey,
       session_key: sessionKeyValue,
       turn_id: completedTurnId,
       prompt_message_id: result.messageId,
     });
     this.deps.store.setPendingPrompt({
       conversationId: parsed.conversationId,
+      scopeKey: parsed.scopeKey,
       promptMessageId: result.messageId,
       kind: "relay_command",
       createdAt: Date.now(),

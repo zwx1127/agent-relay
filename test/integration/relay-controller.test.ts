@@ -783,6 +783,62 @@ describe("relay controller", () => {
     expect(adapter.reactions.at(-1)).toEqual({ conversationId: "1", messageId: "100", emoji: "😎" });
   });
 
+  test("plan ready card stays in the originating Telegram topic", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    const topic = { provider: "telegram" as const, id: "10" };
+    const scope = chatScopeKey("1", topic);
+    const key = sessionKey(scope, "demo");
+    store.bindConversation(scope, "demo", 1, "1");
+
+    await router.handle({ ...textMessage("/plan design this", 7, undefined, "1"), topic });
+
+    expect(agent.sent.at(-1)).toEqual({ key, text: "design this", options: { collaborationMode: "plan" } });
+    expect(adapter.chatActions.at(-1)).toEqual({ conversationId: "1", action: "typing", options: { topic } });
+
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: key, turnId: "turn-1" });
+    agent.getStatus(key)!.activeTurnId = undefined;
+    const planMessage = adapter.sent.at(-1)!;
+    const planButton = planMessage.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Implement");
+
+    expect(planMessage).toMatchObject({
+      conversationId: "1",
+      options: { topic },
+    });
+    expect(store.getPendingPrompt(scope, planMessage.messageId!)).toBeDefined();
+    expect(store.getPendingPrompt("1", planMessage.messageId!)).toBeUndefined();
+
+    await router.handle(callbackMessage(planButton!.callback_data, 7, "cb-plan-topic", planMessage.messageId, "1"));
+
+    expect(store.getCollaborationMode(key)).toBe("default");
+    expect(agent.sent.at(-1)).toEqual({ key, text: "Implement the approved plan.", options: { collaborationMode: "default" } });
+  });
+
+  test("plan ready card stays in the originating Lark thread", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    const topic = { provider: "lark" as const, id: "thread-1", rootMessageId: "root-1" };
+    const scope = chatScopeKey("1", topic);
+    const key = sessionKey(scope, "demo");
+    store.bindConversation(scope, "demo", 1, "1");
+
+    await router.handle({ ...textMessage("/plan design this", 7, undefined, "1"), topic });
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: key, turnId: "turn-1" });
+
+    const planMessage = adapter.sent.at(-1)!;
+    expect(agent.sent.at(-1)).toEqual({ key, text: "design this", options: { collaborationMode: "plan" } });
+    expect(planMessage).toMatchObject({
+      conversationId: "1",
+      options: { topic },
+    });
+    expect(store.getPendingPrompt(scope, planMessage.messageId!)).toBeDefined();
+    expect(store.getPendingPrompt("1", planMessage.messageId!)).toBeUndefined();
+  });
+
   test("plan continue callback deletes the plan ready prompt without sending text", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");

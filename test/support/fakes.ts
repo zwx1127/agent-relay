@@ -21,7 +21,7 @@ export class FakeImAdapter {
   edited: Array<{ conversationId: ConversationId; text: string; options: EditMessageTextOptions }> = [];
   deleted: Array<{ conversationId: ConversationId; messageId: MessageId }> = [];
   answered: Array<{ callbackQueryId: string; text?: string }> = [];
-  chatActions: Array<{ conversationId: ConversationId; action?: "typing" }> = [];
+  chatActions: Array<{ conversationId: ConversationId; action?: "typing"; options?: { topic?: SendMessageOptions["topic"] } }> = [];
   reactions: Array<{ conversationId: ConversationId; messageId: MessageId; emoji?: string }> = [];
   downloads = new Map<string, ArrayBuffer>();
   nextMessageId = 100;
@@ -79,8 +79,8 @@ export class FakeImAdapter {
     this.answered.push({ callbackQueryId, text });
   }
 
-  async sendChatAction(conversationId: ConversationId, action?: "typing"): Promise<void> {
-    this.chatActions.push({ conversationId, action });
+  async sendChatAction(conversationId: ConversationId, action?: "typing", options?: { topic?: SendMessageOptions["topic"] }): Promise<void> {
+    this.chatActions.push({ conversationId, action, ...(options ? { options } : {}) });
   }
 
   async setMessageReaction(conversationId: ConversationId, messageId: MessageId, emoji?: string): Promise<void> {
