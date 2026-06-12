@@ -8,8 +8,8 @@ describe("relay control helper", () => {
   });
 
   test("uses the shebang helper on non-Windows platforms", () => {
-    expect(resolveRelayHelperPath(String.raw`D:\Code\agent-relay\src\runtime`, "linux")).toBe(String.raw`D:\Code\agent-relay\bin\agent-relay-helper`);
-    expect(resolveRelayHelperPath(String.raw`D:\Code\agent-relay\src\runtime`, "darwin")).toBe(String.raw`D:\Code\agent-relay\bin\agent-relay-helper`);
+    expect(resolveRelayHelperPath("/repo/agent-relay/src/runtime", "linux")).toBe("/repo/agent-relay/bin/agent-relay-helper");
+    expect(resolveRelayHelperPath("/repo/agent-relay/src/runtime", "darwin")).toBe("/repo/agent-relay/bin/agent-relay-helper");
   });
 
   test("renders PowerShell helper commands on Windows", () => {
