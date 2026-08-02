@@ -34,21 +34,66 @@ export function planReadyKeyboard(token: string): InlineKeyboardMarkup {
   };
 }
 
-export function goalReplaceKeyboard(token: string): InlineKeyboardMarkup {
+export function approvalKeyboard(token: string, choices: Array<{ action: string; label: string }>): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: choices.map((choice) => [{ text: choice.label, callback_data: `ar:a:${token}:${choice.action}` }]),
+  };
+}
+
+export function attachmentPickerKeyboard(
+  token: string,
+  entries: Array<{ label: string }>,
+  pageIndex: number,
+  totalPages: number,
+): InlineKeyboardMarkup {
+  const rows = entries.map((entry, index) => [{
+    text: buttonLabel(entry.label),
+    callback_data: `ar:cmd:attach:${token}:i${pageIndex * 8 + index}`,
+  }]);
+  if (totalPages > 1) {
+    rows.push([
+      { text: UI_BUTTON.previousPage, callback_data: `ar:cmd:attach:${token}:p${Math.max(0, pageIndex - 1)}` },
+      { text: UI_BUTTON.nextPage, callback_data: `ar:cmd:attach:${token}:p${Math.min(totalPages - 1, pageIndex + 1)}` },
+    ]);
+  }
+  return { inline_keyboard: rows };
+}
+
+export function activityDetailsKeyboard(detailsToken?: string, diffToken?: string): InlineKeyboardMarkup {
+  const row: InlineKeyboardMarkup["inline_keyboard"][number] = [];
+  if (detailsToken) row.push({ text: "View details", callback_data: `ar:p:${detailsToken}:0` });
+  if (diffToken) row.push({ text: "View diff", callback_data: `ar:p:${diffToken}:0` });
+  return { inline_keyboard: row.length ? [row] : [] };
+}
+
+export function commandConfirmKeyboard(token: string, command: string, confirmLabel: string, action = "confirm"): InlineKeyboardMarkup {
   return {
     inline_keyboard: [[
-      { text: "Replace", callback_data: `ar:cmd:goal:${token}:replace` },
-      { text: "Cancel", callback_data: `ar:cmd:goal:${token}:cancel` },
+      { text: confirmLabel, callback_data: `ar:cmd:${command}:${token}:${action}` },
+      { text: "Cancel", callback_data: `ar:cmd:${command}:${token}:cancel` },
     ]],
   };
 }
 
-export function approvalKeyboard(token: string): InlineKeyboardMarkup {
+export function backgroundTerminalsKeyboard(token: string, terminals: AgentThreadSummaryLike[]): InlineKeyboardMarkup {
   return {
-    inline_keyboard: [[
-      { text: UI_BUTTON.approve, callback_data: `ar:a:${token}:y` },
-      { text: UI_BUTTON.deny, callback_data: `ar:a:${token}:n` },
-    ]],
+    inline_keyboard: terminals
+      .filter((terminal) => Boolean(terminal.processId))
+      .map((terminal, index) => [{
+        text: `Stop ${buttonLabel(terminal.commandDisplay || terminal.processId || "terminal")}`,
+        callback_data: `ar:cmd:terminal:${token}:${index}`,
+      }]),
+  };
+}
+
+interface AgentThreadSummaryLike {
+  processId?: string;
+  commandDisplay: string;
+}
+
+export function mcpElicitationKeyboard(token: string, actions: Array<{ action: string; label: string }>): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: actions.map((choice) => [{ text: choice.label, callback_data: `ar:m:${token}:${choice.action}` }]),
   };
 }
 

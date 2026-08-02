@@ -146,6 +146,19 @@ export interface FileInboundMessage extends InboundMessageContext {
   date?: number;
 }
 
+export interface AudioInboundMessage extends InboundMessageContext {
+  kind: "audio";
+  id: string;
+  messageId: MessageId;
+  conversationId: ConversationId;
+  userId: UserId;
+  audio: InboundDocumentFile;
+  caption?: string;
+  durationSeconds?: number;
+  replyToMessageId?: MessageId;
+  date?: number;
+}
+
 export interface TextInboundMessage extends InboundMessageContext {
   kind: "message";
   id: string;
@@ -170,7 +183,7 @@ export interface CallbackInboundMessage {
   date?: number;
 }
 
-export type InboundMessage = TextInboundMessage | MediaInboundMessage | FileInboundMessage | CallbackInboundMessage;
+export type InboundMessage = TextInboundMessage | MediaInboundMessage | AudioInboundMessage | FileInboundMessage | CallbackInboundMessage;
 
 export interface ImAdapterCapabilities {
   editMessage: boolean;

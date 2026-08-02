@@ -2,6 +2,8 @@ import { existsSync } from "node:fs";
 import { win32 } from "node:path";
 
 export const CODEX_APP_SERVER_ARGS = ["app-server", "--listen", "stdio://"] as const;
+export const CODEX_VERSION_ARGS = ["--version"] as const;
+export const MINIMUM_CODEX_VERSION = "0.145.0";
 
 export interface CodexSpawnCommand {
   command: string;
@@ -18,7 +20,41 @@ export function codexAppServerSpawnCommand(
   platform = process.platform,
   exists: (path: string) => boolean = existsSync,
 ): CodexSpawnCommand {
-  const args = [...CODEX_APP_SERVER_ARGS];
+  return codexSpawnCommand(codexBin, [...CODEX_APP_SERVER_ARGS], env, platform, exists);
+}
+
+export function codexVersionSpawnCommand(
+  codexBin: string,
+  env: Env = process.env,
+  platform = process.platform,
+  exists: (path: string) => boolean = existsSync,
+): CodexSpawnCommand {
+  return codexSpawnCommand(codexBin, [...CODEX_VERSION_ARGS], env, platform, exists);
+}
+
+export function parseCodexVersion(output: string): string | undefined {
+  return /(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?(?:\s|$)/.exec(output.trim())?.slice(1, 4).join(".");
+}
+
+export function isCodexVersionSupported(version: string, minimum = MINIMUM_CODEX_VERSION): boolean {
+  const actual = version.split(".").map(Number);
+  const required = minimum.split(".").map(Number);
+  if (actual.length !== 3 || required.length !== 3 || [...actual, ...required].some((part) => !Number.isInteger(part))) return false;
+  for (let index = 0; index < 3; index += 1) {
+    const left = actual[index]!;
+    const right = required[index]!;
+    if (left !== right) return left > right;
+  }
+  return true;
+}
+
+export function codexSpawnCommand(
+  codexBin: string,
+  args: string[],
+  env: Env = process.env,
+  platform: string = process.platform,
+  exists: (path: string) => boolean = existsSync,
+): CodexSpawnCommand {
   if (platform !== "win32") {
     return { command: codexBin, args, resolvedCodexBin: codexBin };
   }

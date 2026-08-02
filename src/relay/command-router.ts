@@ -9,7 +9,7 @@ export interface SlashCommandHandlers {
   review(conversationId: ConversationId, text: string): Promise<void>;
   compact(conversationId: ConversationId): Promise<void>;
   init(conversationId: ConversationId, userMessageId?: MessageId): Promise<void>;
-  newThread(conversationId: ConversationId): Promise<void>;
+  newThread(conversationId: ConversationId, name: string, clearDisplay: boolean): Promise<void>;
   resume(conversationId: ConversationId, searchTerm: string): Promise<void>;
   fork(conversationId: ConversationId): Promise<void>;
   side(conversationId: ConversationId, prompt: string, userMessageId?: MessageId): Promise<void>;
@@ -19,6 +19,10 @@ export interface SlashCommandHandlers {
   interrupt(conversationId: ConversationId, args: string): Promise<void>;
   ps(conversationId: ConversationId): Promise<void>;
   stop(conversationId: ConversationId): Promise<void>;
+  skills?(conversationId: ConversationId, searchTerm: string): Promise<void>;
+  mention?(conversationId: ConversationId, searchTerm: string): Promise<void>;
+  archive?(conversationId: ConversationId): Promise<void>;
+  deleteThread?(conversationId: ConversationId): Promise<void>;
   unknown(conversationId: ConversationId, command: string): Promise<void>;
 }
 
@@ -44,8 +48,10 @@ export class SlashCommandRouter {
         await this.handlers.init(message.conversationId, message.messageId);
         return true;
       case "/new":
+        await this.handlers.newThread(message.conversationId, commandArgs(text), false);
+        return true;
       case "/clear":
-        await this.handlers.newThread(message.conversationId);
+        await this.handlers.newThread(message.conversationId, commandArgs(text), true);
         return true;
       case "/resume":
         await this.handlers.resume(message.conversationId, commandArgs(text));
@@ -73,7 +79,24 @@ export class SlashCommandRouter {
         await this.handlers.ps(message.conversationId);
         return true;
       case "/stop":
+      case "/clean":
         await this.handlers.stop(message.conversationId);
+        return true;
+      case "/skills":
+        if (!this.handlers.skills) throw new Error("Skills are not supported.");
+        await this.handlers.skills(message.conversationId, commandArgs(text));
+        return true;
+      case "/mention":
+        if (!this.handlers.mention) throw new Error("File mentions are not supported.");
+        await this.handlers.mention(message.conversationId, commandArgs(text));
+        return true;
+      case "/archive":
+        if (!this.handlers.archive) throw new Error("Archive is not supported.");
+        await this.handlers.archive(message.conversationId);
+        return true;
+      case "/delete":
+        if (!this.handlers.deleteThread) throw new Error("Delete is not supported.");
+        await this.handlers.deleteThread(message.conversationId);
         return true;
       default:
         await this.handlers.unknown(message.conversationId, command);

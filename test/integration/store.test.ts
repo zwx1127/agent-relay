@@ -63,6 +63,8 @@ describe("store", () => {
       text: "hello\n",
       createdAt: 3,
     });
+    store.clearTranscript(123, "demo");
+    expect(store.latestTranscriptEvent(123, "demo", "agent")).toBeUndefined();
     store.close();
   });
 
@@ -174,6 +176,16 @@ describe("store", () => {
       createdAt: 4,
       expiresAt: 10,
     });
+    store.deletePagedOutputsForSession("123:demo");
+    expect(store.getPagedOutput("tok")).toBeUndefined();
+    store.setPagedOutput({
+      token: "tok",
+      conversationId: "123",
+      sessionKey: "123:demo",
+      text: "long output",
+      createdAt: 4,
+      expiresAt: 10,
+    });
     store.prunePagedOutputs(11);
     expect(store.getPagedOutput("tok")).toBeUndefined();
     store.close();
@@ -192,13 +204,27 @@ describe("store", () => {
       conversationId: "1",
       workspaceName: "demo",
       text: "second",
-      input: { text: "second", images: [{ path: "/tmp/image.jpg" }] },
+      input: { text: "second", attachments: [
+        { type: "image", url: "https://example.test/image.png" },
+        { type: "localImage", path: "/tmp/image.jpg" },
+        { type: "audio", url: "https://example.test/audio.mp3" },
+        { type: "localAudio", path: "/tmp/audio.ogg" },
+        { type: "skill", name: "review", path: "/tmp/SKILL.md" },
+        { type: "mention", name: "README.md", path: "/tmp/README.md" },
+      ] },
       status: "queued",
       createdAt: 2,
     });
 
     expect(store.nextQueuedTask(1, "demo")?.id).toBe(first.id);
-    expect(store.getTask(second.id)?.inputJson).toBe(JSON.stringify({ text: "second", images: [{ path: "/tmp/image.jpg" }] }));
+    expect(JSON.parse(store.getTask(second.id)!.inputJson!)).toEqual({ text: "second", attachments: [
+      { type: "image", url: "https://example.test/image.png" },
+      { type: "localImage", path: "/tmp/image.jpg" },
+      { type: "audio", url: "https://example.test/audio.mp3" },
+      { type: "localAudio", path: "/tmp/audio.ogg" },
+      { type: "skill", name: "review", path: "/tmp/SKILL.md" },
+      { type: "mention", name: "README.md", path: "/tmp/README.md" },
+    ] });
     expect(store.countTasks(1, "demo", ["queued"])).toBe(2);
     store.updateTask(first.id, { status: "running", turnId: "turn-1", statusMessageId: 501 });
     expect(store.activeTask(1, "demo")?.turnId).toBe("turn-1");

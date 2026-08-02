@@ -13,6 +13,71 @@ afterEach(() => {
 });
 
 describe("CodexDriver app-server protocol", () => {
+  test("performs the strict initialized handshake and capability probes", async () => {
+    const fake = fakeCodexBin();
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    const messages = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+
+    expect(messages.slice(0, 6).map((message) => message.method)).toEqual([
+      "initialize",
+      "initialized",
+      "model/list",
+      "collaborationMode/list",
+      "thread/start",
+      "thread/backgroundTerminals/list",
+    ]);
+    expect(messages[0]?.params).toMatchObject({
+      clientInfo: { name: "agent-relay", version: "0.1.0" },
+      capabilities: {
+        experimentalApi: true,
+        requestAttestation: false,
+        mcpServerOpenaiFormElicitation: false,
+      },
+    });
+    expect(status.appServerVersion).toBe("0.145.0");
+    await driver.stop(status.sessionKey);
+  });
+
+  test("rejects Codex versions below the supported floor", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-relay-old-codex-"));
+    dirs.push(dir);
+    const fake = fakeCodexCommandPath(dir);
+    writeNodeCommand(fake, `#!/usr/bin/env node
+process.stdout.write("codex-cli 0.144.0\\n");
+`);
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    await expect(driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() }))
+      .rejects.toThrow("requires 0.145.0 or newer");
+  });
+
+  test("rejects unparseable Codex version output", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-relay-unknown-codex-"));
+    dirs.push(dir);
+    const fake = fakeCodexCommandPath(dir);
+    writeNodeCommand(fake, `#!/usr/bin/env node
+process.stdout.write("unknown build\\n");
+`);
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    await expect(driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() }))
+      .rejects.toThrow("Unable to parse Codex version");
+  });
+
   test("resets failed app-server startup so a later start can retry", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agent-relay-fake-codex-"));
     dirs.push(dir);
@@ -37,6 +102,10 @@ describe("CodexDriver app-server protocol", () => {
     dirs.push(dir);
     const fake = fakeCodexCommandPath(dir);
     writeNodeCommand(fake, `#!/usr/bin/env node
+if (process.argv.includes("--version")) {
+  process.stdout.write("codex-cli 0.145.0\\n");
+  process.exit(0);
+}
 process.stderr.write("startup failed\\nmore detail\\n");
 setTimeout(() => process.exit(1), 20);
 `);
@@ -77,7 +146,7 @@ setTimeout(() => process.exit(1), 20);
 
     expect(events).toContainEqual({ type: "message", sessionKey: "codex:1:demo", chunk: "hello ", turnId: "turn-1", itemId: "m1" });
     expect(events).toContainEqual({ type: "message", sessionKey: "codex:1:demo", chunk: "world", turnId: "turn-1", itemId: "m1" });
-    expect(events).toContainEqual({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    expect(events).toContainEqual({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1", status: "completed" });
     expect(JSON.stringify(events)).not.toContain("raw stdout");
     await driver.stop(status.sessionKey);
   });
@@ -95,7 +164,12 @@ setTimeout(() => process.exit(1), 20);
     await sleep(100);
 
     expect(await driver.listBackgroundTerminals(status.sessionKey)).toEqual([{
-      commandDisplay: "npm run dev",
+      itemId: "bg1",
+      processId: "proc1",
+      commandDisplay: "bash -lc 'npm run dev'",
+      osPid: null,
+      cpuPercent: null,
+      rssKb: null,
       recentChunks: ["line2", "line3", "line4"],
     }]);
 
@@ -264,6 +338,8 @@ setTimeout(() => process.exit(1), 20);
     await driver.runBuiltinCommand(status.sessionKey, { type: "compact" });
     const threads = await driver.listThreads({ workspacePath: "/tmp/demo", limit: 5 });
     const models = await driver.listModels();
+    const skills = await driver.listSkills("/tmp/demo");
+    const files = await driver.searchFiles("/tmp/demo", "read", { limit: 5 });
 
     const messages = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line));
     expect(messages.find((message) => message.method === "review/start").params).toEqual({
@@ -274,8 +350,37 @@ setTimeout(() => process.exit(1), 20);
     expect(messages.find((message) => message.method === "thread/compact/start").params).toEqual({ threadId: "thread-1" });
     expect(messages.find((message) => message.method === "thread/list").params.cwd).toBe("/tmp/demo");
     expect(messages.find((message) => message.method === "model/list").params.includeHidden).toBe(false);
+    expect(messages.find((message) => message.method === "skills/list").params).toEqual({ cwds: ["/tmp/demo"] });
+    expect(messages.find((message) => message.method === "fuzzyFileSearch").params).toEqual({ query: "read", roots: ["/tmp/demo"], cancellationToken: null });
     expect(threads[0]?.id).toBe("listed-thread");
     expect(models[0]?.id).toBe("gpt-5.2");
+    expect(models[0]?.supportedReasoningEfforts).toEqual(["low", "medium"]);
+    expect(skills[0]).toMatchObject({ name: "review", path: "/tmp/SKILL.md", enabled: true });
+    expect(files[0]).toEqual({ root: "/tmp/demo", path: "README.md", fileName: "README.md", matchType: "file", score: 10 });
+    await driver.stop(status.sessionKey);
+  });
+
+  test("synchronizes thread settings and expanded goal states from notifications", async () => {
+    const fake = fakeCodexBin();
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "settings and goal");
+    await sleep(100);
+
+    expect(driver.getStatus(status.sessionKey)).toMatchObject({
+      model: "gpt-current",
+      modelProvider: "openai",
+      reasoningEffort: "high",
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      sandboxPolicy: "dangerFullAccess",
+      threadGoal: { objective: "Wait for quota", status: "usageLimited" },
+    });
     await driver.stop(status.sessionKey);
   });
 
@@ -404,7 +509,7 @@ setTimeout(() => process.exit(1), 20);
     await driver.stop(status.sessionKey);
   });
 
-  test("sends local images as Codex turn input", async () => {
+  test("serializes all structured Codex input variants in order", async () => {
     const fake = fakeCodexBin();
     const driver = new CodexDriver(
       { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
@@ -413,12 +518,24 @@ setTimeout(() => process.exit(1), 20);
     );
 
     const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
-    await driver.send(status.sessionKey, "inspect", { images: [{ path: "/tmp/image.jpg" }] });
+    await driver.send(status.sessionKey, "inspect", { attachments: [
+      { type: "image", url: "https://example.test/image.png" },
+      { type: "localImage", path: "/tmp/image.jpg" },
+      { type: "audio", url: "https://example.test/audio.mp3" },
+      { type: "localAudio", path: "/tmp/audio.ogg" },
+      { type: "skill", name: "review", path: "/tmp/SKILL.md" },
+      { type: "mention", name: "README.md", path: "/tmp/README.md" },
+    ] });
 
     const turnStart = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((message) => message.method === "turn/start");
     expect(turnStart.params.input).toEqual([
       { type: "text", text: "inspect", text_elements: [] },
+      { type: "image", url: "https://example.test/image.png" },
       { type: "localImage", path: "/tmp/image.jpg" },
+      { type: "audio", url: "https://example.test/audio.mp3" },
+      { type: "localAudio", path: "/tmp/audio.ogg" },
+      { type: "skill", name: "review", path: "/tmp/SKILL.md" },
+      { type: "mention", name: "README.md", path: "/tmp/README.md" },
     ]);
     await driver.stop(status.sessionKey);
   });
@@ -490,6 +607,132 @@ setTimeout(() => process.exit(1), 20);
     await driver.stop(status.sessionKey);
   });
 
+  test("normalizes activity notifications and isolates raw reasoning", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => { events.push(event); },
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "activity please");
+    await sleep(100);
+
+    expect(events).toContainEqual({ type: "activity", sessionKey: "codex:1:demo", turnId: "turn-1", itemId: "reason-1", activity: { kind: "reasoning", summary: "Safe summary", sectionIndex: 0 } });
+    expect(events).toContainEqual({ type: "activity", sessionKey: "codex:1:demo", turnId: "turn-1", activity: { kind: "plan", explanation: "Do it", steps: [{ step: "Edit file", status: "inProgress" }] } });
+    expect(events).toContainEqual({ type: "activity", sessionKey: "codex:1:demo", turnId: "turn-1", activity: { kind: "diff", diff: "diff --git a/a b/a" } });
+    expect(events.some((event) => event.type === "message" && event.chunk.includes("secret chain"))).toBe(false);
+    await driver.stop(status.sessionKey);
+  });
+
+  test("emits idempotent lifecycle events for archive and removes the session", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => { events.push(event); },
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: "/tmp/demo" });
+    await driver.archiveThread(status.sessionKey);
+    await sleep(50);
+
+    expect(events).toContainEqual({
+      type: "thread_lifecycle",
+      sessionKey: "codex:1:demo",
+      threadId: "thread-1",
+      action: "archived",
+      initiatedByClient: true,
+    });
+    expect(driver.getStatus(status.sessionKey)).toBeUndefined();
+    await driver.stop(status.sessionKey);
+  });
+
+  test("normalizes typed MCP form elicitations and returns MCP response metadata", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => { events.push(event); },
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "mcp form");
+    await sleep(100);
+
+    expect(events.at(-1)).toMatchObject({
+      type: "mcp_elicitation_request",
+      sessionKey: "codex:1:demo",
+      requestId: 901,
+      serverName: "example",
+      mode: "form",
+      requestedSchema: {
+        type: "object",
+        required: ["name"],
+        properties: {
+          name: { type: "string", minLength: 2, maxLength: 20 },
+          count: { type: "integer", minimum: 1, maximum: 4 },
+          choices: { type: "array", items: { type: "string", enum: ["a", "b"] }, minItems: 1, maxItems: 2 },
+        },
+      },
+    });
+
+    await driver.respond(status.sessionKey, 901, { action: "accept", content: { name: "Ada", count: 2, choices: ["a"] }, _meta: null });
+    await sleep(50);
+    expect(readLog(fake)).toContain('"id":901,"result":{"action":"accept","content":{"name":"Ada","count":2,"choices":["a"]},"_meta":null}');
+    await driver.stop(status.sessionKey);
+  });
+
+  test("cancels unsupported openai forms and rejects unknown server requests", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => { events.push(event); },
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "unsupported requests");
+    await sleep(100);
+    const log = readLog(fake);
+
+    expect(log).toContain('"id":902,"result":{"action":"cancel","content":null,"_meta":null}');
+    expect(log).toContain('"id":903,"error":{"code":-32601');
+    expect(events.some((event) => event.type === "activity" && event.activity.kind === "notice" && event.activity.title === "Unsupported MCP form")).toBe(true);
+    expect(driver.getStatus(status.sessionKey)?.recentError).toMatch(/disabled|Unsupported/);
+    await driver.stop(status.sessionKey);
+  });
+
+  test("preserves failed turn error and duration", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => { events.push(event); },
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "failed turn");
+    await sleep(100);
+
+    expect(events.at(-1)).toEqual({
+      type: "turn_completed",
+      sessionKey: "codex:1:demo",
+      turnId: "turn-1",
+      status: "failed",
+      error: { message: "boom", additionalDetails: "details" },
+      durationMs: 321,
+    });
+    expect(driver.getStatus(status.sessionKey)?.recentError).toBe("boom");
+    await driver.stop(status.sessionKey);
+  });
+
   test("clears transient app-server errors after a turn recovers", async () => {
     const fake = fakeCodexBin();
     const events: AgentOutputEvent[] = [];
@@ -508,7 +751,7 @@ setTimeout(() => process.exit(1), 20);
     const updated = driver.getStatus(status.sessionKey)!;
     expect(updated.recentError).toBeUndefined();
     expect(events).toContainEqual({ type: "message", sessionKey: "codex:1:demo", chunk: "recovered", turnId: "turn-1", itemId: "m1" });
-    expect(events).toContainEqual({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    expect(events).toContainEqual({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1", status: "completed" });
     await driver.stop(status.sessionKey);
   });
 });
@@ -519,17 +762,31 @@ function fakeCodexBin(scriptPath?: string): string {
   const script = scriptPath ?? fakeCodexCommandPath(dir);
   const log = join(dir, "messages.log");
   writeNodeCommand(script, `#!/usr/bin/env node
+if (process.argv.includes("--version")) {
+  process.stdout.write("codex-cli 0.145.0\\n");
+  process.exit(0);
+}
 const fs = require("fs");
 const readline = require("readline");
 const log = ${JSON.stringify(log)};
 const rl = readline.createInterface({ input: process.stdin });
 let turnCount = 0;
+let initialized = false;
+const terminals = new Map();
 function send(message) { process.stdout.write(JSON.stringify(message) + "\\n"); }
 rl.on("line", (line) => {
   fs.appendFileSync(log, line + "\\n");
   const msg = JSON.parse(line);
+  if (msg.method === "initialized") {
+    initialized = true;
+    return;
+  }
+  if (msg.method !== "initialize" && !initialized) {
+    send({ id: msg.id, error: { code: -32002, message: "initialized notification required" } });
+    return;
+  }
   if (msg.method === "initialize") {
-    send({ id: msg.id, result: { userAgent: "fake", codexHome: "/tmp", platformFamily: "unix", platformOs: "linux" } });
+    send({ id: msg.id, result: { userAgent: "codex-cli 0.145.0", codexHome: "/tmp", platformFamily: "unix", platformOs: "linux" } });
   } else if (msg.method === "thread/start" || msg.method === "thread/resume") {
     send({ id: msg.id, result: { thread: { id: "thread-1", name: "Initial thread", status: { type: "idle" } }, model: "gpt-5.2", modelProvider: "openai", reasoningEffort: "medium", approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: { type: "workspaceWrite" } } });
   } else if (msg.method === "turn/start") {
@@ -546,6 +803,11 @@ rl.on("line", (line) => {
       send({ method: "thread/name/updated", params: { threadId, threadName: "Demo thread" } });
       send({ method: "thread/status/changed", params: { threadId, status: { type: "active", activeFlags: ["waitingOnApproval"] } } });
       send({ method: "thread/tokenUsage/updated", params: { threadId, turnId, tokenUsage: { last: { totalTokens: 7 }, total: { totalTokens: 42 }, modelContextWindow: 100 } } });
+    } else if (inputText === "settings and goal") {
+      send({ method: "thread/settings/updated", params: { threadId, threadSettings: { cwd: "/tmp", approvalPolicy: "never", approvalsReviewer: "user", sandboxPolicy: { type: "dangerFullAccess" }, activePermissionProfile: null, model: "gpt-current", modelProvider: "openai", serviceTier: null, effort: "high", summary: null, collaborationMode: { mode: "default", settings: { model: "gpt-current", reasoning_effort: "high", developer_instructions: null } }, multiAgentMode: "explicitRequestOnly", personality: null } } });
+      send({ method: "thread/goal/updated", params: { threadId, turnId, goal: { threadId, objective: "Wait for quota", status: "blocked", tokenBudget: null, tokensUsed: 1, timeUsedSeconds: 2, createdAt: 1, updatedAt: 2 } } });
+      send({ method: "thread/goal/updated", params: { threadId, turnId, goal: { threadId, objective: "Wait for quota", status: "usageLimited", tokenBudget: null, tokensUsed: 1, timeUsedSeconds: 2, createdAt: 1, updatedAt: 3 } } });
+      send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
     } else if (inputText === "warn please") {
       send({ method: "warning", params: { threadId, message: "Under-development features enabled: goals" } });
       send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
@@ -555,6 +817,13 @@ rl.on("line", (line) => {
       send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
     } else if (inputText === "ask") {
       send({ id: 900, method: "item/tool/requestUserInput", params: { threadId, turnId, itemId: "item-1", questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [{ label: "Fast", description: "Quick" }] }] } });
+    } else if (inputText === "mcp form") {
+      send({ id: 901, method: "mcpServer/elicitation/request", params: { threadId, turnId, serverName: "example", mode: "form", message: "Configure", _meta: null, requestedSchema: { type: "object", properties: { name: { type: "string", minLength: 2, maxLength: 20 }, count: { type: "integer", minimum: 1, maximum: 4 }, choices: { type: "array", items: { type: "string", enum: ["a", "b"] }, minItems: 1, maxItems: 2 } }, required: ["name"] } } });
+    } else if (inputText === "unsupported requests") {
+      send({ id: 902, method: "mcpServer/elicitation/request", params: { threadId, turnId, serverName: "example", mode: "openai/form", message: "Unsupported", _meta: null, requestedSchema: {} } });
+      send({ id: 903, method: "item/tool/call", params: { threadId, turnId, callId: "dynamic-1", tool: "unsafe", arguments: {} } });
+    } else if (inputText === "failed turn") {
+      send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "failed", items: [], itemsView: { type: "full" }, error: { message: "boom", codexErrorInfo: null, additionalDetails: "details" }, startedAt: 1, completedAt: 2, durationMs: 321 } } });
     } else if (inputText === "plan please") {
       send({ method: "item/plan/delta", params: { threadId, turnId, itemId: "p1", delta: "Plan item" } });
       send({ method: "item/completed", params: { threadId, turnId, item: { type: "exitedReviewMode", id: "r1", review: "Review summary" } } });
@@ -562,7 +831,18 @@ rl.on("line", (line) => {
     } else if (inputText === "image output") {
       send({ method: "rawResponseItem/completed", params: { threadId, turnId, item: { type: "image_generation_call", id: "img1", status: "completed", revised_prompt: "revised", result: "aW1hZ2U=" } } });
       send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
+    } else if (inputText === "activity please") {
+      send({ method: "turn/started", params: { threadId, turn: { id: turnId, status: "inProgress", items: [] } } });
+      send({ method: "item/reasoning/summaryTextDelta", params: { threadId, turnId, itemId: "reason-1", delta: "Safe summary", summaryIndex: 0 } });
+      send({ method: "item/reasoning/textDelta", params: { threadId, turnId, itemId: "reason-1", delta: "secret chain", contentIndex: 0 } });
+      send({ method: "turn/plan/updated", params: { threadId, turnId, explanation: "Do it", plan: [{ step: "Edit file", status: "inProgress" }] } });
+      send({ method: "turn/diff/updated", params: { threadId, turnId, diff: "diff --git a/a b/a" } });
+      send({ method: "item/started", params: { threadId, turnId, item: { type: "fileChange", id: "file-1", changes: [{ path: "a", kind: "update", diff: "raw patch" }], status: "inProgress" } } });
+      send({ method: "item/completed", params: { threadId, turnId, item: { type: "fileChange", id: "file-1", changes: [{ path: "a", kind: "update", diff: "raw patch" }], status: "completed" } } });
+      send({ method: "guardianWarning", params: { threadId, message: "Check this action" } });
+      send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [], durationMs: 25 } } });
     } else if (inputText === "background terminal") {
+      terminals.set("proc1", { itemId: "bg1", processId: "proc1", command: "bash -lc 'npm run dev'" });
       send({ method: "item/started", params: { threadId, turnId, item: { type: "commandExecution", id: "bg1", command: "bash -lc 'npm run dev'", processId: "proc1", source: "unifiedExecStartup", commandActions: [] } } });
       send({ method: "item/commandExecution/outputDelta", params: { threadId, turnId, itemId: "bg1", delta: "ready\\nline2\\nline3\\nline4\\n" } });
       send({ method: "item/started", params: { threadId, turnId, item: { type: "commandExecution", id: "local1", command: "git status", source: "userShell", commandActions: [] } } });
@@ -581,6 +861,7 @@ rl.on("line", (line) => {
     if (inputText === "second while active") {
       send({ id: msg.id, result: { turn: { id: msg.params.expectedTurnId, status: "inProgress", items: [] } } });
     } else if (inputText === "finish background terminal") {
+      terminals.delete("proc1");
       send({ id: msg.id, result: { turn: { id: msg.params.expectedTurnId, status: "inProgress", items: [] } } });
       send({ method: "item/completed", params: { threadId: "thread-1", turnId: msg.params.expectedTurnId, item: { type: "commandExecution", id: "bg1", command: "bash -lc 'npm run dev'", processId: "proc1", source: "unifiedExecStartup", commandActions: [] } } });
       send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: msg.params.expectedTurnId, status: "completed", items: [] } } });
@@ -606,12 +887,30 @@ rl.on("line", (line) => {
     send({ id: msg.id, result: {} });
   } else if (msg.method === "thread/name/set") {
     send({ id: msg.id, result: {} });
-  } else if (msg.method === "thread/backgroundTerminals/clean") {
+  } else if (msg.method === "thread/archive") {
     send({ id: msg.id, result: {} });
+    send({ method: "thread/archived", params: { threadId: msg.params.threadId } });
+  } else if (msg.method === "thread/delete") {
+    send({ id: msg.id, result: {} });
+    send({ method: "thread/deleted", params: { threadId: msg.params.threadId } });
+  } else if (msg.method === "thread/backgroundTerminals/clean") {
+    terminals.clear();
+    send({ id: msg.id, result: {} });
+  } else if (msg.method === "thread/backgroundTerminals/list") {
+    send({ id: msg.id, result: { data: [...terminals.values()], nextCursor: null } });
+  } else if (msg.method === "thread/backgroundTerminals/terminate") {
+    const terminated = terminals.delete(msg.params.processId);
+    send({ id: msg.id, result: { terminated } });
   } else if (msg.method === "thread/list") {
     send({ id: msg.id, result: { data: [{ id: "listed-thread", name: "Listed", cwd: msg.params.cwd, status: { type: "idle" }, updatedAt: 10, createdAt: 5, preview: "Preview" }] } });
   } else if (msg.method === "model/list") {
-    send({ id: msg.id, result: { data: [{ id: "gpt-5.2", model: "gpt-5.2", displayName: "GPT-5.2", isDefault: true, supportedReasoningEfforts: ["low", "medium"] }] } });
+    send({ id: msg.id, result: { data: [{ id: "gpt-5.2", model: "gpt-5.2", displayName: "GPT-5.2", isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Fast" }, { reasoningEffort: "medium", description: "Balanced" }] }] } });
+  } else if (msg.method === "collaborationMode/list") {
+    send({ id: msg.id, result: { data: [{ name: "Default", mode: "default", model: "gpt-5.2", reasoningEffort: "medium" }, { name: "Plan", mode: "plan", model: "gpt-5.2", reasoningEffort: "medium" }] } });
+  } else if (msg.method === "skills/list") {
+    send({ id: msg.id, result: { data: [{ cwd: msg.params.cwds[0], skills: [{ name: "review", description: "Review changes", path: "/tmp/SKILL.md", scope: "user", enabled: true }], errors: [] }] } });
+  } else if (msg.method === "fuzzyFileSearch") {
+    send({ id: msg.id, result: { files: [{ root: msg.params.roots[0], path: "README.md", file_name: "README.md", match_type: "file", score: 10, indices: [0] }] } });
   } else if (msg.method === "turn/interrupt") {
     if (msg.params.turnId === "stale-turn") {
       send({ id: msg.id, error: { code: -32000, message: "no active turn to interrupt" } });

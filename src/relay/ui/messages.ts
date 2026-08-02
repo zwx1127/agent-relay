@@ -14,22 +14,28 @@ export function formatHelpMessage(): RenderedTelegramText {
     "- ", code("/review branch <name>"), " - Review against a base branch.\n",
     "- ", code("/review commit <sha> [title]"), " - Review a commit.\n",
     "- ", code("/review <instructions>"), " - Run a custom review.\n",
-    "- ", code("/compact"), " - Start Codex thread compaction.\n",
+    "- ", code("/compact"), " - Compact the current chat after confirmation.\n",
     "- ", code("/init"), " - Ask Codex to create AGENTS.md if missing.\n",
-    "- ", code("/new"), ", ", code("/clear"), " - Start a fresh Codex thread.\n",
+    "- ", code("/new [name]"), " - Start a fresh Codex chat and keep Relay display history.\n",
+    "- ", code("/clear [name]"), " - Clear Relay display state and start a fresh chat.\n",
     "- ", code("/resume [search]"), " - Resume a recent Codex thread.\n",
     "- ", code("/fork"), " - Fork the current thread.\n",
     "- ", code("/side <prompt>"), ", ", code("/btw <prompt>"), " - Ask in an ephemeral side conversation.\n",
     "- ", code("/rename <name>"), " - Rename the current thread.\n",
-    "- ", code("/plan"), " - Toggle Plan mode.\n",
+    "- ", code("/plan"), " - Enter Plan mode.\n",
     "- ", code("/plan <prompt>"), " - Run a prompt in Plan mode.\n",
     "- ", code("/goal"), " - Show the current goal.\n",
     "- ", code("/goal <objective>"), " - Set the current goal.\n",
-    "- ", code("/goal pause"), ", ", code("/goal resume"), ", ", code("/goal clear"), " - Manage the goal.\n",
+    "- ", code("/goal edit"), ", ", code("/goal pause"), ", ", code("/goal resume"), ", ", code("/goal clear"), " - Manage the goal.\n",
     "- ", code("/interrupt"), " - Interrupt the active Codex turn.\n",
     "- ", code("/interrupt all"), " - Interrupt the active turn and queued prompts.\n",
     "- ", code("/ps"), " - List Codex background terminals.\n",
-    "- ", code("/stop"), " - Clean Codex background terminals for this thread.",
+    "- ", code("/skills [search]"), " - Select a skill, then reply with the task.\n",
+    "- ", code("/mention [search]"), " - Select a workspace file or directory, then reply with the task.\n",
+    "- ", code("/archive"), " - Archive the current chat after confirmation.\n",
+    "- ", code("/delete"), " - Permanently delete the current chat after two confirmations.\n",
+    "- ", code("/stop"), ", ", code("/clean"), " - Stop all background terminals for this chat.\n\n",
+    "Relay-only commands: ", code("/help"), ", ", code("/relay"), ", ", code("/interrupt [all]"), ".",
   ]);
 }
 
@@ -54,7 +60,15 @@ export function formatBackgroundTerminalsMessage(terminals: AgentBackgroundTermi
   for (const [index, terminal] of shown.entries()) {
     if (index > 0) parts.push("\n");
     parts.push("- ", code(truncateForTelegramLabel(firstLine(terminal.commandDisplay), 120)));
-    for (const chunk of terminal.recentChunks) {
+    const metadata = [
+      terminal.processId ? `process ${terminal.processId}` : undefined,
+      terminal.cwd,
+      terminal.osPid !== undefined && terminal.osPid !== null ? `PID ${terminal.osPid}` : undefined,
+      terminal.cpuPercent !== undefined && terminal.cpuPercent !== null ? `CPU ${terminal.cpuPercent.toFixed(1)}%` : undefined,
+      terminal.rssKb !== undefined && terminal.rssKb !== null ? `RSS ${Math.round(terminal.rssKb)} KB` : undefined,
+    ].filter(Boolean).join(" · ");
+    if (metadata) parts.push("\n  ", metadata);
+    for (const chunk of (terminal.recentChunks ?? []).filter((chunk) => chunk.trim()).slice(-3)) {
       parts.push("\n  ", truncateForTelegramLabel(firstLine(chunk), 120));
     }
   }
@@ -70,6 +84,7 @@ export function formatGoalMessage(goal: AgentThreadGoal | null): RenderedTelegra
       "Usage:\n",
       "- /goal\n",
       "- /goal <objective>\n",
+      "- /goal edit\n",
       "- /goal pause\n",
       "- /goal resume\n",
       "- /goal clear\n\n",
@@ -91,16 +106,6 @@ export function formatGoalMessage(goal: AgentThreadGoal | null): RenderedTelegra
 
 export function formatGoalUpdatedMessage(goal: AgentThreadGoal): RenderedTelegramText {
   return renderTelegramText([bold("Goal updated."), "\n\n", ...goalSummaryParts(goal)]);
-}
-
-export function formatGoalReplaceMessage(current: AgentThreadGoal, objective: string): RenderedTelegramText {
-  return renderTelegramText([
-    bold("Replace goal?"),
-    "\n\nCurrent: ",
-    current.objective,
-    "\n\nNew: ",
-    objective,
-  ]);
 }
 
 export function formatGoalClearedMessage(cleared: boolean): RenderedTelegramText {
@@ -132,6 +137,10 @@ function formatGoalStatus(status: AgentThreadGoal["status"]): string {
       return "active";
     case "paused":
       return "paused";
+    case "blocked":
+      return "blocked";
+    case "usageLimited":
+      return "limited by usage";
     case "budgetLimited":
       return "limited by budget";
     case "complete":

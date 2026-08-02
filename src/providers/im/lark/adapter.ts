@@ -245,7 +245,7 @@ export class LarkAdapter implements ImAdapter {
       });
       return;
     }
-    this.logger.debug(inbound.kind === "media" ? "lark.media_received" : inbound.kind === "file" ? "lark.file_received" : "lark.message_received", {
+    this.logger.debug(inbound.kind === "media" ? "lark.media_received" : inbound.kind === "audio" ? "lark.audio_received" : inbound.kind === "file" ? "lark.file_received" : "lark.message_received", {
       message_id: inbound.messageId,
       conversation_id: inbound.conversationId,
       user_id: inbound.userId,
@@ -364,6 +364,27 @@ export class LarkAdapter implements ImAdapter {
         ...larkMessageContext(message),
         ...larkTopicContext(message),
         photos: imageResources.map(resourceToPhoto),
+        ...(captionFromMessage(message) ? { caption: captionFromMessage(message) } : {}),
+        ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
+        ...(message.rootId ? { replyRootMessageId: message.rootId } : {}),
+        date: Math.floor(message.createTime / 1000),
+      };
+    }
+
+    const audioResource = message.resources.find((resource) => resource.type === "audio");
+    if (audioResource) {
+      return {
+        kind: "audio",
+        id: message.messageId,
+        messageId: message.messageId,
+        conversationId: message.chatId,
+        userId: message.senderId,
+        ...larkMessageContext(message),
+        ...larkTopicContext(message),
+        audio: {
+          fileId: audioResource.fileKey,
+          fileName: audioResource.fileName ?? `audio-${message.messageId}`,
+        },
         ...(captionFromMessage(message) ? { caption: captionFromMessage(message) } : {}),
         ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
         ...(message.rootId ? { replyRootMessageId: message.rootId } : {}),

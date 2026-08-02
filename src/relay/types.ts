@@ -26,7 +26,7 @@ export interface TranscriptEvent {
   createdAt: number;
 }
 
-export type PendingPromptKind = "workspace_name" | "codex_user_input" | "codex_approval" | "relay_command" | "media_action";
+export type PendingPromptKind = "workspace_name" | "codex_user_input" | "codex_approval" | "codex_mcp_elicitation" | "relay_command" | "media_action";
 
 export interface PendingPrompt {
   conversationId: ConversationId;

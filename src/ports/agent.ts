@@ -6,9 +6,12 @@ export type AgentExitHandler = (event: AgentExitEvent) => void | Promise<void>;
 export type AgentOutputEvent =
   | AgentMessageOutputEvent
   | AgentImageOutputEvent
+  | AgentActivityEvent
   | AgentTurnCompletedEvent
   | AgentUserInputRequestEvent
-  | AgentApprovalRequestEvent;
+  | AgentApprovalRequestEvent
+  | AgentMcpElicitationRequestEvent
+  | AgentThreadLifecycleEvent;
 
 /**
  * Streaming text output from an agent turn.
@@ -39,6 +42,69 @@ export interface AgentTurnCompletedEvent {
   type: "turn_completed";
   sessionKey: string;
   turnId?: string;
+  /** Optional only for compatibility with older provider test doubles. */
+  status?: AgentTurnStatus;
+  error?: AgentTurnError;
+  durationMs?: number;
+}
+
+export interface AgentActivityEvent {
+  type: "activity";
+  sessionKey: string;
+  activity: AgentActivity;
+  turnId?: string;
+  itemId?: string;
+}
+
+export type AgentActivity =
+  | { kind: "reasoning"; summary: string; sectionIndex?: number }
+  | { kind: "plan"; explanation?: string; steps: AgentPlanStep[] }
+  | { kind: "diff"; diff: string }
+  | {
+      kind: "item";
+      category: AgentActivityCategory;
+      label: string;
+      status: AgentActivityStatus;
+      detail?: string;
+      durationMs?: number;
+      files?: AgentActivityFile[];
+    }
+  | { kind: "notice"; level: "info" | "warning" | "error"; title: string; detail?: string }
+  | { kind: "goal"; goal: AgentThreadGoal | null }
+  | { kind: "settings"; changes: Record<string, string> };
+
+export type AgentActivityCategory =
+  | "command"
+  | "fileChange"
+  | "mcp"
+  | "webSearch"
+  | "collaboration"
+  | "image"
+  | "compaction"
+  | "review"
+  | "hook"
+  | "guardian"
+  | "model"
+  | "other";
+
+export type AgentActivityStatus = "started" | "inProgress" | "completed" | "failed" | "declined" | "interrupted" | "warning";
+
+export interface AgentActivityFile {
+  path: string;
+  kind?: string;
+}
+
+export interface AgentPlanStep {
+  step: string;
+  status: "pending" | "inProgress" | "completed";
+}
+
+export type AgentTurnStatus = "completed" | "interrupted" | "failed" | "inProgress";
+
+export interface AgentTurnError {
+  message: string;
+  codexErrorInfo?: unknown;
+  additionalDetails?: string;
 }
 
 export interface AgentUserInputOption {
@@ -87,6 +153,51 @@ export interface AgentApprovalRequestEvent {
   itemId?: string;
 }
 
+export interface AgentMcpElicitationRequestEvent {
+  type: "mcp_elicitation_request";
+  sessionKey: string;
+  requestId: string | number;
+  serverName: string;
+  mode: "form" | "url";
+  message: string;
+  requestedSchema?: AgentMcpElicitationSchema;
+  url?: string;
+  elicitationId?: string;
+  meta?: unknown;
+  turnId?: string;
+}
+
+export interface AgentMcpElicitationSchema {
+  type: "object";
+  properties: Record<string, AgentMcpElicitationFieldSchema>;
+  required?: string[];
+}
+
+export type AgentMcpElicitationFieldSchema = {
+  type: "string" | "number" | "integer" | "boolean" | "array";
+  title?: string;
+  description?: string;
+  default?: unknown;
+  minLength?: number;
+  maxLength?: number;
+  minimum?: number;
+  maximum?: number;
+  format?: "email" | "uri" | "date" | "date-time";
+  enum?: unknown[];
+  enumNames?: string[];
+  items?: { type?: string; enum?: unknown[] };
+  minItems?: number;
+  maxItems?: number;
+};
+
+export interface AgentThreadLifecycleEvent {
+  type: "thread_lifecycle";
+  sessionKey: string;
+  threadId: string;
+  action: "archived" | "deleted" | "closed";
+  initiatedByClient?: boolean;
+}
+
 export interface AgentExitEvent {
   sessionKey: string;
   exitCode: number | null;
@@ -121,6 +232,9 @@ export interface AgentSessionStatus {
   waitingForApproval?: boolean;
   recentWarning?: string;
   recentError?: string;
+  appServerVersion?: string;
+  reviewInProgress?: boolean;
+  threadGoal?: AgentThreadGoal | null;
 }
 
 export interface StartAgentOptions {
@@ -148,10 +262,15 @@ export interface AgentDriver {
   forkThread?(sessionKey: string): Promise<AgentThreadSwitchResult>;
   sideConversation?(sessionKey: string, text: string): Promise<AgentSideConversationResult>;
   renameThread?(sessionKey: string, name: string): Promise<void>;
+  archiveThread?(sessionKey: string): Promise<void>;
+  deleteThread?(sessionKey: string): Promise<void>;
   cleanBackgroundTerminals?(sessionKey: string): Promise<void>;
+  terminateBackgroundTerminal?(sessionKey: string, processId: string): Promise<boolean>;
   listBackgroundTerminals?(sessionKey: string): Promise<AgentBackgroundTerminalSummary[]>;
   listThreads?(options: AgentThreadListOptions): Promise<AgentThreadSummary[]>;
   listModels?(): Promise<AgentModelSummary[]>;
+  listSkills?(workspacePath: string, options?: AgentSkillListOptions): Promise<AgentSkillSummary[]>;
+  searchFiles?(workspacePath: string, query: string, options?: AgentFileSearchOptions): Promise<AgentFileSearchResult[]>;
 }
 
 export interface AgentDriverCapabilities {
@@ -161,17 +280,25 @@ export interface AgentDriverCapabilities {
   threadFork: boolean;
   sideConversation: boolean;
   threadRename: boolean;
+  threadArchive: boolean;
+  threadDelete: boolean;
   threadGoals: boolean;
   threadList: boolean;
   modelList: boolean;
   backgroundTerminals: boolean;
   localImages: boolean;
+  structuredInputs: boolean;
+  localAudio: boolean;
+  skillList: boolean;
+  fileSearch: boolean;
   imageOutput: boolean;
   interrupt: boolean;
 }
 
 export interface AgentSendOptions {
   collaborationMode?: AgentCollaborationMode;
+  attachments?: AgentInputAttachment[];
+  /** Compatibility with tasks persisted before structured attachments were added. */
   images?: AgentImageInput[];
 }
 
@@ -182,8 +309,18 @@ export interface AgentImageInput {
   caption?: string;
 }
 
+export type AgentInputAttachment =
+  | { type: "image"; url: string; detail?: "auto" | "low" | "high" | "original" }
+  | { type: "localImage"; path: string; caption?: string; detail?: "auto" | "low" | "high" | "original" }
+  | { type: "audio"; url: string }
+  | { type: "localAudio"; path: string; caption?: string; mimeType?: string }
+  | { type: "skill"; name: string; path: string }
+  | { type: "mention"; name: string; path: string };
+
 export interface AgentTaskInput {
   text: string;
+  attachments?: AgentInputAttachment[];
+  /** Compatibility with tasks persisted before structured attachments were added. */
   images?: AgentImageInput[];
 }
 
@@ -213,7 +350,7 @@ export interface AgentBuiltinResult {
   threadId?: string;
 }
 
-export type AgentThreadGoalStatus = "active" | "paused" | "budgetLimited" | "complete";
+export type AgentThreadGoalStatus = "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
 
 export interface AgentThreadGoal {
   threadId: string;
@@ -244,8 +381,14 @@ export interface AgentSideConversationResult {
 }
 
 export interface AgentBackgroundTerminalSummary {
+  itemId?: string;
+  processId?: string;
   commandDisplay: string;
-  recentChunks: string[];
+  cwd?: string;
+  osPid?: number | null;
+  cpuPercent?: number | null;
+  rssKb?: number | null;
+  recentChunks?: string[];
 }
 
 export interface AgentThreadListOptions {
@@ -273,6 +416,31 @@ export interface AgentModelSummary {
   isDefault?: boolean;
   defaultReasoningEffort?: string;
   supportedReasoningEfforts?: string[];
+}
+
+export interface AgentSkillListOptions {
+  forceReload?: boolean;
+}
+
+export interface AgentSkillSummary {
+  name: string;
+  path: string;
+  description?: string;
+  shortDescription?: string;
+  scope?: string;
+  enabled: boolean;
+}
+
+export interface AgentFileSearchOptions {
+  limit?: number;
+}
+
+export interface AgentFileSearchResult {
+  root: string;
+  path: string;
+  fileName: string;
+  score?: number;
+  matchType?: string;
 }
 
 export interface AgentTokenBreakdown {

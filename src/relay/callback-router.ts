@@ -15,6 +15,7 @@ export interface CallbackHandlers {
   toggleStatusMode(message: CallbackMessage): Promise<CallbackResult>;
   approval(message: CallbackMessage, payload: string): Promise<CallbackResult>;
   codexQuestion(message: CallbackMessage, payload: string): Promise<CallbackResult>;
+  mcpElicitation?(message: CallbackMessage, payload: string): Promise<CallbackResult>;
   pagedOutput(message: CallbackMessage, payload: string): Promise<CallbackResult>;
   command(message: CallbackMessage, payload: string): Promise<CallbackResult>;
   fileBrowser(message: CallbackMessage, payload: string): Promise<CallbackResult>;
@@ -56,6 +57,10 @@ export class CallbackRouter {
     }
     if (payload.startsWith("q:")) {
       return callbackText(await this.handlers.codexQuestion(message, payload));
+    }
+    if (payload.startsWith("m:")) {
+      if (!this.handlers.mcpElicitation) throw new Error("MCP elicitation callbacks are not supported.");
+      return callbackText(await this.handlers.mcpElicitation(message, payload));
     }
     if (payload.startsWith("p:")) {
       return callbackText(await this.handlers.pagedOutput(message, payload));

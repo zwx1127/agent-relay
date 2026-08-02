@@ -55,11 +55,15 @@ export class CodexRpcClient {
   }
 
   respond(requestId: string | number, result: unknown): Promise<void> {
-    return this.write({ id: requestId, result });
+    return this.write({ id: requestId, result }, { ensureWritable: false });
+  }
+
+  notify(method: string, params?: unknown, options: { ensureWritable?: boolean } = {}): Promise<void> {
+    return this.write({ method, ...(params === undefined ? {} : { params }) }, options);
   }
 
   rejectRequest(requestId: string | number, code: number, message: string): Promise<void> {
-    return this.write({ id: requestId, error: { code, message } });
+    return this.write({ id: requestId, error: { code, message } }, { ensureWritable: false });
   }
 
   handleResponse(message: JsonRpcResponse, onUnmatched: (id: string | number) => void): void {

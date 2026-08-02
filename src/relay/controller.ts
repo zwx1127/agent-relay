@@ -35,6 +35,7 @@ import type { RelayControllerDeps, RenderCallbackPageResult } from "./controller
 import { SlashCommandRouter } from "./command-router.ts";
 import { CallbackRouter, isConsoleCallbackPayload } from "./callback-router.ts";
 import { OutputStreamer } from "./output-streamer.ts";
+import { ActivityStreamer } from "./activity-streamer.ts";
 import { TaskCoordinator, type TaskSubmitPreference } from "./task-coordinator.ts";
 import { MediaRelayService } from "./media-service.ts";
 import { CodexPromptFlow } from "./codex-prompt-flow.ts";
@@ -56,6 +57,7 @@ export class RelayController {
   private readonly slashCommands: SlashCommandRouter;
   private readonly callbacks: CallbackRouter;
   private readonly outputStreamer: OutputStreamer;
+  private readonly activityStreamer: ActivityStreamer;
   private readonly taskCoordinator: TaskCoordinator;
   private readonly workspaceFlow: WorkspaceFlow;
   private readonly mediaRelay: MediaRelayService;
@@ -79,6 +81,15 @@ export class RelayController {
       renderCallbackPage: (message, body, replyMarkup) => this.renderCallbackPage(message, body, replyMarkup),
       timing: deps.streamTiming,
     });
+    this.activityStreamer = new ActivityStreamer({
+      store: deps.store,
+      logger: this.logger,
+      canEdit: deps.adapter.capabilities.editMessage,
+      getReplyToMessageId: (sessionKeyValue) => this.lastUserMessageIds.get(sessionKeyValue),
+      sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
+      editRendered: (conversationId, rendered, options) => this.editRendered(conversationId, rendered, options),
+      timing: deps.streamTiming,
+    });
     this.taskCoordinator = new TaskCoordinator({
       store: deps.store,
       agent: deps.agent,
@@ -98,6 +109,8 @@ export class RelayController {
       logger: this.logger,
       ensureAgentStarted: (conversationId, workspace, threadId, options) => this.ensureAgentStarted(conversationId, workspace, threadId, options),
       finalizeSessionOutput: (sessionKeyValue) => this.finalizeSessionOutput(sessionKeyValue),
+      clearActivityForSession: (sessionKeyValue) => this.activityStreamer.clearSession(sessionKeyValue),
+      clearCodexPromptsForSession: (sessionKeyValue) => this.clearCodexPromptsForSession(sessionKeyValue),
       cancelActiveTasks: (sessionKeyValue) => this.cancelActiveTasks(sessionKeyValue),
       statusView: (conversationId) => this.statusView(conversationId),
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
@@ -144,7 +157,7 @@ export class RelayController {
       requireCurrentWorkspace: (conversationId) => this.workspaceFlow.requireCurrentWorkspace(conversationId),
       ensureAgentStarted: (conversationId, workspace, threadId, options) => this.ensureAgentStarted(conversationId, workspace, threadId, options),
       finalizeSessionOutput: (sessionKeyValue) => this.finalizeSessionOutput(sessionKeyValue),
-      cancelActiveTasks: (sessionKeyValue) => this.cancelActiveTasks(sessionKeyValue),
+      clearActivityForSession: (sessionKeyValue) => this.activityStreamer.clearSession(sessionKeyValue),
       interruptActiveTasks: (sessionKeyValue) => this.interruptActiveTasks(sessionKeyValue),
       interruptTasksByStatus: (sessionKeyValue, statuses) => this.interruptTasksByStatus(sessionKeyValue, statuses),
       submitTask: (conversationId, text, userMessageId, preference, input) => this.submitTask(conversationId, text, userMessageId, preference, input),
@@ -160,9 +173,9 @@ export class RelayController {
         await this.sendRendered(conversationId, formatHelpMessage());
       },
       review: (conversationId, text) => this.threadCommands.runReviewCommand(conversationId, text),
-      compact: (conversationId) => this.threadCommands.runBuiltinCommand(conversationId, { type: "compact" }),
+      compact: (conversationId) => this.threadCommands.requestCompactConfirmation(conversationId),
       init: (conversationId, userMessageId) => this.threadCommands.runInitCommand(conversationId, userMessageId),
-      newThread: (conversationId) => this.threadCommands.startFreshThread(conversationId),
+      newThread: (conversationId, name, clearDisplay) => this.threadCommands.startFreshThread(conversationId, name, clearDisplay),
       resume: (conversationId, searchTerm) => this.threadCommands.renderResumePicker(conversationId, searchTerm),
       fork: (conversationId) => this.threadCommands.forkCurrentThread(conversationId),
       side: (conversationId, prompt, userMessageId) => this.threadCommands.sideConversationCommand(conversationId, prompt, userMessageId),
@@ -172,6 +185,10 @@ export class RelayController {
       interrupt: (conversationId, args) => this.threadCommands.interruptCommand(conversationId, args),
       ps: (conversationId) => this.threadCommands.renderBackgroundTerminals(conversationId),
       stop: (conversationId) => this.threadCommands.cleanBackgroundTerminals(conversationId),
+      skills: (conversationId, searchTerm) => this.threadCommands.renderSkillPicker(conversationId, searchTerm),
+      mention: (conversationId, searchTerm) => this.threadCommands.renderMentionPicker(conversationId, searchTerm),
+      archive: (conversationId) => this.threadCommands.requestArchiveConfirmation(conversationId),
+      deleteThread: (conversationId) => this.threadCommands.requestDeleteConfirmation(conversationId),
       unknown: async (conversationId, command) => {
         await this.sendRendered(conversationId, textMessage(`Unknown command: ${command}. Send /help to see supported commands.`));
       },
@@ -188,6 +205,7 @@ export class RelayController {
       toggleStatusMode: (message) => this.toggleStatusModeCallback(message),
       approval: (message, payload) => this.codexPromptFlow.answerApproval(message, payload),
       codexQuestion: (message, payload) => this.codexPromptFlow.answerOptionCallback(message, payload),
+      mcpElicitation: (message, payload) => this.codexPromptFlow.answerMcpCallback(message, payload),
       pagedOutput: (message, payload) => this.renderPagedOutputCallback(message, payload),
       command: (message, payload) => this.threadCommands.handleCommandCallback(message, payload),
       fileBrowser: (message, payload) => this.workspaceFlow.renderFileBrowserCallback(message, payload),
@@ -222,6 +240,10 @@ export class RelayController {
     }
     if (message.kind === "media") {
       await this.mediaRelay.handleMediaMessage(message);
+      return;
+    }
+    if (message.kind === "audio") {
+      await this.mediaRelay.handleAudioMessage(message);
       return;
     }
     if (message.kind === "file") {
@@ -278,6 +300,8 @@ export class RelayController {
           await this.workspaceFlow.createWorkspaceFromPrompt(message.conversationId, pending.promptMessageId, text);
         } else if (pending?.kind === "codex_user_input") {
           await this.codexPromptFlow.answerFreeText(message.conversationId, pending.promptMessageId, text);
+        } else if (pending?.kind === "codex_mcp_elicitation") {
+          await this.codexPromptFlow.answerMcpFreeText(message.conversationId, pending.promptMessageId, text);
         } else if (pending?.kind === "media_action") {
           await this.mediaRelay.answerMediaActionPrompt(message.conversationId, pending.promptMessageId, text);
         } else if (pending?.kind === "relay_command") {
@@ -285,7 +309,7 @@ export class RelayController {
         } else {
           // While Codex is blocked on an explicit question or approval, new
           // direct prompts are held back so they do not bypass the requested gate.
-          const codexPending = this.deps.store.latestPendingPrompt(message.conversationId, ["codex_user_input", "codex_approval"]);
+          const codexPending = this.deps.store.latestPendingPrompt(message.conversationId, ["codex_user_input", "codex_approval", "codex_mcp_elicitation"]);
           if (codexPending) {
             await this.sendPendingCodexPromptNotice(message.conversationId, codexPending);
             return;
@@ -327,6 +351,10 @@ export class RelayController {
       );
       return;
     }
+    if (pending.kind === "codex_mcp_elicitation") {
+      await this.sendRendered(conversationId, messageWithTitle("Codex is waiting for MCP input.", "Open the latest MCP request card or reply to it. Send /interrupt to cancel the blocked turn."));
+      return;
+    }
     await this.sendRendered(
       conversationId,
       messageWithTitle(
@@ -346,6 +374,10 @@ export class RelayController {
   }
 
   private async handleAgentOutputSerial(session: AgentOutputEvent): Promise<void> {
+    if (session.type === "activity") {
+      await this.activityStreamer.handle(session);
+      return;
+    }
     if (session.type === "image") {
       // Text chunks are flushed before image delivery so the IM transcript stays
       // in the same order the agent produced it.
@@ -354,15 +386,31 @@ export class RelayController {
       return;
     }
     if (session.type === "turn_completed") {
+      const turnStatus = session.status ?? "completed";
       this.logger.info("router.turn_completed", {
         session_key: session.sessionKey,
         turn_id: session.turnId,
+        status: turnStatus,
+        duration_ms: session.durationMs,
       });
+      await this.activityStreamer.finalize(session.sessionKey, session.turnId, turnStatus, session.error?.message, session.durationMs);
       await this.finalizeSessionOutput(session.sessionKey);
-      await this.threadCommands.sendPlanReadyPrompt(session.sessionKey, session.turnId);
+      if (turnStatus === "completed") await this.threadCommands.sendPlanReadyPrompt(session.sessionKey, session.turnId);
+      if (turnStatus === "failed") {
+        const parsed = parseSessionKey(session.sessionKey);
+        if (parsed) {
+          const detail = session.error?.message ?? "Codex turn failed.";
+          this.appendSystem(parsed.scopeKey, `Error: ${detail}\n`);
+          await this.sendRendered(parsed.scopeKey, messageWithTitle("Codex turn failed.", detail));
+        }
+      }
       // Completion is the only point where a queued local task can safely start;
       // blocked turns must wait for explicit user input or approval handling.
-      await this.completeTaskAndDispatchNext(session.sessionKey, session.turnId);
+      await this.completeTaskAndDispatchNext(
+        session.sessionKey,
+        session.turnId,
+        turnStatus === "completed" ? "done" : turnStatus === "interrupted" ? "interrupted" : "failed",
+      );
       return;
     }
     if (session.type === "user_input_request") {
@@ -375,6 +423,32 @@ export class RelayController {
       await this.finalizeSessionOutput(session.sessionKey);
       await this.markActiveTask(session.sessionKey, "blocked", session.turnId);
       await this.codexPromptFlow.handleApprovalRequest(session);
+      return;
+    }
+    if (session.type === "mcp_elicitation_request") {
+      await this.finalizeSessionOutput(session.sessionKey);
+      await this.markActiveTask(session.sessionKey, "blocked", session.turnId);
+      await this.codexPromptFlow.handleMcpElicitationRequest(session);
+      return;
+    }
+    if (session.type === "thread_lifecycle") {
+      const parsed = parseSessionKey(session.sessionKey);
+      if (!parsed) return;
+      this.activityStreamer.clearSession(session.sessionKey);
+      await this.finalizeSessionOutput(session.sessionKey);
+      this.clearCodexPromptsForSession(session.sessionKey);
+      this.deps.store.markSessionStopped(session.sessionKey);
+      if (session.action === "archived" || session.action === "deleted") {
+        this.deps.store.clearSessionThreadId(session.sessionKey);
+        await this.cancelActiveTasks(session.sessionKey);
+      } else {
+        await this.failActiveTasks(session.sessionKey);
+      }
+      if (!session.initiatedByClient) {
+        await this.sendRendered(parsed.scopeKey, messageWithTitle(
+          session.action === "archived" ? "Chat archived externally." : session.action === "deleted" ? "Chat deleted externally." : "Chat closed.",
+        ));
+      }
       return;
     }
     const parsed = parseSessionKey(session.sessionKey);
@@ -422,7 +496,9 @@ export class RelayController {
       workspace: parsed.workspaceName,
     });
     this.deps.store.markSessionStopped(sessionKeyValue);
+    this.activityStreamer.clearSession(sessionKeyValue);
     await this.finalizeSessionOutput(sessionKeyValue);
+    this.clearCodexPromptsForSession(sessionKeyValue);
     await this.failActiveTasks(sessionKeyValue);
     await this.sendRendered(parsed.scopeKey, messageWithTitle(exitText));
   }
@@ -724,8 +800,8 @@ export class RelayController {
     await this.taskCoordinator.markActive(sessionKeyValue, status, turnId);
   }
 
-  private async completeTaskAndDispatchNext(sessionKeyValue: string, turnId: string | undefined): Promise<void> {
-    await this.taskCoordinator.completeAndDispatchNext(sessionKeyValue, turnId);
+  private async completeTaskAndDispatchNext(sessionKeyValue: string, turnId: string | undefined, status: "done" | "interrupted" | "failed" = "done"): Promise<void> {
+    await this.taskCoordinator.completeAndDispatchNext(sessionKeyValue, turnId, status);
   }
 
   private async cancelActiveTasks(sessionKeyValue: string): Promise<void> {
@@ -832,7 +908,7 @@ export class RelayController {
     if (!pending) return undefined;
     if (pending.kind === "media_action" || pending.kind === "workspace_name") return pending;
     const data = parseJsonRecord(pending.payloadJson);
-    return data?.command === "side" || data?.command === "rename" ? pending : undefined;
+    return data?.command === "side" || data?.command === "rename" || data?.command === "attachment_task" ? pending : undefined;
   }
 
   private scopedMessage<T extends InboundMessage>(message: T, scopeKey: string): T {

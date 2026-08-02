@@ -1,6 +1,6 @@
 import { sessionKey } from "../../src/domain/session.ts";
 import type { ConversationId, MessageId } from "../../src/domain/ids.ts";
-import type { AgentBackgroundTerminalSummary, AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentInterruptResult, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentThreadGoal, AgentThreadGoalSetOptions, AgentThreadListOptions, AgentThreadSummary } from "../../src/ports/agent.ts";
+import type { AgentBackgroundTerminalSummary, AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentFileSearchOptions, AgentFileSearchResult, AgentInterruptResult, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentSkillListOptions, AgentSkillSummary, AgentThreadGoal, AgentThreadGoalSetOptions, AgentThreadListOptions, AgentThreadSummary } from "../../src/ports/agent.ts";
 import type { EditMessageTextOptions, SendMessageOptions } from "../../src/ports/im.ts";
 
 export class FakeImAdapter {
@@ -99,15 +99,22 @@ export class FakeAgent implements AgentDriver {
   forks: string[] = [];
   sideConversations: Array<{ key: string; text: string }> = [];
   renames: Array<{ key: string; name: string }> = [];
+  archived: string[] = [];
+  deleted: string[] = [];
   goalGets: string[] = [];
   goalSets: Array<{ key: string; goal: AgentThreadGoalSetOptions }> = [];
   goalClears: string[] = [];
   goal: AgentThreadGoal | null = null;
   cleaned: string[] = [];
+  terminated: Array<{ key: string; processId: string }> = [];
   backgroundTerminals: AgentBackgroundTerminalSummary[] = [];
   threadLists: AgentThreadListOptions[] = [];
   threads: AgentThreadSummary[] = [];
   models: AgentModelSummary[] = [];
+  skills: AgentSkillSummary[] = [];
+  skillLists: Array<{ workspacePath: string; options?: AgentSkillListOptions }> = [];
+  fileSearchResults: AgentFileSearchResult[] = [];
+  fileSearches: Array<{ workspacePath: string; query: string; options?: AgentFileSearchOptions }> = [];
   failSend?: Error;
   staleInterrupt = false;
   failStartForThreadIds = new Map<string, Error>();
@@ -236,6 +243,14 @@ export class FakeAgent implements AgentDriver {
     if (status) status.threadName = name;
   }
 
+  async archiveThread(key: string): Promise<void> {
+    this.archived.push(key);
+  }
+
+  async deleteThread(key: string): Promise<void> {
+    this.deleted.push(key);
+  }
+
   async cleanBackgroundTerminals(key: string): Promise<void> {
     this.cleaned.push(key);
     this.backgroundTerminals = [];
@@ -245,6 +260,13 @@ export class FakeAgent implements AgentDriver {
     return this.backgroundTerminals;
   }
 
+  async terminateBackgroundTerminal(key: string, processId: string): Promise<boolean> {
+    this.terminated.push({ key, processId });
+    const found = this.backgroundTerminals.some((terminal) => terminal.processId === processId);
+    this.backgroundTerminals = this.backgroundTerminals.filter((terminal) => terminal.processId !== processId);
+    return found;
+  }
+
   async listThreads(options: AgentThreadListOptions): Promise<AgentThreadSummary[]> {
     this.threadLists.push(options);
     return this.threads;
@@ -252,6 +274,16 @@ export class FakeAgent implements AgentDriver {
 
   async listModels(): Promise<AgentModelSummary[]> {
     return this.models;
+  }
+
+  async listSkills(workspacePath: string, options?: AgentSkillListOptions): Promise<AgentSkillSummary[]> {
+    this.skillLists.push({ workspacePath, ...(options ? { options } : {}) });
+    return this.skills;
+  }
+
+  async searchFiles(workspacePath: string, query: string, options?: AgentFileSearchOptions): Promise<AgentFileSearchResult[]> {
+    this.fileSearches.push({ workspacePath, query, ...(options ? { options } : {}) });
+    return this.fileSearchResults;
   }
 }
 

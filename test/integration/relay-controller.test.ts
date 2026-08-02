@@ -380,7 +380,12 @@ describe("relay controller", () => {
     });
     const prompt = adapter.sent.at(-1)!;
     const approve = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
-    expect(prompt.options!.replyMarkup!.inline_keyboard[0]!.map((button) => button.text)).toEqual(["Approve", "Deny"]);
+    expect(prompt.options!.replyMarkup!.inline_keyboard.flat().map((button) => button.text)).toEqual([
+      "Approve once",
+      "Approve session",
+      "Deny",
+      "Cancel",
+    ]);
 
     await router.handle(callbackMessage(approve.callback_data, 7, "cba", prompt.messageId));
     await router.handleAgentOutput({ sessionKey: "codex:1:demo", chunk: "after approval", turnId: "turn-1" });
@@ -494,7 +499,7 @@ describe("relay controller", () => {
     expect(adapter.reactions).toEqual([]);
   });
 
-  test("/review and /compact run Codex built-ins", async () => {
+  test("/review runs immediately and /compact requires confirmation", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -503,13 +508,65 @@ describe("relay controller", () => {
 
     await router.handle(textMessage("/review branch main"));
     await router.handle(textMessage("/compact"));
+    const compactCard = adapter.sent.at(-1)!;
+    const compactButton = compactCard.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Compact");
 
     expect(agent.sent).toEqual([]);
     expect(agent.builtins).toEqual([
       { key: "codex:1:demo", command: { type: "review", target: { type: "baseBranch", branch: "main" } } },
-      { key: "codex:1:demo", command: { type: "compact" } },
     ]);
-    expect(adapter.sent.map((message) => message.text)).toEqual(["Review started.", "Compaction started."]);
+    expect(compactCard.text).toContain("Compact chat?");
+
+    await router.handle(callbackMessage(compactButton!.callback_data, 7, "cb-compact", compactCard.messageId));
+
+    expect(agent.builtins.at(-1)).toEqual({ key: "codex:1:demo", command: { type: "compact" } });
+    expect(adapter.edited.at(-1)?.text).toContain("Compaction started.");
+  });
+
+  test("/archive uses one confirmation while /delete requires two", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/archive"));
+    const archiveCard = adapter.sent.at(-1)!;
+    const archiveButton = archiveCard.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Archive");
+    expect(agent.archived).toEqual([]);
+    await router.handle(callbackMessage(archiveButton!.callback_data, 7, "cb-archive", archiveCard.messageId));
+    expect(agent.archived).toEqual(["codex:1:demo"]);
+    expect(store.getSession("codex:1:demo")?.thread_id).toBeNull();
+
+    await router.handle(textMessage("/delete"));
+    const deleteCard = adapter.sent.at(-1)!;
+    const continueButton = deleteCard.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Continue");
+    await router.handle(callbackMessage(continueButton!.callback_data, 7, "cb-delete-first", deleteCard.messageId));
+    expect(agent.deleted).toEqual([]);
+    const finalButton = adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Delete permanently");
+    await router.handle(callbackMessage(finalButton!.callback_data, 7, "cb-delete-final", deleteCard.messageId));
+
+    expect(agent.deleted).toEqual(["codex:1:demo"]);
+    expect(store.getSession("codex:1:demo")?.thread_id).toBeNull();
+    expect(adapter.edited.at(-1)?.text).toContain("Chat deleted.");
+  });
+
+  test("expired compact confirmation does not call app-server", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/compact"));
+    const card = adapter.sent.at(-1)!;
+    const button = card.options?.replyMarkup?.inline_keyboard.flat().find((item) => item.text === "Compact");
+    const pending = store.getPendingPrompt("1", card.messageId!)!;
+    store.setPendingPrompt({ ...pending, expiresAt: Date.now() - 1 });
+    await router.handle(callbackMessage(button!.callback_data, 7, "cb-compact-expired", card.messageId));
+
+    expect(agent.builtins).toEqual([]);
+    expect(adapter.edited.at(-1)?.text).toContain("Question expired.");
   });
 
   test("/goal shows, sets, updates, and clears thread goals", async () => {
@@ -538,7 +595,7 @@ describe("relay controller", () => {
     expect(adapter.sent.at(-1)?.text).toBe("Goal cleared.");
   });
 
-  test("/goal confirms before replacing an existing goal", async () => {
+  test("/goal refuses implicit replacement and /goal edit uses ForceReply", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -556,19 +613,38 @@ describe("relay controller", () => {
     };
 
     await router.handle(textMessage("/goal replacement goal"));
-    const button = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().find((item) => item.text === "Replace");
-    expect(adapter.sent.at(-1)?.text).toContain("Replace goal?");
-    expect(button?.callback_data).toMatch(/^ar:cmd:goal:/);
+    expect(adapter.sent.at(-1)?.text).toContain("Use /goal edit");
     expect(agent.goalSets).toEqual([]);
 
-    await router.handle(callbackMessage(button!.callback_data, 7, "cb-goal", adapter.sent.at(-1)?.messageId));
+    await router.handle(textMessage("/goal edit"));
+    const editPrompt = adapter.sent.at(-1)!;
+    expect(editPrompt.text).toContain("Edit goal");
+    expect(editPrompt.options?.forceReply).toBe(true);
+    await router.handle(textMessage("replacement goal", 7, Number(editPrompt.messageId)));
 
     expect(agent.goalSets).toEqual([
-      { key: "codex:1:demo", goal: { objective: "replacement goal", status: "active", tokenBudget: null } },
+      { key: "codex:1:demo", goal: { objective: "replacement goal" } },
     ]);
-    expect(adapter.edited.at(-1)?.text).toContain("Goal updated.");
+    expect(adapter.sent.at(-1)?.text).toContain("Goal updated.");
     expect(agent.sent).toEqual([]);
-    expect(store.getPendingPrompt("1", adapter.sent.at(-1)!.messageId!)).toBeUndefined();
+    expect(store.getPendingPrompt("1", editPrompt.messageId!)).toBeUndefined();
+  });
+
+  test("/goal validates the 4,000 character objective boundary", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    const accepted = "a".repeat(4_000);
+    await router.handle(textMessage(`/goal ${accepted}`));
+    expect(agent.goalSets.at(-1)?.goal.objective).toBe(accepted);
+    await router.handle(textMessage("/goal clear"));
+    await router.handle(textMessage(`/goal ${"b".repeat(4_001)}`));
+
+    expect(agent.goalSets).toHaveLength(1);
+    expect(adapter.sent.at(-1)?.text).toContain("must not exceed 4,000 characters");
   });
 
   test("/goal can run while a Codex turn is active", async () => {
@@ -628,7 +704,29 @@ describe("relay controller", () => {
     expect(store.getBinding(1)?.workspaceName).toBe("demo");
     expect(store.getSession("codex:1:demo")?.thread_id).toBe("thread-1");
     expect(agent.sent).toEqual([]);
-    expect(adapter.sent.at(-1)?.text).toContain("Started a new chat.");
+    expect(adapter.sent.at(-1)?.text).toContain("Cleared Relay display and started a new chat.");
+  });
+
+  test("/new preserves Relay display while /clear removes transcript and pages, and both accept a name", async () => {
+    const { router, store, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    store.appendTranscript({ conversationId: "1", workspaceName: "demo", role: "agent", text: "old output", createdAt: 1 });
+    store.setPagedOutput({ token: "page", conversationId: "1", sessionKey: "codex:1:demo", text: "long", createdAt: 1, expiresAt: Date.now() + 60_000 });
+
+    await router.handle(textMessage("/new Fresh work"));
+
+    expect(agent.renames.at(-1)).toEqual({ key: "codex:1:demo", name: "Fresh work" });
+    expect(store.latestTranscriptEvent("1", "demo", "agent")?.text).toBe("old output");
+    expect(store.getPagedOutput("page")?.text).toBe("long");
+
+    await router.handle(textMessage("/clear Clean work"));
+
+    expect(agent.renames.at(-1)).toEqual({ key: "codex:1:demo", name: "Clean work" });
+    expect(store.latestTranscriptEvent("1", "demo", "agent")).toBeUndefined();
+    expect(store.getPagedOutput("page")).toBeUndefined();
   });
 
   test("clear callback is no longer supported", async () => {
@@ -688,6 +786,27 @@ describe("relay controller", () => {
     expect(adapter.edited.at(-1)?.text).toContain("Resumed chat.");
   });
 
+  test("/resume rechecks busy state before switching and never cancels the active turn", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "current-thread" });
+    agent.threads = [{ id: "saved-thread", name: "Saved work", cwd: path, updatedAt: 1 }];
+
+    await router.handle(textMessage("/resume"));
+    const picker = adapter.sent.at(-1)!;
+    const resumeButton = picker.options?.replyMarkup?.inline_keyboard.flat()[0];
+    await router.handle(textMessage("work started after picker"));
+    await router.handle(callbackMessage(resumeButton!.callback_data, 7, "cb-resume-busy", picker.messageId));
+
+    expect(agent.stopped).toEqual([]);
+    expect(agent.getStatus("codex:1:demo")?.threadId).toBe("current-thread");
+    expect(store.getTask(1)?.status).toBe("running");
+    expect(adapter.edited.at(-1)?.text).toContain("Codex is busy.");
+  });
+
   test("/fork, /rename, and /stop call functional driver APIs", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
@@ -731,6 +850,22 @@ describe("relay controller", () => {
     expect(adapter.sent.at(-1)?.options?.forceReplyInstruction).toBe("Reply to this prompt, or send your next message with the side question.");
   });
 
+  test("/side is rejected during a review turn", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    const status = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
+    status.reviewInProgress = true;
+
+    await router.handle(textMessage("/side explain the review"));
+
+    expect(agent.sideConversations).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Side conversation unavailable.");
+    expect(adapter.sent.at(-1)?.text).toContain("review to finish");
+  });
+
   test("/ps lists only Codex background terminals tracked by the driver", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
@@ -738,7 +873,7 @@ describe("relay controller", () => {
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
     store.bindConversation(1, "demo");
     agent.backgroundTerminals = [
-      { commandDisplay: "npm run dev", recentChunks: ["ready", "listening"] },
+      { commandDisplay: "npm run dev", recentChunks: ["boot", "ready", "listening", "healthy"] },
     ];
 
     await router.handle(textMessage("/ps"));
@@ -746,13 +881,36 @@ describe("relay controller", () => {
     await router.handle(textMessage("/ps"));
 
     expect(adapter.sent.map((message) => message.text)).toEqual([
-      "Background terminals\n\n- npm run dev\n  ready\n  listening",
+      "Background terminals\n\n- npm run dev\n  ready\n  listening\n  healthy",
       "Background terminals stopped.",
       "Background terminals\n\nNo background terminals running.",
     ]);
   });
 
-  test("/plan toggles plan mode and implementing a plan returns to default mode", async () => {
+  test("/ps exposes per-terminal Stop and /clean aliases /stop", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.backgroundTerminals = [{ itemId: "item-1", processId: "process-1", commandDisplay: "bun dev", recentChunks: ["ready"] }];
+
+    await router.handle(textMessage("/ps"));
+    const card = adapter.sent.at(-1)!;
+    const stopButton = card.options?.replyMarkup?.inline_keyboard.flat()[0];
+    expect(stopButton?.text).toContain("Stop bun dev");
+    await router.handle(callbackMessage(stopButton!.callback_data, 7, "cb-terminal-stop", card.messageId));
+
+    expect(agent.terminated).toEqual([{ key: "codex:1:demo", processId: "process-1" }]);
+    expect(adapter.edited.at(-1)?.text).toContain("Background terminal stopped.");
+
+    agent.backgroundTerminals = [{ itemId: "item-2", processId: "process-2", commandDisplay: "bun watch" }];
+    await router.handle(textMessage("/clean"));
+    expect(agent.cleaned).toEqual(["codex:1:demo"]);
+    expect(agent.backgroundTerminals).toEqual([]);
+  });
+
+  test("/plan enters Plan mode and implementing a plan returns to default mode", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -781,6 +939,43 @@ describe("relay controller", () => {
 
     expect(store.getTask(2)?.status).toBe("done");
     expect(adapter.reactions.at(-1)).toEqual({ conversationId: "1", messageId: "100", emoji: "😎" });
+  });
+
+  test("empty /plan is idempotent and does not toggle back to Default", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/plan"));
+    await router.handle(textMessage("/plan"));
+
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.slice(-2).map((message) => message.text)).toEqual(["Plan mode enabled.", "Plan mode enabled."]);
+  });
+
+  test("failed Plan turns do not show Plan-ready and preserve the failure", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/plan design this"));
+    await router.handleAgentOutput({
+      type: "turn_completed",
+      sessionKey: "codex:1:demo",
+      turnId: "turn-1",
+      status: "failed",
+      error: { message: "planning failed" },
+      durationMs: 10,
+    });
+
+    expect(store.getTask(1)?.status).toBe("failed");
+    expect(adapter.sent.some((message) => message.text.includes("Plan ready."))).toBe(false);
+    expect(adapter.sent.at(-1)?.text).toContain("planning failed");
   });
 
   test("plan ready card stays in the originating Telegram topic", async () => {
@@ -896,6 +1091,8 @@ describe("relay controller", () => {
 
     await router.handle(textMessage("/plan design this"));
     expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1", status: "completed" });
+    agent.getStatus("codex:1:demo")!.activeTurnId = undefined;
 
     await router.handle(textMessage("/clear"));
     await router.handle(textMessage("build it"));
@@ -914,6 +1111,8 @@ describe("relay controller", () => {
 
     await router.handle(textMessage("/plan design this"));
     expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1", status: "completed" });
+    agent.getStatus("codex:1:demo")!.activeTurnId = undefined;
 
     await router.handle(textMessage("/resume saved"));
     const resumeButton = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat()[0];
@@ -986,6 +1185,7 @@ describe("relay controller", () => {
 
     await router.handle(textMessage("/plan design this"));
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    agent.getStatus("codex:1:demo")!.activeTurnId = undefined;
     const planMessage = adapter.sent.at(-1)!;
     const planButton = planMessage.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Implement");
     const sentCount = agent.sent.length;
@@ -995,7 +1195,7 @@ describe("relay controller", () => {
 
     expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
     expect(agent.sent).toHaveLength(sentCount);
-    expect(adapter.edited.at(-1)?.text).toContain("Plan action expired.");
+    expect(adapter.edited.at(-1)?.text).toContain("Question expired.");
   });
 
   test("plan implement callback expires instead of steering into an active turn", async () => {
@@ -1115,8 +1315,39 @@ describe("relay controller", () => {
     ]);
   });
 
-  test("/clear cancels active tasks before starting a fresh thread", async () => {
-    const { router, store, agent, root } = fixture();
+  test("thread/closed fails active work but preserves the thread id for resume", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    store.markSessionStarted("codex:1:demo", "1", "demo", 1, "thread-closed");
+    const task = store.createTask({ conversationId: "1", workspaceName: "demo", text: "running", status: "running" });
+
+    await router.handleAgentOutput({ type: "thread_lifecycle", sessionKey: "codex:1:demo", threadId: "thread-closed", action: "closed" });
+
+    expect(store.getTask(task.id)?.status).toBe("failed");
+    expect(store.getSession("codex:1:demo")?.thread_id).toBe("thread-closed");
+    expect(adapter.sent.at(-1)?.text).toContain("Chat closed.");
+  });
+
+  test("thread/archive clears the persisted thread id idempotently", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    store.markSessionStarted("codex:1:demo", "1", "demo", 1, "thread-archived");
+
+    await router.handleAgentOutput({ type: "thread_lifecycle", sessionKey: "codex:1:demo", threadId: "thread-archived", action: "archived" });
+    await router.handleAgentOutput({ type: "thread_lifecycle", sessionKey: "codex:1:demo", threadId: "thread-archived", action: "archived", initiatedByClient: true });
+
+    expect(store.getSession("codex:1:demo")?.thread_id).toBeNull();
+    expect(adapter.sent.filter((message) => message.text.includes("Chat archived externally."))).toHaveLength(1);
+  });
+
+  test("/clear rejects while a task is active without cancelling it", async () => {
+    const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
@@ -1126,9 +1357,10 @@ describe("relay controller", () => {
     const task = store.getTask(1)!;
     await router.handle(textMessage("/clear"));
 
-    expect(store.getTask(task.id)?.status).toBe("cancelled");
-    expect(agent.stopped).toEqual(["codex:1:demo"]);
+    expect(store.getTask(task.id)?.status).toBe("running");
+    expect(agent.stopped).toEqual([]);
     expect(agent.getStatus("codex:1:demo")?.running).toBe(true);
+    expect(adapter.sent.at(-1)?.text).toContain("Codex is busy.");
   });
 
   test("resume callback is no longer supported", async () => {
@@ -1590,11 +1822,30 @@ describe("relay controller", () => {
     expect(agent.sent).toHaveLength(1);
     expect(agent.sent[0]?.key).toBe("codex:1:demo");
     expect(agent.sent[0]?.text).toBe("inspect this");
-    const imagePath = agent.sent[0]?.options?.images?.[0]?.path;
+    const image = agent.sent[0]?.options?.attachments?.[0];
+    expect(image?.type).toBe("localImage");
+    const imagePath = image?.type === "localImage" ? image.path : undefined;
     expect(imagePath).toContain(join(path, ".agent-relay", "media", "incoming"));
     expect(existsSync(imagePath!)).toBe(true);
     expect(readFileSync(join(path, ".agent-relay", ".gitignore"), "utf8")).toBe("*\n");
-    expect(agent.sent[0]?.options?.images?.[0]?.caption).toBe("inspect this");
+    expect(image?.type === "localImage" ? image.caption : undefined).toBe("inspect this");
+  });
+
+  test("photo captions can start the first Plan turn immediately", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    adapter.downloads.set("photo-large", new Uint8Array([1, 2, 3]).buffer);
+
+    await router.handle(mediaMessage("/plan inspect this layout"));
+
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+    expect(agent.sent[0]?.text).toBe("inspect this layout");
+    expect(agent.sent[0]?.options?.collaborationMode).toBe("plan");
+    expect(agent.sent[0]?.options?.attachments).toHaveLength(1);
+    expect(agent.sent[0]?.options?.attachments?.[0]?.type).toBe("localImage");
   });
 
   test("photo prompt without caption is saved and asks how to handle it", async () => {
@@ -1625,7 +1876,7 @@ describe("relay controller", () => {
 
     expect(agent.sent).toHaveLength(1);
     expect(agent.sent[0]?.text).toBe("extract the text");
-    expect(agent.sent[0]?.options?.images?.[0]?.path).toBe(payload.images[0].path);
+    expect(agent.sent[0]?.options?.attachments?.[0]).toMatchObject({ type: "localImage", path: payload.images[0].path });
     expect(store.getPendingPrompt("1", promptId)).toBeUndefined();
   });
 
@@ -1644,7 +1895,7 @@ describe("relay controller", () => {
 
     expect(agent.sent).toHaveLength(1);
     expect(agent.sent[0]?.text).toBe("extract the text");
-    expect(agent.sent[0]?.options?.images?.[0]?.path).toBe(payload.images[0].path);
+    expect(agent.sent[0]?.options?.attachments?.[0]).toMatchObject({ type: "localImage", path: payload.images[0].path });
     expect(store.getPendingPrompt("1", promptId)).toBeUndefined();
   });
 
@@ -1663,7 +1914,7 @@ describe("relay controller", () => {
 
     expect(agent.sent).toHaveLength(1);
     expect(agent.sent[0]?.key).toBe("codex:1:demo");
-    expect(agent.sent[0]?.options?.images?.[0]?.path).toBe(payload.images[0].path);
+    expect(agent.sent[0]?.options?.attachments?.[0]).toMatchObject({ type: "localImage", path: payload.images[0].path });
     expect(store.getPendingPrompt("1", promptId)).toBeUndefined();
   });
 
@@ -1689,10 +1940,11 @@ describe("relay controller", () => {
 
     expect(agent.sent).toHaveLength(1);
     expect(agent.sent[0]?.text).toBe("compare these screenshots");
-    expect(agent.sent[0]?.options?.images).toHaveLength(2);
+    expect(agent.sent[0]?.options?.attachments).toHaveLength(2);
+    expect(agent.sent[0]?.options?.attachments?.every((attachment) => attachment.type === "localImage")).toBe(true);
   });
 
-  test("file prompt is saved under relay files and sent to agent as a path prompt", async () => {
+  test("file prompt is saved under relay files and sent as a structured mention", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -1704,10 +1956,11 @@ describe("relay controller", () => {
 
     expect(agent.sent).toHaveLength(1);
     expect(agent.sent[0]?.key).toBe("codex:1:demo");
-    expect(agent.sent[0]?.text).toContain("User attached a file");
-    expect(agent.sent[0]?.text).toContain("Filename: file.txt");
-    expect(agent.sent[0]?.text).toContain("User caption: inspect file");
-    expect(agent.sent[0]?.text).toContain(join(path, ".agent-relay", "files", "incoming"));
+    expect(agent.sent[0]?.text).toBe("inspect file");
+    const mention = agent.sent[0]?.options?.attachments?.[0];
+    expect(mention?.type).toBe("mention");
+    expect(mention?.type === "mention" ? mention.name : undefined).toBe("file.txt");
+    expect(mention?.type === "mention" ? mention.path : undefined).toContain(join(path, ".agent-relay", "files", "incoming"));
     expect(existsSync(join(path, ".agent-relay", ".gitignore"))).toBe(true);
     const incomingDayDirs = readdirSync(join(path, ".agent-relay", "files", "incoming"));
     expect(incomingDayDirs).toHaveLength(1);
@@ -1737,11 +1990,136 @@ describe("relay controller", () => {
     await router.handle(textMessage("summarize this file", 7, promptId));
 
     expect(agent.sent).toHaveLength(1);
-    expect(agent.sent[0]?.text).toContain("User attached a file");
-    expect(agent.sent[0]?.text).toContain("Filename: file.txt");
-    expect(agent.sent[0]?.text).toContain("User caption: summarize this file");
-    expect(agent.sent[0]?.text).toContain(payload.path);
+    expect(agent.sent[0]?.text).toBe("summarize this file");
+    expect(agent.sent[0]?.options?.attachments?.[0]).toEqual({ type: "mention", name: "file.txt", path: payload.path });
     expect(store.getPendingPrompt("1", promptId)).toBeUndefined();
+  });
+
+  test("audio is downloaded and sent as localAudio, with ForceReply when caption is absent", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    adapter.downloads.set("voice-1", new Uint8Array([1, 2, 3]).buffer);
+
+    await router.handle(audioMessage("transcribe this"));
+    expect(agent.sent[0]?.text).toBe("transcribe this");
+    const audio = agent.sent[0]?.options?.attachments?.[0];
+    expect(audio?.type).toBe("localAudio");
+    expect(audio?.type === "localAudio" ? audio.path : undefined).toContain(join(path, ".agent-relay", "files", "incoming"));
+
+    agent.statuses.get("codex:1:demo")!.activeTurnId = undefined;
+    await router.handle({ ...audioMessage(), id: "2", messageId: "2" });
+    expect(adapter.sent.at(-1)?.text).toContain("Received audio:");
+    expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
+  });
+
+  test("/skills pages choices and submits the selected structured skill", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.skills = Array.from({ length: 10 }, (_, index) => ({ name: `skill-${index}`, path: join(root, `skill-${index}`, "SKILL.md"), description: `Description ${index}`, enabled: true }));
+
+    await router.handle(textMessage("/skills"));
+    const picker = adapter.sent.at(-1)!;
+    const next = picker.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Next")!;
+    await router.handle(callbackMessage(next.callback_data, 7, "skill-page", picker.messageId));
+    const select = adapter.edited.at(-1)!.options.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "skill-8")!;
+    await router.handle(callbackMessage(select.callback_data, 7, "skill-select", picker.messageId));
+    const taskPrompt = adapter.sent.at(-1)!;
+    expect(taskPrompt.options?.forceReply).toBe(true);
+    await router.handle(textMessage("use it", 7, taskPrompt.messageId));
+
+    expect(agent.sent.at(-1)?.options?.attachments).toEqual([{ type: "skill", name: "skill-8", path: join(root, "skill-8", "SKILL.md") }]);
+  });
+
+  test("/mention uses fuzzy search and rejects results outside the workspace", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    const readme = join(path, "README.md");
+    writeFileSync(readme, "hello");
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.fileSearchResults = [
+      { root: path, path: "README.md", fileName: "README.md", score: 10 },
+      { root, path: "outside.txt", fileName: "outside.txt", score: 9 },
+    ];
+
+    await router.handle(textMessage("/mention read"));
+    expect(agent.fileSearches[0]).toMatchObject({ workspacePath: path, query: "read" });
+    const picker = adapter.sent.at(-1)!;
+    expect(picker.options?.replyMarkup?.inline_keyboard.flat().some((button) => button.text.includes("outside"))).toBe(false);
+    const select = picker.options?.replyMarkup?.inline_keyboard[0]![0]!;
+    await router.handle(callbackMessage(select.callback_data, 7, "mention-select", picker.messageId));
+    const taskPrompt = adapter.sent.at(-1)!;
+    await router.handle(textMessage("summarize", 7, taskPrompt.messageId));
+
+    expect(agent.sent.at(-1)?.options?.attachments).toEqual([{ type: "mention", name: "README.md", path: readme }]);
+  });
+
+  test("activity stays in one editable card and exposes safe details and diff pages", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("work"));
+    const key = "codex:1:demo";
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: "r1", activity: { kind: "reasoning", summary: "r".repeat(500) } });
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "plan", steps: Array.from({ length: 8 }, (_, index) => ({ step: `Step ${index} ${"x".repeat(180)}`, status: index === 2 ? "inProgress" as const : index < 2 ? "completed" as const : "pending" as const })) } });
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "diff", diff: "diff --git a/a b/a\n+changed" } });
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "goal", goal: { threadId: "thread-1", objective: "Ship safely", status: "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1 } } });
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "settings", changes: { model: "old" } } });
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "settings", changes: { model: "new" } } });
+    for (let index = 0; index < 7; index++) {
+      await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: `item-${index}`, activity: { kind: "item", category: "fileChange", label: `Changed ${index} ${"y".repeat(180)}`, status: "completed", files: [{ path: join(path, `${"long-".repeat(25)}${index}.ts`), kind: "update" }] } });
+    }
+    await waitForStreamFlush();
+
+    const card = adapter.sent.find((message) => message.text.startsWith("Codex activity"))!;
+    expect(adapter.sent.filter((message) => message.text.startsWith("Codex activity"))).toHaveLength(1);
+    expect(card.text.length).toBeLessThanOrEqual(3000);
+    expect(card.text).toContain("Goal: active: Ship safely");
+    expect(card.text).toContain("model: new");
+    expect(card.text).not.toContain("model: old");
+    const buttons = card.options?.replyMarkup?.inline_keyboard.flat() ?? [];
+    expect(buttons.map((button) => button.text)).toEqual(["View details", "View diff"]);
+    const detailsToken = buttons[0]!.callback_data.split(":")[2]!;
+    const diffToken = buttons[1]!.callback_data.split(":")[2]!;
+    const detailsPage = store.getPagedOutput(detailsToken)!;
+    expect(detailsPage.text).not.toContain("raw stdout");
+    expect(detailsPage.expiresAt - Date.now()).toBeGreaterThan(23 * 60 * 60 * 1000);
+    expect(detailsPage.expiresAt - Date.now()).toBeLessThanOrEqual(24 * 60 * 60 * 1000);
+    expect(store.getPagedOutput(diffToken)?.text).toContain("+changed");
+
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: key, turnId: "turn-1", status: "completed", durationMs: 20 });
+    expect(adapter.edited.at(-1)?.text).toContain("Completed");
+    expect(store.latestTranscriptEvent("1", "demo", "system")?.text).toContain("[Activity done:");
+  });
+
+  test("activity edit failures create one replacement card and lifecycle cleanup removes pages", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("work"));
+    const key = "codex:1:demo";
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "diff", diff: "diff --git a/a b/a" } });
+    await waitForStreamFlush();
+    const first = adapter.sent.find((message) => message.text.startsWith("Codex activity"))!;
+    const diffToken = first.options!.replyMarkup!.inline_keyboard[0]![0]!.callback_data.split(":")[2]!;
+    adapter.failEditMessage = new Error("cannot edit");
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "notice", level: "warning", title: "Important" } });
+    expect(adapter.sent.filter((message) => message.text.startsWith("Codex activity"))).toHaveLength(2);
+    expect(store.getPagedOutput(diffToken)).toBeDefined();
+
+    await router.handleAgentOutput({ type: "thread_lifecycle", sessionKey: key, threadId: "thread-1", action: "closed" });
+    expect(store.getPagedOutput(diffToken)).toBeUndefined();
   });
 
   test("codex image output is sent as photo and copied to outgoing media", async () => {
@@ -2885,6 +3263,80 @@ describe("relay controller", () => {
     ]);
   });
 
+  test("typed MCP forms validate fields, support Skip, and submit structured content", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handleAgentOutput({
+      type: "mcp_elicitation_request",
+      sessionKey: "codex:1:demo",
+      requestId: 501,
+      serverName: "example",
+      mode: "form",
+      message: "Configure",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", title: "Name", minLength: 2, maxLength: 10 },
+          notify: { type: "boolean", title: "Notify" },
+        },
+        required: ["name"],
+      },
+    });
+    const nameCard = adapter.sent.at(-1)!;
+    const enterButton = nameCard.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Enter value");
+    expect(nameCard.options?.replyMarkup?.inline_keyboard.flat().some((button) => button.text === "Cancel")).toBe(true);
+    await router.handle(callbackMessage(enterButton!.callback_data, 7, "cb-mcp-enter", nameCard.messageId));
+    const replyPrompt = adapter.sent.at(-1)!;
+    expect(replyPrompt.options?.forceReply).toBe(true);
+
+    await router.handle(textMessage("x", 7, Number(replyPrompt.messageId)));
+    expect(adapter.sent.at(-2)?.text).toContain("Invalid MCP field value.");
+    const retryPrompt = adapter.sent.at(-1)!;
+    await router.handle(textMessage("Ada", 7, Number(retryPrompt.messageId)));
+    const booleanCard = adapter.sent.at(-1)!;
+    const skipButton = booleanCard.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Skip");
+    await router.handle(callbackMessage(skipButton!.callback_data, 7, "cb-mcp-skip", booleanCard.messageId));
+    const submitCard = adapter.sent.at(-1)!;
+    const submitButton = submitCard.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Submit");
+    await router.handle(callbackMessage(submitButton!.callback_data, 7, "cb-mcp-submit", submitCard.messageId));
+
+    expect(agent.responses).toContainEqual({
+      key: "codex:1:demo",
+      requestId: 501,
+      result: { action: "accept", content: { name: "Ada" }, _meta: null },
+    });
+    expect(store.getPendingPrompt("1", submitCard.messageId!)).toBeUndefined();
+  });
+
+  test("URL MCP elicitation supports Complete and returns accept without content", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handleAgentOutput({
+      type: "mcp_elicitation_request",
+      sessionKey: "codex:1:demo",
+      requestId: 502,
+      serverName: "login",
+      mode: "url",
+      message: "Authorize access",
+      url: "https://example.test/login",
+      elicitationId: "elicit-1",
+    });
+    const card = adapter.sent.at(-1)!;
+    const complete = card.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Complete");
+    expect(card.text).toContain("https://example.test/login");
+    await router.handle(callbackMessage(complete!.callback_data, 7, "cb-mcp-url", card.messageId));
+
+    expect(agent.responses).toContainEqual({ key: "codex:1:demo", requestId: 502, result: { action: "accept", content: null, _meta: null } });
+  });
+
   test("expired codex command approval denies the action and resumes the blocked task", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
@@ -2953,6 +3405,24 @@ function fileMessage(caption?: string, userId = 7) {
       mimeType: "text/plain",
       fileSize: 5,
     },
+  };
+}
+
+function audioMessage(caption?: string, userId = 7) {
+  return {
+    kind: "audio" as const,
+    id: "1",
+    messageId: "1",
+    conversationId: "1",
+    userId,
+    ...(caption ? { caption } : {}),
+    audio: {
+      fileId: "voice-1",
+      fileName: "voice.ogg",
+      mimeType: "audio/ogg",
+      fileSize: 3,
+    },
+    durationSeconds: 2,
   };
 }
 

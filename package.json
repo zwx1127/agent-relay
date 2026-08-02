@@ -29,6 +29,7 @@
     "test": "bun test",
     "test:unit": "bun test test/unit",
     "test:integration": "bun test test/integration",
+    "test:codex-contract": "bun scripts/codex-appserver-contract.ts",
     "test:smoke": "bun test test/integration/pty-smoke.test.ts test/integration/relay-script.test.ts",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test"

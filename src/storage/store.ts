@@ -28,6 +28,7 @@ export interface RelayStore {
   getSession(sessionKey: string): AgentSessionRow | undefined;
   listRunningSessions(): AgentSessionRow[];
   appendTranscript(event: TranscriptEvent): void;
+  clearTranscript(scopeKey: ConversationId, workspaceName: string): void;
   latestTranscriptEvent(scopeKey: ConversationId, workspaceName: string, role: TranscriptRole): TranscriptEvent | undefined;
   setPendingPrompt(prompt: PendingPrompt): void;
   getPendingPrompt(scopeKey: ConversationId, promptMessageId: MessageId): PendingPrompt | undefined;
@@ -37,6 +38,7 @@ export interface RelayStore {
   setPagedOutput(output: PagedOutput): void;
   getPagedOutput(token: string): PagedOutput | undefined;
   deletePagedOutput(token: string): void;
+  deletePagedOutputsForSession(sessionKey: string): void;
   prunePagedOutputs(now?: number): void;
   getConsoleMessageId(scopeKey: ConversationId): MessageId | undefined;
   setConsoleMessageId(scopeKey: ConversationId, messageId: MessageId, conversationId?: ConversationId): void;

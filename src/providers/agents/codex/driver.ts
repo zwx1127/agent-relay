@@ -1,11 +1,15 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
+import packageJson from "../../../../package.json" with { type: "json" };
 import { sessionKey } from "../../../domain/session.ts";
 import { noopLogger, type Logger } from "../../../domain/logger.ts";
 import type {
   AgentBackgroundTerminalSummary,
+  AgentActivity,
   AgentBuiltinCommand,
   AgentBuiltinResult,
+  AgentFileSearchOptions,
+  AgentFileSearchResult,
   AgentInterruptResult,
   AgentSendOptions,
   AgentDriver,
@@ -14,6 +18,8 @@ import type {
   AgentOutputHandler,
   AgentSessionStatus,
   AgentSideConversationResult,
+  AgentSkillListOptions,
+  AgentSkillSummary,
   AgentThreadGoal,
   AgentThreadGoalSetOptions,
   AgentThreadSwitchResult,
@@ -22,8 +28,8 @@ import type {
   AgentUserInputQuestion,
   StartAgentOptions,
 } from "../../../ports/agent.ts";
-import { applySessionMetadata, applyThreadMetadata, approvalCopy, approvalKindForMethod, asRecord, collaborationModePayload, getString, getThreadId, getTurnId, imageOutputEvent, isNoActiveTurnToInterruptError, isNoActiveTurnToSteerError, reviewTargetPayload, summarizeUnknown, toModelSummary, toQuestion, toThreadGoal, toThreadSummary, toTokenBreakdown, updateActiveTurnFromResult, userInputPayload } from "./protocol.ts";
-import { codexAppServerSpawnCommand, formatCodexSpawnError, type CodexSpawnCommand } from "./spawn.ts";
+import { applySessionMetadata, applyThreadMetadata, applyThreadSettings, approvalCopy, approvalKindForMethod, asRecord, collaborationModePayload, getString, getThreadId, getTurnId, imageOutputEvent, isNoActiveTurnToInterruptError, isNoActiveTurnToSteerError, reviewTargetPayload, summarizeUnknown, toMcpElicitationSchema, toModelSummary, toQuestion, toThreadGoal, toThreadSummary, toTokenBreakdown, toTurnCompletedEvent, updateActiveTurnFromResult, userInputPayload } from "./protocol.ts";
+import { codexAppServerSpawnCommand, codexVersionSpawnCommand, formatCodexSpawnError, isCodexVersionSupported, MINIMUM_CODEX_VERSION, parseCodexVersion, type CodexSpawnCommand } from "./spawn.ts";
 import { BackgroundTerminalTracker } from "./background-terminals.ts";
 import { CodexRpcClient, type JsonRpcMessage, type JsonRpcNotification, type JsonRpcRequest, type JsonRpcResponse } from "./rpc.ts";
 import { RecentStderrBuffer } from "./stderr-buffer.ts";
@@ -31,6 +37,13 @@ import { RecentStderrBuffer } from "./stderr-buffer.ts";
 interface RunningSession {
   status: AgentSessionStatus;
   backgroundTerminals: BackgroundTerminalTracker;
+  reviewTurnId?: string;
+}
+
+interface PendingGlobalNotice {
+  level: "warning" | "error";
+  title: string;
+  detail?: string;
 }
 
 interface SideConversationCollector {
@@ -87,11 +100,17 @@ export class CodexDriver implements AgentDriver {
     threadFork: true,
     sideConversation: true,
     threadRename: true,
+    threadArchive: true,
+    threadDelete: true,
     threadGoals: true,
     threadList: true,
     modelList: true,
     backgroundTerminals: true,
     localImages: true,
+    structuredInputs: true,
+    localAudio: true,
+    skillList: true,
+    fileSearch: true,
     imageOutput: true,
     interrupt: true,
   };
@@ -109,6 +128,12 @@ export class CodexDriver implements AgentDriver {
   private stopping = false;
   private appServerCommand?: CodexSpawnCommand;
   private readonly sideConversations = new Map<string, SideConversationCollector>();
+  private readonly requestedLifecycle = new Map<string, "archived" | "deleted">();
+  private readonly requestedGoalMutation = new Map<string, { action: "updated" | "cleared"; objective?: string; expiresAt: number }>();
+  private readonly pendingGlobalNotices: PendingGlobalNotice[] = [];
+  private readonly globalNoticeKeys = new Set<string>();
+  private appServerVersion?: string;
+  private defaultModel?: string;
 
   constructor(
     private readonly options: CodexDriverOptions,
@@ -167,9 +192,18 @@ export class CodexDriver implements AgentDriver {
     const threadId = getThreadId(result) ?? options.threadId;
     if (!threadId) throw new Error("Codex app-server did not return a thread id.");
     status.threadId = threadId;
+    status.appServerVersion = this.appServerVersion;
     applySessionMetadata(status, result);
     this.threadToSession.set(threadId, key);
     this.sessions.set(key, { status, backgroundTerminals: new BackgroundTerminalTracker() });
+    try {
+      const terminals = asRecord(await this.request("thread/backgroundTerminals/list", { threadId, limit: 1 }));
+      if (!Array.isArray(terminals?.data)) throw new Error("thread/backgroundTerminals/list returned an invalid response.");
+    } catch (error) {
+      this.threadToSession.delete(threadId);
+      this.sessions.delete(key);
+      throw new Error(`Codex ${this.appServerVersion ?? "unknown"} is missing required background-terminal APIs: ${error instanceof Error ? error.message : String(error)}`);
+    }
 
     this.logger.info("codex.session_started", {
       session_key: key,
@@ -198,12 +232,13 @@ export class CodexDriver implements AgentDriver {
       throw new Error("Codex session is not running.");
     }
 
-    const input = userInputPayload(text, options?.images);
+    const input = userInputPayload(text, options?.attachments, options?.images);
     const method = running.status.activeTurnId ? "turn/steer" : "turn/start";
-    const collaborationMode = options?.collaborationMode ? collaborationModePayload(running.status, options.collaborationMode) : undefined;
+    const collaborationMode = options?.collaborationMode ? collaborationModePayload(running.status, options.collaborationMode, this.defaultModel) : undefined;
     const params = running.status.activeTurnId
       ? { threadId: running.status.threadId, expectedTurnId: running.status.activeTurnId, input }
       : { threadId: running.status.threadId, input, ...(collaborationMode ? { collaborationMode } : {}) };
+    clearRecentError(running);
 
     this.logger.info("codex.input_sent", {
       session_key: key,
@@ -233,7 +268,6 @@ export class CodexDriver implements AgentDriver {
       result = await this.request("turn/start", { threadId: running.status.threadId, input, ...(collaborationMode ? { collaborationMode } : {}) });
     }
     updateActiveTurnFromResult(running, result);
-    clearRecentError(running);
     return { turnId: getTurnId(result) };
   }
 
@@ -341,6 +375,8 @@ export class CodexDriver implements AgentDriver {
         delivery: "inline",
       });
       updateActiveTurnFromResult(running, result);
+      running.reviewTurnId = getTurnId(result);
+      running.status.reviewInProgress = true;
       return {
         message: "Review started.",
         threadId: getString(asRecord(result), "reviewThreadId") ?? running.status.threadId,
@@ -357,26 +393,47 @@ export class CodexDriver implements AgentDriver {
     const running = this.requireRunningSession(key);
     const result = await this.request("thread/goal/get", { threadId: running.status.threadId });
     const goal = toThreadGoal(asRecord(result)?.goal);
+    running.status.threadGoal = goal ?? null;
     return goal ?? null;
   }
 
   async setThreadGoal(key: string, goal: AgentThreadGoalSetOptions): Promise<AgentThreadGoal> {
     const running = this.requireRunningSession(key);
-    const result = await this.request("thread/goal/set", {
-      threadId: running.status.threadId,
-      ...(goal.objective !== undefined ? { objective: goal.objective } : {}),
-      ...(goal.status !== undefined ? { status: goal.status } : {}),
-      ...(goal.tokenBudget !== undefined ? { tokenBudget: goal.tokenBudget } : {}),
-    });
+    const threadId = running.status.threadId!;
+    this.requestedGoalMutation.set(threadId, { action: "updated", ...(goal.objective ? { objective: goal.objective } : {}), expiresAt: Date.now() + 30_000 });
+    let result: unknown;
+    try {
+      result = await this.request("thread/goal/set", {
+        threadId,
+        ...(goal.objective !== undefined ? { objective: goal.objective } : {}),
+        ...(goal.status !== undefined ? { status: goal.status } : {}),
+        ...(goal.tokenBudget !== undefined ? { tokenBudget: goal.tokenBudget } : {}),
+      });
+    } catch (error) {
+      this.requestedGoalMutation.delete(threadId);
+      throw error;
+    }
     const updated = toThreadGoal(asRecord(result)?.goal);
     if (!updated) throw new Error("Codex app-server did not return a thread goal.");
+    running.status.threadGoal = updated;
     return updated;
   }
 
   async clearThreadGoal(key: string): Promise<boolean> {
     const running = this.requireRunningSession(key);
-    const result = await this.request("thread/goal/clear", { threadId: running.status.threadId });
-    return asRecord(result)?.cleared === true;
+    const threadId = running.status.threadId!;
+    this.requestedGoalMutation.set(threadId, { action: "cleared", expiresAt: Date.now() + 30_000 });
+    let result: unknown;
+    try {
+      result = await this.request("thread/goal/clear", { threadId });
+    } catch (error) {
+      this.requestedGoalMutation.delete(threadId);
+      throw error;
+    }
+    const cleared = asRecord(result)?.cleared === true;
+    if (cleared) running.status.threadGoal = null;
+    else this.requestedGoalMutation.delete(threadId);
+    return cleared;
   }
 
   async forkThread(key: string): Promise<AgentThreadSwitchResult> {
@@ -462,15 +519,76 @@ export class CodexDriver implements AgentDriver {
     running.status.threadName = name;
   }
 
+  async archiveThread(key: string): Promise<void> {
+    const running = this.requireRunningSession(key);
+    const threadId = running.status.threadId!;
+    this.requestedLifecycle.set(threadId, "archived");
+    try {
+      await this.request("thread/archive", { threadId });
+    } catch (error) {
+      this.requestedLifecycle.delete(threadId);
+      throw error;
+    }
+  }
+
+  async deleteThread(key: string): Promise<void> {
+    const running = this.requireRunningSession(key);
+    const threadId = running.status.threadId!;
+    this.requestedLifecycle.set(threadId, "deleted");
+    try {
+      await this.request("thread/delete", { threadId });
+    } catch (error) {
+      this.requestedLifecycle.delete(threadId);
+      throw error;
+    }
+  }
+
   async cleanBackgroundTerminals(key: string): Promise<void> {
     const running = this.requireRunningSession(key);
     await this.request("thread/backgroundTerminals/clean", { threadId: running.status.threadId });
     running.backgroundTerminals.clear();
   }
 
+  async terminateBackgroundTerminal(key: string, processId: string): Promise<boolean> {
+    const running = this.requireRunningSession(key);
+    const result = await this.request("thread/backgroundTerminals/terminate", { threadId: running.status.threadId, processId });
+    return asRecord(result)?.terminated === true;
+  }
+
   async listBackgroundTerminals(key: string): Promise<AgentBackgroundTerminalSummary[]> {
     const running = this.requireRunningSession(key);
-    return running.backgroundTerminals.list();
+    const terminals: AgentBackgroundTerminalSummary[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const result = asRecord(await this.request("thread/backgroundTerminals/list", {
+        threadId: running.status.threadId,
+        limit: 100,
+        ...(cursor ? { cursor } : {}),
+      }));
+      const data = Array.isArray(result?.data) ? result.data : [];
+      for (const value of data) {
+        const terminal = asRecord(value);
+        const itemId = getString(terminal, "itemId");
+        const processId = getString(terminal, "processId");
+        if (!itemId || !processId) continue;
+        terminals.push({
+          itemId,
+          processId,
+          commandDisplay: getString(terminal, "command") ?? "(command unavailable)",
+          ...(getString(terminal, "cwd") ? { cwd: getString(terminal, "cwd") } : {}),
+          osPid: nullableNumber(terminal?.osPid),
+          cpuPercent: nullableNumber(terminal?.cpuPercent),
+          rssKb: nullableNumber(terminal?.rssKb),
+          recentChunks: running.backgroundTerminals.recentLines(itemId, processId),
+        });
+      }
+      const next = getString(result, "nextCursor");
+      if (!next || seenCursors.has(next) || terminals.length >= 200) break;
+      seenCursors.add(next);
+      cursor = next;
+    } while (cursor);
+    return terminals.slice(0, 200);
   }
 
   async listThreads(options: AgentThreadListOptions): Promise<AgentThreadSummary[]> {
@@ -493,6 +611,58 @@ export class CodexDriver implements AgentDriver {
     return data.map(toModelSummary).filter((model): model is AgentModelSummary => Boolean(model));
   }
 
+  async listSkills(workspacePath: string, options: AgentSkillListOptions = {}): Promise<AgentSkillSummary[]> {
+    await this.ensureServer();
+    const result = asRecord(await this.request("skills/list", {
+      cwds: [workspacePath],
+      ...(options.forceReload ? { forceReload: true } : {}),
+    }));
+    const entries = Array.isArray(result?.data) ? result.data : [];
+    const skills: AgentSkillSummary[] = [];
+    for (const entryValue of entries) {
+      const entry = asRecord(entryValue);
+      const cwd = getString(entry, "cwd");
+      if (cwd && cwd !== workspacePath) continue;
+      for (const skillValue of Array.isArray(entry?.skills) ? entry.skills : []) {
+        const skill = asRecord(skillValue);
+        const name = getString(skill, "name");
+        const path = getString(skill, "path");
+        if (!name || !path) continue;
+        skills.push({
+          name,
+          path,
+          description: getString(skill, "description") ?? getString(skill, "shortDescription") ?? "",
+          ...(getString(skill, "scope") ? { scope: getString(skill, "scope") } : {}),
+          enabled: skill?.enabled !== false,
+        });
+      }
+    }
+    return skills;
+  }
+
+  async searchFiles(workspacePath: string, query: string, options: AgentFileSearchOptions = {}): Promise<AgentFileSearchResult[]> {
+    await this.ensureServer();
+    const result = asRecord(await this.request("fuzzyFileSearch", {
+      query,
+      roots: [workspacePath],
+      cancellationToken: null,
+    }));
+    const files = Array.isArray(result?.files) ? result.files : [];
+    return files.map((value): AgentFileSearchResult | undefined => {
+      const file = asRecord(value);
+      const root = getString(file, "root") ?? workspacePath;
+      const path = getString(file, "path");
+      if (!path) return undefined;
+      return {
+        root,
+        path,
+        fileName: getString(file, "file_name") ?? path,
+        ...(getString(file, "match_type") ? { matchType: getString(file, "match_type") } : {}),
+        ...(typeof file?.score === "number" ? { score: file.score } : {}),
+      };
+    }).filter((file): file is AgentFileSearchResult => Boolean(file)).slice(0, options.limit ?? 100);
+  }
+
   private async ensureServer(): Promise<void> {
     if (this.ready) return this.ready;
     const ready = this.startServer().catch((error) => {
@@ -506,6 +676,7 @@ export class CodexDriver implements AgentDriver {
   private async startServer(): Promise<void> {
     this.stopping = false;
     const env = { ...process.env, ...this.options.env };
+    this.appServerVersion = await this.readAndValidateCodexVersion(env);
     const command = codexAppServerSpawnCommand(this.options.codexBin, env);
     this.appServerCommand = command;
     this.recentServerStderr.clear();
@@ -532,22 +703,57 @@ export class CodexDriver implements AgentDriver {
     proc.on("exit", (exitCode, signalCode) => this.handleServerExit(exitCode, signalCode));
 
     try {
-      await this.request("initialize", {
-        clientInfo: { name: "agent-relay", title: "Agent Relay", version: "0.0.0" },
+      const initializeResult = await this.request("initialize", {
+        clientInfo: { name: "agent-relay", title: "Agent Relay", version: packageJson.version },
         capabilities: {
           experimentalApi: true,
+          requestAttestation: false,
+          mcpServerOpenaiFormElicitation: false,
           optOutNotificationMethods: [
             "command/exec/outputDelta",
             "item/commandExecution/terminalInteraction",
           ],
         },
       }, { ensureWritable: false });
+      const reportedVersion = parseCodexVersion(getString(asRecord(initializeResult), "userAgent") ?? "");
+      if (reportedVersion && reportedVersion !== this.appServerVersion) {
+        this.logger.warn("codex.app_server_version_mismatch", { preflight_version: this.appServerVersion, user_agent_version: reportedVersion });
+      }
+      await this.rpc.notify("initialized", undefined, { ensureWritable: false });
+      await this.probeServerCapabilities();
     } catch (error) {
       if (this.proc === proc && !proc.killed) proc.kill();
       this.proc = undefined;
       throw error;
     }
-    this.logger.info("codex.app_server_started");
+    this.logger.info("codex.app_server_started", { version: this.appServerVersion });
+  }
+
+  private async readAndValidateCodexVersion(env: NodeJS.ProcessEnv): Promise<string> {
+    const command = codexVersionSpawnCommand(this.options.codexBin, env);
+    const output = await runCommandForOutput(command, env).catch((error) => {
+      throw formatCodexSpawnError(error, this.options.codexBin);
+    });
+    const version = parseCodexVersion(output);
+    if (!version) throw new Error(`Unable to parse Codex version from ${JSON.stringify(output.trim())}. Agent Relay requires codex-cli ${MINIMUM_CODEX_VERSION} or newer.`);
+    if (!isCodexVersionSupported(version)) throw new Error(`Unsupported codex-cli ${version}. Agent Relay requires ${MINIMUM_CODEX_VERSION} or newer.`);
+    return version;
+  }
+
+  private async probeServerCapabilities(): Promise<void> {
+    const modelResult = asRecord(await this.request("model/list", { includeHidden: false }, { ensureWritable: false }));
+    const models = Array.isArray(modelResult?.data)
+      ? modelResult.data.map(toModelSummary).filter((model): model is AgentModelSummary => Boolean(model))
+      : [];
+    if (models.length === 0) throw new Error("Codex capability probe failed: model/list returned no usable models.");
+    this.defaultModel = models.find((model) => model.isDefault)?.model ?? models.find((model) => model.isDefault)?.id ?? models[0]?.model ?? models[0]?.id;
+    const collaborationResult = asRecord(await this.request("collaborationMode/list", {}, { ensureWritable: false }));
+    const modes = Array.isArray(collaborationResult?.data)
+      ? collaborationResult.data.map((value) => getString(asRecord(value), "mode")).filter((mode): mode is string => Boolean(mode))
+      : [];
+    if (!modes.includes("default") || !modes.includes("plan")) {
+      throw new Error("Codex capability probe failed: collaborationMode/list did not advertise default and plan modes.");
+    }
   }
 
   private handleLine(line: string): void {
@@ -597,9 +803,50 @@ export class CodexDriver implements AgentDriver {
       return;
     }
 
+    const globalNotice = globalNoticeFor(message.method, params);
+    if (!key && globalNotice) {
+      this.queueGlobalNotice(globalNotice);
+      return;
+    }
     if (!key) return;
     const running = this.sessions.get(key);
     if (!running) return;
+    await this.flushGlobalNotices(key);
+
+    if (message.method === "item/reasoning/summaryTextDelta") {
+      const delta = getString(params, "delta");
+      if (delta) await this.emitActivity(key, { kind: "reasoning", summary: delta, ...(typeof params?.summaryIndex === "number" ? { sectionIndex: params.summaryIndex } : {}) }, params, getString(params, "itemId"));
+      return;
+    }
+
+    if (message.method === "item/reasoning/textDelta") {
+      this.logger.debug("codex.raw_reasoning_delta", {
+        session_key: key,
+        turn_id: getTurnId(params),
+        item_id: getString(params, "itemId"),
+        reasoning_text: getString(params, "delta") ?? "",
+      });
+      return;
+    }
+
+    if (message.method === "item/reasoning/summaryPartAdded") return;
+
+    if (message.method === "turn/plan/updated") {
+      const steps = (Array.isArray(params?.plan) ? params.plan : []).map((value) => {
+        const step = asRecord(value);
+        const text = getString(step, "step");
+        const status = planStepStatus(getString(step, "status"));
+        return text && status ? { step: text, status } : undefined;
+      }).filter((step): step is { step: string; status: "pending" | "inProgress" | "completed" } => Boolean(step));
+      await this.emitActivity(key, { kind: "plan", ...(getString(params, "explanation") ? { explanation: getString(params, "explanation") } : {}), steps }, params);
+      return;
+    }
+
+    if (message.method === "turn/diff/updated") {
+      const diff = getString(params, "diff");
+      if (diff !== undefined) await this.emitActivity(key, { kind: "diff", diff }, params);
+      return;
+    }
 
     if (message.method === "item/agentMessage/delta") {
       const delta = typeof params?.delta === "string" ? params.delta : "";
@@ -619,6 +866,9 @@ export class CodexDriver implements AgentDriver {
 
     if (message.method === "item/started") {
       running.backgroundTerminals.started(params);
+      const item = asRecord(params?.item);
+      const activity = itemActivity(item, true);
+      if (activity) await this.emitActivity(key, activity, params, getString(item, "id"));
       return;
     }
 
@@ -627,9 +877,21 @@ export class CodexDriver implements AgentDriver {
       return;
     }
 
+    if (message.method === "item/fileChange/patchUpdated") {
+      const files = (Array.isArray(params?.changes) ? params.changes : []).map((value) => {
+        const change = asRecord(value);
+        const path = getString(change, "path");
+        return path ? { path, ...(getString(change, "kind") ? { kind: getString(change, "kind") } : {}) } : undefined;
+      }).filter((file): file is { path: string; kind?: string } => Boolean(file));
+      await this.emitActivity(key, { kind: "item", category: "fileChange", label: `File changes (${files.length})`, status: "inProgress", files }, params, getString(params, "itemId"));
+      return;
+    }
+
     if (message.method === "item/completed") {
       const item = asRecord(params?.item);
       if (item?.type === "commandExecution") running.backgroundTerminals.completed(item);
+      const activity = itemActivity(item, false);
+      if (activity) await this.emitActivity(key, activity, params, getString(item, "id"));
       if (item?.type === "exitedReviewMode" && typeof item.review === "string" && item.review) {
         await this.onOutput({ type: "message", sessionKey: key, chunk: item.review, turnId: getTurnId(params), itemId: getString(item, "id") });
       }
@@ -653,16 +915,106 @@ export class CodexDriver implements AgentDriver {
       running.status.waitingForApproval = false;
       running.status.waitingForUserInput = false;
       clearRecentError(running);
+      await this.emitActivity(key, { kind: "item", category: "other", label: "Turn started", status: "started" }, params, turnId ? `turn:${turnId}` : undefined);
+      return;
+    }
+
+    if (message.method === "item/mcpToolCall/progress") {
+      await this.emitActivity(key, {
+        kind: "item",
+        category: "mcp",
+        label: `MCP ${getString(params, "server") ?? "server"}/${getString(params, "tool") ?? "tool"}`,
+        status: "inProgress",
+        ...(getString(params, "message") ? { detail: getString(params, "message") } : {}),
+      }, params, getString(params, "itemId"));
+      return;
+    }
+
+    if (message.method === "hook/started" || message.method === "hook/completed") {
+      const run = asRecord(params?.run);
+      const status = message.method.endsWith("started") ? "inProgress" : activityStatus(getString(run, "status"), false);
+      await this.emitActivity(key, {
+        kind: "item",
+        category: "hook",
+        label: `Hook ${summarizeUnknown(run?.eventName) ?? getString(run, "id") ?? "run"}`,
+        status,
+        ...(getString(run, "statusMessage") ? { detail: getString(run, "statusMessage") } : {}),
+        ...(typeof run?.durationMs === "number" ? { durationMs: run.durationMs } : {}),
+      }, params, getString(run, "id"));
+      return;
+    }
+
+    if (message.method === "item/autoApprovalReview/started" || message.method === "item/autoApprovalReview/completed") {
+      const completed = message.method.endsWith("completed");
+      await this.emitActivity(key, {
+        kind: "item",
+        category: "guardian",
+        label: "Guardian approval review",
+        status: completed ? "completed" : "inProgress",
+        ...(completed && params?.decisionSource !== undefined ? { detail: `Decision: ${summarizeUnknown(params.decisionSource)}` } : {}),
+        ...(completed && typeof params?.startedAtMs === "number" && typeof params?.completedAtMs === "number" ? { durationMs: params.completedAtMs - params.startedAtMs } : {}),
+      }, params, getString(params, "reviewId"));
       return;
     }
 
     if (message.method === "turn/completed") {
-      const turnId = getTurnId(params);
+      const completed = toTurnCompletedEvent(key, params);
+      if (completed.status === "inProgress") {
+        this.logger.warn("codex.turn_completed_in_progress", { session_key: key, turn_id: completed.turnId });
+        return;
+      }
       running.status.activeTurnId = undefined;
       running.status.waitingForApproval = false;
       running.status.waitingForUserInput = false;
-      clearRecentError(running);
-      await this.onOutput({ type: "turn_completed", sessionKey: key, turnId });
+      if (running.reviewTurnId === completed.turnId) {
+        running.reviewTurnId = undefined;
+        running.status.reviewInProgress = false;
+      }
+      if (completed.status === "failed") {
+        running.status.recentError = completed.error?.message ?? "Codex turn failed.";
+      } else {
+        clearRecentError(running);
+      }
+      await this.onOutput(completed);
+      return;
+    }
+
+    if (message.method === "thread/settings/updated") {
+      const before = settingsSnapshot(running.status);
+      applyThreadSettings(running.status, params?.threadSettings);
+      const changes = changedSettings(before, settingsSnapshot(running.status));
+      if (Object.keys(changes).length) await this.emitActivity(key, { kind: "settings", changes }, params);
+      return;
+    }
+
+    if (message.method === "thread/goal/updated") {
+      const goal = toThreadGoal(params?.goal);
+      running.status.threadGoal = goal ?? running.status.threadGoal;
+      const requested = this.requestedGoalMutation.get(threadId!);
+      const suppress = requested?.action === "updated" && requested.expiresAt >= Date.now() && (!requested.objective || requested.objective === goal?.objective);
+      if (suppress) this.requestedGoalMutation.delete(threadId!);
+      else if (goal) await this.emitActivity(key, { kind: "goal", goal }, params);
+      return;
+    }
+
+    if (message.method === "thread/goal/cleared") {
+      running.status.threadGoal = null;
+      const requested = this.requestedGoalMutation.get(threadId!);
+      if (requested?.action === "cleared" && requested.expiresAt >= Date.now()) this.requestedGoalMutation.delete(threadId!);
+      else await this.emitActivity(key, { kind: "goal", goal: null }, params);
+      return;
+    }
+
+    if (message.method === "thread/archived" || message.method === "thread/deleted" || message.method === "thread/closed") {
+      const action = message.method.slice("thread/".length) as "archived" | "deleted" | "closed";
+      const initiatedByClient = this.requestedLifecycle.get(threadId!) === action;
+      this.requestedLifecycle.delete(threadId!);
+      this.requestedGoalMutation.delete(threadId!);
+      running.status.running = false;
+      this.threadToSession.delete(threadId!);
+      this.sessions.delete(key);
+      this.inputQueues.delete(key);
+      await this.onOutput({ type: "thread_lifecycle", sessionKey: key, threadId: threadId!, action, ...(initiatedByClient ? { initiatedByClient: true } : {}) });
       return;
     }
 
@@ -696,17 +1048,49 @@ export class CodexDriver implements AgentDriver {
     if (message.method === "model/rerouted") {
       const toModel = typeof params?.toModel === "string" ? params.toModel : undefined;
       if (toModel) running.status.model = toModel;
+      await this.emitActivity(key, { kind: "item", category: "model", label: "Model rerouted", status: "completed", ...(toModel ? { detail: toModel } : {}) }, params);
       return;
     }
 
-    if (message.method === "warning") {
-      const warning = typeof params?.message === "string" ? params.message : undefined;
+    if (message.method === "model/verification") {
+      const count = Array.isArray(params?.verifications) ? params.verifications.length : 0;
+      await this.emitActivity(key, { kind: "item", category: "model", label: "Model verification", status: "completed", detail: `${count} check(s)` }, params);
+      return;
+    }
+
+    if (message.method === "model/safetyBuffering/updated") {
+      const enabled = params?.showBufferingUi === true;
+      await this.emitActivity(key, {
+        kind: "item",
+        category: "guardian",
+        label: enabled ? "Model safety buffering" : "Model safety buffering cleared",
+        status: enabled ? "warning" : "completed",
+        ...(Array.isArray(params?.reasons) && params.reasons.length ? { detail: params.reasons.filter((reason): reason is string => typeof reason === "string").join("; ") } : {}),
+      }, params);
+      return;
+    }
+
+    if (message.method === "turn/moderationMetadata") {
+      await this.emitActivity(key, { kind: "item", category: "guardian", label: "Moderation metadata updated", status: "completed" }, params);
+      return;
+    }
+
+    if (message.method === "warning" || message.method === "guardianWarning" || message.method === "configWarning" || message.method === "deprecationNotice") {
+      const notice = globalNotice ?? globalNoticeFor(message.method, params);
+      const warning = getString(params, "message") ?? getString(params, "summary") ?? notice?.detail ?? notice?.title;
       if (warning) running.status.recentWarning = warning;
+      if (notice) await this.emitActivity(key, { kind: "notice", level: notice.level, title: notice.title, ...(notice.detail ? { detail: notice.detail } : {}) }, params);
+      return;
+    }
+
+    if (message.method === "thread/compacted") {
+      await this.emitActivity(key, { kind: "item", category: "compaction", label: "Context compacted", status: "completed" }, params);
       return;
     }
 
     if (message.method === "error") {
       running.status.recentError = summarizeUnknown(params?.error);
+      await this.emitActivity(key, { kind: "notice", level: "error", title: "Codex error", ...(running.status.recentError ? { detail: running.status.recentError } : {}) }, params);
       return;
     }
   }
@@ -749,6 +1133,41 @@ export class CodexDriver implements AgentDriver {
     return message.method.startsWith("thread/") || message.method.startsWith("item/");
   }
 
+  private async emitActivity(
+    sessionKeyValue: string,
+    activity: AgentActivity,
+    params?: Record<string, unknown>,
+    itemId?: string,
+  ): Promise<void> {
+    await this.onOutput({
+      type: "activity",
+      sessionKey: sessionKeyValue,
+      activity,
+      ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
+      ...(itemId ? { itemId } : {}),
+    });
+  }
+
+  private queueGlobalNotice(notice: PendingGlobalNotice): void {
+    const key = `${notice.level}\u0000${notice.title}\u0000${notice.detail ?? ""}`;
+    if (this.globalNoticeKeys.has(key)) return;
+    this.globalNoticeKeys.add(key);
+    this.pendingGlobalNotices.push(notice);
+  }
+
+  private async flushGlobalNotices(sessionKeyValue: string): Promise<void> {
+    if (this.pendingGlobalNotices.length === 0) return;
+    const notices = this.pendingGlobalNotices.splice(0);
+    for (const notice of notices) {
+      await this.emitActivity(sessionKeyValue, {
+        kind: "notice",
+        level: notice.level,
+        title: notice.title,
+        ...(notice.detail ? { detail: notice.detail } : {}),
+      });
+    }
+  }
+
   private async handleServerRequest(message: JsonRpcRequest): Promise<void> {
     const params = asRecord(message.params);
     const threadId = typeof params?.threadId === "string"
@@ -760,6 +1179,19 @@ export class CodexDriver implements AgentDriver {
     const sideConversation = threadId ? this.sideConversations.get(threadId) : undefined;
     if (sideConversation) {
       await this.rpc.rejectRequest(message.id, -32000, "Interactive prompts and approvals are not supported in Relay side conversations.");
+      return;
+    }
+    if (message.method === "item/tool/call" || message.method === "account/chatgptAuthTokens/refresh" || message.method === "attestation/generate") {
+      const drift = `Unsupported Codex server request received despite disabled capability: ${message.method}`;
+      if (key) {
+        const running = this.sessions.get(key);
+        if (running) running.status.recentError = drift;
+      } else {
+        for (const running of this.sessions.values()) running.status.recentError = drift;
+      }
+      this.logger.error("codex.disabled_capability_request", { method: message.method, thread_id: threadId, session_key: key });
+      if (key) await this.emitActivity(key, { kind: "notice", level: "error", title: "Codex protocol drift", detail: drift }, params);
+      await this.rpc.rejectRequest(message.id, -32601, drift);
       return;
     }
     if (!key) {
@@ -778,6 +1210,44 @@ export class CodexDriver implements AgentDriver {
         questions,
         turnId: getTurnId(params),
         itemId: typeof params?.itemId === "string" ? params.itemId : undefined,
+      });
+      const running = this.sessions.get(key);
+      if (running) running.status.waitingForUserInput = true;
+      return;
+    }
+
+    if (message.method === "mcpServer/elicitation/request") {
+      const mode = getString(params, "mode");
+      if (mode === "openai/form") {
+        await this.rpc.respond(message.id, { action: "cancel", content: null, _meta: null });
+        const running = this.sessions.get(key);
+        if (running) running.status.recentError = "Codex sent an MCP openai/form elicitation even though Relay disabled that capability.";
+        await this.emitActivity(key, { kind: "notice", level: "error", title: "Unsupported MCP form", detail: "Codex requested openai/form even though Relay disabled that capability; the request was cancelled." }, params);
+        return;
+      }
+      if (mode !== "form" && mode !== "url") {
+        await this.rpc.respond(message.id, { action: "cancel", content: null, _meta: null });
+        return;
+      }
+      const requestedSchema = mode === "form" ? toMcpElicitationSchema(params?.requestedSchema) : undefined;
+      if (mode === "form" && !requestedSchema) {
+        await this.rpc.respond(message.id, { action: "cancel", content: null, _meta: null });
+        const running = this.sessions.get(key);
+        if (running) running.status.recentError = "Codex sent an invalid MCP elicitation schema.";
+        return;
+      }
+      await this.onOutput({
+        type: "mcp_elicitation_request",
+        sessionKey: key,
+        requestId: message.id,
+        serverName: getString(params, "serverName") ?? "MCP server",
+        mode,
+        message: getString(params, "message") ?? "The MCP server requested additional input.",
+        ...(requestedSchema ? { requestedSchema } : {}),
+        ...(getString(params, "url") ? { url: getString(params, "url") } : {}),
+        ...(getString(params, "elicitationId") ? { elicitationId: getString(params, "elicitationId") } : {}),
+        ...(params?._meta !== undefined ? { meta: params._meta } : {}),
+        ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
       });
       const running = this.sessions.get(key);
       if (running) running.status.waitingForUserInput = true;
@@ -806,6 +1276,10 @@ export class CodexDriver implements AgentDriver {
       return;
     }
 
+    const running = this.sessions.get(key);
+    if (running) running.status.recentError = `Unsupported Codex server request: ${message.method}`;
+    this.logger.error("codex.unsupported_server_request", { method: message.method, thread_id: threadId, session_key: key });
+    await this.emitActivity(key, { kind: "notice", level: "error", title: "Unsupported Codex request", detail: message.method }, params);
     await this.rpc.rejectRequest(message.id, -32601, `Unsupported server request: ${message.method}`);
   }
 
@@ -845,6 +1319,8 @@ export class CodexDriver implements AgentDriver {
     this.sessions.clear();
     this.threadToSession.clear();
     this.sideConversations.clear();
+    this.requestedLifecycle.clear();
+    this.requestedGoalMutation.clear();
     this.proc = undefined;
     this.ready = undefined;
     for (const running of sessions) {
@@ -907,4 +1383,168 @@ function sideDeveloperInstructions(existing: string | undefined): string {
 
 function clearRecentError(running: RunningSession): void {
   running.status.recentError = undefined;
+}
+
+function planStepStatus(value: string | undefined): "pending" | "inProgress" | "completed" | undefined {
+  return value === "pending" || value === "inProgress" || value === "completed" ? value : undefined;
+}
+
+function activityStatus(value: string | undefined, started: boolean): Extract<AgentActivity, { kind: "item" }>["status"] {
+  switch (value) {
+    case "completed":
+    case "failed":
+    case "declined":
+    case "interrupted":
+      return value;
+    case "blocked":
+      return "warning";
+    case "stopped":
+      return "interrupted";
+    case "running":
+    case "inProgress":
+      return "inProgress";
+    default:
+      return started ? "started" : "completed";
+  }
+}
+
+function itemActivity(item: Record<string, unknown> | undefined, started: boolean): AgentActivity | undefined {
+  if (!item) return undefined;
+  const type = getString(item, "type");
+  const status = activityStatus(getString(item, "status"), started);
+  switch (type) {
+    case "commandExecution": {
+      const command = getString(item, "command") ?? "Command";
+      const exitCode = typeof item.exitCode === "number" ? item.exitCode : undefined;
+      return {
+        kind: "item",
+        category: "command",
+        label: truncateSummary(command),
+        status,
+        ...(exitCode !== undefined ? { detail: `Exit ${exitCode}` } : {}),
+        ...(typeof item.durationMs === "number" ? { durationMs: item.durationMs } : {}),
+      };
+    }
+    case "fileChange": {
+      const files = (Array.isArray(item.changes) ? item.changes : []).map((value) => {
+        const change = asRecord(value);
+        const path = getString(change, "path");
+        return path ? { path, ...(getString(change, "kind") ? { kind: getString(change, "kind") } : {}) } : undefined;
+      }).filter((file): file is { path: string; kind?: string } => Boolean(file));
+      return { kind: "item", category: "fileChange", label: `File changes (${files.length})`, status, files };
+    }
+    case "mcpToolCall":
+      return {
+        kind: "item",
+        category: "mcp",
+        label: `MCP ${getString(item, "server") ?? "server"}/${getString(item, "tool") ?? "tool"}`,
+        status,
+        ...(asRecord(item.error) && getString(asRecord(item.error), "message") ? { detail: getString(asRecord(item.error), "message") } : {}),
+        ...(typeof item.durationMs === "number" ? { durationMs: item.durationMs } : {}),
+      };
+    case "webSearch":
+      return { kind: "item", category: "webSearch", label: `Web search: ${truncateSummary(getString(item, "query") ?? "search")}`, status };
+    case "collabAgentToolCall":
+      return { kind: "item", category: "collaboration", label: `Collaboration: ${summarizeUnknown(item.tool) ?? "agent"}`, status };
+    case "subAgentActivity":
+      return { kind: "item", category: "collaboration", label: `Sub-agent: ${summarizeUnknown(item.kind) ?? "activity"}`, status };
+    case "imageView": {
+      const path = getString(item, "path");
+      return { kind: "item", category: "image", label: "Viewed image", status, ...(path ? { files: [{ path }] } : {}) };
+    }
+    case "imageGeneration":
+      return { kind: "item", category: "image", label: "Generated image", status };
+    case "sleep":
+      return { kind: "item", category: "other", label: "Waiting", status };
+    case "enteredReviewMode":
+      return { kind: "item", category: "review", label: "Entered review mode", status };
+    case "exitedReviewMode":
+      return { kind: "item", category: "review", label: "Completed review", status };
+    case "contextCompaction":
+      return { kind: "item", category: "compaction", label: "Context compaction", status };
+    case "dynamicToolCall":
+      return { kind: "notice", level: "warning", title: "Unexpected dynamic tool activity", detail: getString(item, "tool") };
+    default:
+      return undefined;
+  }
+}
+
+function globalNoticeFor(method: string, params: Record<string, unknown> | undefined): PendingGlobalNotice | undefined {
+  if (method === "warning" || method === "guardianWarning") {
+    const message = getString(params, "message");
+    return message ? { level: "warning", title: method === "guardianWarning" ? "Guardian warning" : "Codex warning", detail: message } : undefined;
+  }
+  if (method === "configWarning" || method === "deprecationNotice") {
+    const summary = getString(params, "summary");
+    if (!summary) return undefined;
+    const details = getString(params, "details");
+    const path = getString(params, "path");
+    return {
+      level: "warning",
+      title: method === "configWarning" ? "Configuration warning" : "Deprecation notice",
+      detail: [summary, details, path ? `File: ${path}` : undefined].filter(Boolean).join(" — "),
+    };
+  }
+  return undefined;
+}
+
+function settingsSnapshot(status: AgentSessionStatus): Record<string, string | undefined> {
+  return {
+    model: status.model,
+    modelProvider: status.modelProvider,
+    reasoningEffort: status.reasoningEffort,
+    approvalPolicy: status.approvalPolicy,
+    approvalsReviewer: status.approvalsReviewer,
+    sandboxPolicy: status.sandboxPolicy,
+  };
+}
+
+function changedSettings(before: Record<string, string | undefined>, after: Record<string, string | undefined>): Record<string, string> {
+  const changes: Record<string, string> = {};
+  for (const [name, value] of Object.entries(after)) {
+    if (before[name] !== value) changes[name] = value ?? "(default)";
+  }
+  return changes;
+}
+
+function truncateSummary(value: string, max = 500): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
+}
+
+function nullableNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function runCommandForOutput(command: CodexSpawnCommand, env: NodeJS.ProcessEnv): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(command.command, command.args, {
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+        ...(command.windowsVerbatimArguments === undefined ? {} : { windowsVerbatimArguments: command.windowsVerbatimArguments }),
+      });
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("Codex --version timed out."));
+    }, 15_000);
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(stdout || stderr);
+      else reject(new Error(`Codex --version exited with code ${code}: ${(stderr || stdout).trim()}`));
+    });
+  });
 }

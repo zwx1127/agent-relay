@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { discoverWorkspaceDirectories, resolveWorkspacePath, validateWorkspaceName, workspaceDirectoryExists } from "../../src/domain/workspace.ts";
 
+const unixFilesystemTest = process.platform === "win32" ? test.skip : test;
+
 describe("workspace", () => {
   test("accepts conservative and unicode names", () => {
     expect(() => validateWorkspaceName("repo_1.test-name")).not.toThrow();
@@ -24,7 +26,7 @@ describe("workspace", () => {
     expect(resolveWorkspacePath(root, "demo")).toBe(join(root, "demo"));
   });
 
-  test("checks only real workspace directories", () => {
+  unixFilesystemTest("checks only real workspace directories", () => {
     const root = mkdtempSync(join(tmpdir(), "agent-relay-workspaces-"));
     try {
       mkdirSync(join(root, "demo"));
@@ -40,7 +42,7 @@ describe("workspace", () => {
     }
   });
 
-  test("discovers valid first-level workspace directories", async () => {
+  unixFilesystemTest("discovers valid first-level workspace directories", async () => {
     const root = mkdtempSync(join(tmpdir(), "agent-relay-workspaces-"));
     try {
       mkdirSync(join(root, "demo"));

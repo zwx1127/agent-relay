@@ -4,6 +4,8 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+const unixOnlyTest = process.platform === "win32" ? test.skip : test;
+
 let roots: string[] = [];
 const fastRelayEnv = {
   ...process.env,
@@ -22,7 +24,7 @@ afterEach(() => {
 });
 
 describe("relay lifecycle script", () => {
-  test("restart stops the relay, removes data, and starts a fresh process", async () => {
+  unixOnlyTest("restart stops the relay, removes data, and starts a fresh process", async () => {
     const root = createFixture();
     expectSuccess(runRelay(root, "start"));
     const firstPid = readPid(root);
@@ -43,7 +45,7 @@ describe("relay lifecycle script", () => {
     await waitFor(() => !pidIsAlive(firstPid), "old relay process to exit");
   });
 
-  test("self restart survives cleanup of the calling process group", async () => {
+  unixOnlyTest("self restart survives cleanup of the calling process group", async () => {
     const root = createFixture();
     expectSuccess(runRelay(root, "start"));
     const firstPid = readPid(root);
@@ -65,7 +67,7 @@ describe("relay lifecycle script", () => {
     expect(readPid(root)).not.toBe(firstPid);
   });
 
-  test("clean-data refuses while the relay is running", () => {
+  unixOnlyTest("clean-data refuses while the relay is running", () => {
     const root = createFixture();
     expectSuccess(runRelay(root, "start"));
     const sentinel = join(root, ".data", "sentinel");

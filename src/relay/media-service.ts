@@ -2,11 +2,11 @@ import { lstat, readFile } from "node:fs/promises";
 import { basename, extname, resolve } from "node:path";
 import { isAuthorized, type AppConfig } from "../runtime/config.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
-import { parseSessionKey } from "../domain/session.ts";
+import { parseSessionKey, sessionKey } from "../domain/session.ts";
 import { parseChatScopeKey } from "../domain/scope.ts";
 import { isRealDirectory } from "../domain/workspace.ts";
 import type { AgentDriver, AgentImageInput, AgentImageOutputEvent, AgentSessionStatus, AgentTaskInput } from "../ports/agent.ts";
-import type { FileInboundMessage, ImAdapter, MediaInboundMessage, SendMessageOptions } from "../ports/im.ts";
+import type { AudioInboundMessage, FileInboundMessage, ImAdapter, MediaInboundMessage, SendMessageOptions } from "../ports/im.ts";
 import type { RelayStore } from "../storage/store.ts";
 import type { Logger, LogFields } from "../domain/logger.ts";
 import type { SendImageCapabilityRequest } from "./capabilities/send-image.ts";
@@ -42,7 +42,16 @@ interface PendingFileActionPayload {
   originalMessageId?: MessageId;
 }
 
-type PendingMediaActionPayload = PendingImageActionPayload | PendingFileActionPayload;
+interface PendingAudioActionPayload {
+  kind: "audio";
+  path: string;
+  filename: string;
+  fileSize: number;
+  mimeType?: string;
+  originalMessageId?: MessageId;
+}
+
+type PendingMediaActionPayload = PendingImageActionPayload | PendingFileActionPayload | PendingAudioActionPayload;
 
 export interface MediaRelayDeps {
   config: AppConfig;
@@ -130,6 +139,30 @@ export class MediaRelayService {
     }
   }
 
+  async handleAudioMessage(message: AudioInboundMessage): Promise<void> {
+    const scope = parseChatScopeKey(String(message.conversationId));
+    this.deps.logger.info("router.audio_received", {
+      conversation_id: scope.conversationId,
+      scope_key: scope.scopeKey,
+      user_id: message.userId,
+      message_id: message.id,
+      file_name: message.audio.fileName,
+      mime_type: message.audio.mimeType,
+      file_size: message.audio.fileSize,
+      duration_seconds: message.durationSeconds,
+      caption_len: message.caption?.length ?? 0,
+    });
+    if (!isAuthorized(this.deps.config, message.userId, scope.conversationId)) {
+      await this.deps.sendRendered(scope.scopeKey, textMessage("Unauthorized."));
+      return;
+    }
+    try {
+      await this.submitAudioMessage({ ...message, conversationId: scope.scopeKey });
+    } catch (error) {
+      await this.handleFileError(scope.scopeKey, message.id, error);
+    }
+  }
+
   private bufferMediaGroup(message: MediaInboundMessage): void {
     const scope = parseChatScopeKey(String(message.conversationId));
     const key = `${scope.scopeKey}:${message.mediaGroupId}`;
@@ -159,7 +192,9 @@ export class MediaRelayService {
     // Preserve provider message order so image references in captions match the
     // order of localImage inputs sent to Codex.
     const sorted = [...messages].sort((a, b) => Number(a.messageId) - Number(b.messageId));
-    const prompt = sorted.map((item) => item.caption?.trim()).find(Boolean);
+    const rawPrompt = sorted.map((item) => item.caption?.trim()).find(Boolean);
+    const planMatch = rawPrompt ? /^\/plan(?:@[^\s]+)?(?:\s+([\s\S]*))?$/i.exec(rawPrompt) : undefined;
+    const prompt = planMatch ? planMatch[1]?.trim() || "Create a plan based on the attached image(s)." : rawPrompt;
     if (prompt) {
       const status = await this.deps.ensureAgentStarted(scope.scopeKey, workspace);
       if (await this.deps.sendWaitingPromptNotice(scope.scopeKey, status)) return;
@@ -176,7 +211,11 @@ export class MediaRelayService {
       });
       return;
     }
-    await this.deps.submitTask(scope.scopeKey, prompt, sorted[0]?.messageId, "auto", { text: prompt, images });
+    if (planMatch) this.deps.store.setCollaborationMode(sessionKey(scope.scopeKey, workspace.name), "plan");
+    await this.deps.submitTask(scope.scopeKey, prompt, sorted[0]?.messageId, "auto", {
+      text: prompt,
+      attachments: images.map((image) => ({ type: "localImage", path: image.path, ...(image.caption ? { caption: image.caption } : {}) })),
+    });
   }
 
   private async downloadAndSavePhoto(workspace: WorkspaceRecord, message: MediaInboundMessage): Promise<AgentImageInput> {
@@ -240,14 +279,41 @@ export class MediaRelayService {
       });
       return;
     }
-    const prompt = formatAttachedFilePrompt({
-      path: stored.path,
-      filename: stored.filename,
-      fileSize: stored.fileSize,
-      mimeType: stored.mimeType,
-      caption,
+    await this.deps.submitTask(scope.scopeKey, caption, message.messageId, "auto", {
+      text: caption,
+      attachments: [{ type: "mention", name: stored.filename, path: stored.path }],
     });
-    await this.deps.submitTask(scope.scopeKey, prompt, message.messageId);
+  }
+
+  private async submitAudioMessage(message: AudioInboundMessage): Promise<void> {
+    const scope = parseChatScopeKey(String(message.conversationId));
+    const workspace = this.deps.currentWorkspace(scope.scopeKey);
+    if (!workspace) {
+      await this.deps.renderConsole(scope.scopeKey);
+      return;
+    }
+    if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
+    const caption = message.caption?.trim();
+    if (caption) {
+      const status = await this.deps.ensureAgentStarted(scope.scopeKey, workspace);
+      if (await this.deps.sendWaitingPromptNotice(scope.scopeKey, status)) return;
+    }
+    const stored = await this.downloadAndSaveAudio(workspace, message);
+    if (!caption) {
+      await this.promptForMediaAction(scope.scopeKey, {
+        kind: "audio",
+        path: stored.path,
+        filename: stored.filename,
+        fileSize: stored.fileSize,
+        ...(stored.mimeType ? { mimeType: stored.mimeType } : {}),
+        originalMessageId: message.messageId,
+      });
+      return;
+    }
+    await this.deps.submitTask(scope.scopeKey, caption, message.messageId, "auto", {
+      text: caption,
+      attachments: [{ type: "localAudio", path: stored.path, ...(stored.mimeType ? { mimeType: stored.mimeType } : {}) }],
+    });
   }
 
   private async downloadAndSaveFile(workspace: WorkspaceRecord, message: FileInboundMessage): Promise<{ path: string; filename: string; fileSize: number; mimeType?: string }> {
@@ -271,6 +337,22 @@ export class MediaRelayService {
       fileSize: size,
       ...(downloaded.mimeType ?? message.file.mimeType ? { mimeType: downloaded.mimeType ?? message.file.mimeType } : {}),
     };
+  }
+
+  private async downloadAndSaveAudio(workspace: WorkspaceRecord, message: AudioInboundMessage): Promise<{ path: string; filename: string; fileSize: number; mimeType?: string }> {
+    if (message.audio.fileSize && message.audio.fileSize > this.deps.config.mediaMaxBytes) {
+      throw new Error(`Audio is too large (${formatBytes(message.audio.fileSize)}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
+    }
+    if (!this.deps.adapter.downloadFile) throw new Error("IM adapter cannot download audio.");
+    const downloaded = await this.deps.adapter.downloadFile(message.audio.fileId, { kind: "file", messageId: message.messageId });
+    const size = downloaded.fileSize ?? downloaded.bytes.byteLength;
+    if (size > this.deps.config.mediaMaxBytes || downloaded.bytes.byteLength > this.deps.config.mediaMaxBytes) {
+      throw new Error(`Audio is too large (${formatBytes(Math.max(size, downloaded.bytes.byteLength))}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
+    }
+    const filename = safeFilename(downloaded.fileName ?? message.audio.fileName ?? (basename(downloaded.filePath ?? "") || "audio.bin"));
+    const path = await saveRelayFile(workspace.path, "incoming", downloaded.bytes, { filename, messageId: message.messageId });
+    const mimeType = downloaded.mimeType ?? message.audio.mimeType;
+    return { path, filename, fileSize: size, ...(mimeType ? { mimeType } : {}) };
   }
 
   private async handleFileError(conversationId: ConversationId, messageId: MessageId, error: unknown): Promise<void> {
@@ -307,21 +389,16 @@ export class MediaRelayService {
     if (payload.kind === "image") {
       await this.deps.submitTask(scope.scopeKey, prompt, payload.originalMessageId ?? promptMessageId, "auto", {
         text: prompt,
-        images: payload.images.map((image) => ({ path: image.path, ...(image.caption ? { caption: image.caption } : {}) })),
+        attachments: payload.images.map((image) => ({ type: "localImage", path: image.path, ...(image.caption ? { caption: image.caption } : {}) })),
       });
       return;
     }
-    await this.deps.submitTask(
-      scope.scopeKey,
-      formatAttachedFilePrompt({
-        path: payload.path,
-        filename: payload.filename,
-        fileSize: payload.fileSize,
-        mimeType: payload.mimeType,
-        caption: prompt,
-      }),
-      payload.originalMessageId ?? promptMessageId,
-    );
+    await this.deps.submitTask(scope.scopeKey, prompt, payload.originalMessageId ?? promptMessageId, "auto", {
+      text: prompt,
+      attachments: payload.kind === "audio"
+        ? [{ type: "localAudio", path: payload.path, ...(payload.mimeType ? { mimeType: payload.mimeType } : {}) }]
+        : [{ type: "mention", name: payload.filename, path: payload.path }],
+    });
   }
 
   async sendAgentImageOutput(event: AgentImageOutputEvent): Promise<void> {
@@ -497,7 +574,9 @@ export class MediaRelayService {
     const scope = parseChatScopeKey(String(conversationId));
     const title = payload.kind === "image"
       ? `Received ${payload.images.length === 1 ? "an image" : `${payload.images.length} images`}.`
-      : `Received file: ${payload.filename}`;
+      : payload.kind === "audio"
+        ? `Received audio: ${payload.filename}`
+        : `Received file: ${payload.filename}`;
     const result = await this.deps.sendRendered(scope.scopeKey, messageWithTitle(title), {
       forceReply: true,
       forceReplyInstruction: "Reply to this prompt, or send your next message with what you want Codex to do.",
@@ -515,20 +594,6 @@ export class MediaRelayService {
       expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
     });
   }
-}
-
-function formatAttachedFilePrompt(input: { path: string; filename: string; fileSize: number; mimeType?: string; caption?: string }): string {
-  return [
-    "User attached a file for this Codex session.",
-    "",
-    `Local path: ${input.path}`,
-    `Filename: ${input.filename}`,
-    `Size: ${formatBytes(input.fileSize)}`,
-    input.mimeType ? `MIME type: ${input.mimeType}` : undefined,
-    input.caption?.trim() ? `User caption: ${input.caption.trim()}` : undefined,
-    "",
-    "Use the local path above to inspect or process the file if needed.",
-  ].filter((line): line is string => line !== undefined).join("\n");
 }
 
 function parseMediaActionPayload(payloadJson: string | undefined): PendingMediaActionPayload | undefined {
@@ -558,10 +623,10 @@ function parseMediaActionPayload(payloadJson: string | undefined): PendingMediaA
       ...(isMessageId(record.originalMessageId) ? { originalMessageId: record.originalMessageId } : {}),
     };
   }
-  if (record.kind === "file") {
+  if (record.kind === "file" || record.kind === "audio") {
     if (typeof record.path !== "string" || typeof record.filename !== "string" || typeof record.fileSize !== "number") return undefined;
     return {
-      kind: "file",
+      kind: record.kind,
       path: record.path,
       filename: record.filename,
       fileSize: record.fileSize,

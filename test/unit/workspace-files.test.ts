@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { directoryEntries, listVisibleWorkspaceFiles, readVisibleTextFile } from "../../src/relay/workspace-files.ts";
 
+const unixSymlinkTest = process.platform === "win32" ? test.skip : test;
+
 describe("workspace files", () => {
   test("builds directory entries from visible files", () => {
     expect(directoryEntries([
@@ -57,7 +59,7 @@ describe("workspace files", () => {
     }
   });
 
-  test("rejects ignored, binary, oversized, and symlinked files", async () => {
+  unixSymlinkTest("rejects ignored, binary, oversized, and symlinked files", async () => {
     const root = mkdtempSync(join(tmpdir(), "agent-relay-workspace-files-"));
     try {
       writeFileSync(join(root, ".gitignore"), "ignored.txt\n");

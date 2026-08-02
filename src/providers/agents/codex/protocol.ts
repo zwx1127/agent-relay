@@ -1,4 +1,4 @@
-import type { AgentApprovalKind, AgentCollaborationMode, AgentImageInput, AgentModelSummary, AgentReviewTarget, AgentSessionStatus, AgentThreadGoal, AgentThreadGoalStatus, AgentThreadSummary, AgentTokenBreakdown, AgentUserInputQuestion } from "../../../ports/agent.ts";
+import type { AgentApprovalKind, AgentCollaborationMode, AgentImageInput, AgentInputAttachment, AgentMcpElicitationFieldSchema, AgentMcpElicitationSchema, AgentModelSummary, AgentReviewTarget, AgentSessionStatus, AgentThreadGoal, AgentThreadGoalStatus, AgentThreadSummary, AgentTokenBreakdown, AgentTurnCompletedEvent, AgentTurnError, AgentTurnStatus, AgentUserInputQuestion } from "../../../ports/agent.ts";
 
 export function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
@@ -81,7 +81,9 @@ export function toModelSummary(value: unknown): AgentModelSummary | undefined {
     isDefault: typeof record?.isDefault === "boolean" ? record.isDefault : undefined,
     defaultReasoningEffort: getString(record, "defaultReasoningEffort"),
     supportedReasoningEfforts: Array.isArray(record?.supportedReasoningEfforts)
-      ? record.supportedReasoningEfforts.filter((effort): effort is string => typeof effort === "string")
+      ? record.supportedReasoningEfforts.map((effort) => typeof effort === "string"
+        ? effort
+        : getString(asRecord(effort), "reasoningEffort")).filter((effort): effort is string => Boolean(effort))
       : undefined,
   };
 }
@@ -109,6 +111,8 @@ export function toThreadGoalStatus(value: string | undefined): AgentThreadGoalSt
   switch (value) {
     case "active":
     case "paused":
+    case "blocked":
+    case "usageLimited":
     case "budgetLimited":
     case "complete":
       return value;
@@ -130,18 +134,137 @@ export function reviewTargetPayload(target: AgentReviewTarget): unknown {
   }
 }
 
-export function collaborationModePayload(status: AgentSessionStatus, mode: AgentCollaborationMode): unknown {
+export function collaborationModePayload(status: AgentSessionStatus, mode: AgentCollaborationMode, defaultModel?: string): unknown {
   // Codex expects a complete settings object for collaboration mode changes.
   // Relay reuses the current session metadata and lets Codex fill unavailable
   // optional settings with its defaults.
   return {
     mode,
     settings: {
-      model: status.model ?? "gpt-5.2",
+      model: status.model ?? defaultModel ?? requiredModelError(),
       reasoning_effort: status.reasoningEffort ?? null,
       developer_instructions: null,
     },
   };
+}
+
+function requiredModelError(): never {
+  throw new Error("Codex app-server did not advertise a default model for collaboration mode.");
+}
+
+export function toTurnCompletedEvent(sessionKey: string, value: unknown): AgentTurnCompletedEvent {
+  const record = asRecord(value);
+  const turn = asRecord(record?.turn);
+  const status = toTurnStatus(getString(turn, "status"));
+  const error = toTurnError(turn?.error);
+  const duration = turn?.durationMs;
+  return {
+    type: "turn_completed",
+    sessionKey,
+    ...(getString(turn, "id") ? { turnId: getString(turn, "id") } : {}),
+    status,
+    ...(error ? { error } : {}),
+    ...(typeof duration === "number" ? { durationMs: duration } : {}),
+  };
+}
+
+export function toTurnStatus(value: string | undefined): AgentTurnStatus {
+  switch (value) {
+    case "completed":
+    case "interrupted":
+    case "failed":
+    case "inProgress":
+      return value;
+    default:
+      return "failed";
+  }
+}
+
+function toTurnError(value: unknown): AgentTurnError | undefined {
+  const record = asRecord(value);
+  const message = getString(record, "message");
+  if (!message) return undefined;
+  return {
+    message,
+    ...(record?.codexErrorInfo !== undefined && record.codexErrorInfo !== null ? { codexErrorInfo: record.codexErrorInfo } : {}),
+    ...(getString(record, "additionalDetails") ? { additionalDetails: getString(record, "additionalDetails") } : {}),
+  };
+}
+
+export function toMcpElicitationSchema(value: unknown): AgentMcpElicitationSchema | undefined {
+  const record = asRecord(value);
+  const properties = asRecord(record?.properties);
+  if (record?.type !== "object" || !properties) return undefined;
+  const normalized: Record<string, AgentMcpElicitationFieldSchema> = {};
+  for (const [name, schemaValue] of Object.entries(properties)) {
+    const field = toMcpElicitationFieldSchema(schemaValue);
+    if (!field) return undefined;
+    normalized[name] = field;
+  }
+  return {
+    type: "object",
+    properties: normalized,
+    ...(Array.isArray(record.required)
+      ? { required: record.required.filter((name): name is string => typeof name === "string") }
+      : {}),
+  };
+}
+
+function toMcpElicitationFieldSchema(value: unknown): AgentMcpElicitationFieldSchema | undefined {
+  const record = asRecord(value);
+  const type = getString(record, "type");
+  if (type !== "string" && type !== "number" && type !== "integer" && type !== "boolean" && type !== "array") return undefined;
+  const oneOf = Array.isArray(record?.oneOf) ? record.oneOf.map(asRecord).filter(Boolean) as Record<string, unknown>[] : [];
+  const items = asRecord(record?.items);
+  const itemOneOf = Array.isArray(items?.oneOf) ? items.oneOf.map(asRecord).filter(Boolean) as Record<string, unknown>[] : [];
+  const enumValues = Array.isArray(record?.enum)
+    ? record.enum
+    : oneOf.length > 0
+      ? oneOf.map((option) => option.const)
+      : undefined;
+  const enumNames = Array.isArray(record?.enumNames)
+    ? record.enumNames.filter((name): name is string => typeof name === "string")
+    : oneOf.length > 0
+      ? oneOf.map((option) => getString(option, "title") ?? String(option.const))
+      : undefined;
+  const itemEnum = Array.isArray(items?.enum)
+    ? items.enum
+    : itemOneOf.length > 0
+      ? itemOneOf.map((option) => option.const)
+      : undefined;
+  const result: AgentMcpElicitationFieldSchema = {
+    type,
+    ...(getString(record, "title") ? { title: getString(record, "title") } : {}),
+    ...(getString(record, "description") ? { description: getString(record, "description") } : {}),
+    ...(record?.default !== undefined ? { default: record.default } : {}),
+    ...(typeof record?.minLength === "number" ? { minLength: record.minLength } : {}),
+    ...(typeof record?.maxLength === "number" ? { maxLength: record.maxLength } : {}),
+    ...(typeof record?.minimum === "number" ? { minimum: record.minimum } : {}),
+    ...(typeof record?.maximum === "number" ? { maximum: record.maximum } : {}),
+    ...(isMcpStringFormat(getString(record, "format")) ? { format: getString(record, "format") as AgentMcpElicitationFieldSchema["format"] } : {}),
+    ...(enumValues ? { enum: enumValues } : {}),
+    ...(enumNames ? { enumNames } : {}),
+    ...(items ? { items: { ...(getString(items, "type") ? { type: getString(items, "type") } : {}), ...(itemEnum ? { enum: itemEnum } : {}) } } : {}),
+    ...(typeof record?.minItems === "number" ? { minItems: record.minItems } : {}),
+    ...(typeof record?.maxItems === "number" ? { maxItems: record.maxItems } : {}),
+  };
+  if (type === "array" && !result.items?.enum) return undefined;
+  return result;
+}
+
+function isMcpStringFormat(value: string | undefined): boolean {
+  return value === "email" || value === "uri" || value === "date" || value === "date-time";
+}
+
+export function applyThreadSettings(status: AgentSessionStatus, value: unknown): void {
+  const settings = asRecord(value);
+  if (!settings) return;
+  status.model = getString(settings, "model") ?? status.model;
+  status.modelProvider = getString(settings, "modelProvider") ?? status.modelProvider;
+  status.reasoningEffort = getString(settings, "effort") ?? status.reasoningEffort;
+  status.approvalPolicy = summarizeUnknown(settings.approvalPolicy) ?? status.approvalPolicy;
+  status.approvalsReviewer = getString(settings, "approvalsReviewer") ?? status.approvalsReviewer;
+  status.sandboxPolicy = summarizeUnknown(settings.sandboxPolicy) ?? status.sandboxPolicy;
 }
 
 export function toTokenBreakdown(record: Record<string, unknown> | undefined): AgentTokenBreakdown | undefined {
@@ -160,11 +283,41 @@ export function getNumber(record: Record<string, unknown>, key: string): number 
   return typeof value === "number" ? value : undefined;
 }
 
-export function userInputPayload(text: string, images: AgentImageInput[] | undefined): unknown[] {
+export function userInputPayload(
+  text: string,
+  attachments: AgentInputAttachment[] | undefined,
+  legacyImages?: AgentImageInput[],
+): unknown[] {
   const input: unknown[] = [{ type: "text", text, text_elements: [] }];
-  // Captions stay in the text prompt; Codex localImage items only need paths.
-  for (const image of images ?? []) {
-    input.push({ type: "localImage", path: image.path });
+  for (const attachment of attachments ?? []) {
+    switch (attachment.type) {
+      case "image":
+        input.push({ type: "image", url: attachment.url });
+        break;
+      case "localImage":
+        input.push({ type: "localImage", path: attachment.path });
+        break;
+      case "audio":
+        input.push({ type: "audio", url: attachment.url });
+        break;
+      case "localAudio":
+        input.push({ type: "localAudio", path: attachment.path });
+        break;
+      case "skill":
+        input.push({ type: "skill", name: attachment.name, path: attachment.path });
+        break;
+      case "mention":
+        input.push({ type: "mention", name: attachment.name, path: attachment.path });
+        break;
+    }
+  }
+  // Captions stay in the text prompt. Legacy images are appended after ordered
+  // attachments so tasks persisted by older relay builds remain resumable.
+  const structuredLocalImages = new Set((attachments ?? [])
+    .filter((attachment): attachment is Extract<AgentInputAttachment, { type: "localImage" }> => attachment.type === "localImage")
+    .map((attachment) => attachment.path));
+  for (const image of legacyImages ?? []) {
+    if (!structuredLocalImages.has(image.path)) input.push({ type: "localImage", path: image.path });
   }
   return input;
 }

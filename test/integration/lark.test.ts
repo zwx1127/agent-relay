@@ -308,6 +308,25 @@ describe("lark adapter", () => {
     expect(channel.resourceDownloads).toEqual([]);
   });
 
+  test("routes Lark audio resources and downloads them as message files", async () => {
+    const channel = new FakeLarkChannel();
+    channel.useRawClient();
+    channel.resources.set("audio_key", Buffer.from([1, 2, 3]));
+    const adapter = adapterWith(channel);
+    const received: unknown[] = [];
+    await adapter.start(async (message) => { received.push(message); });
+    await channel.handlers.message?.(normalizedMessage({
+      content: "transcribe",
+      rawContentType: "audio",
+      resources: [{ type: "audio", fileKey: "audio_key", fileName: "voice.ogg" }],
+    }));
+    const file = await adapter.downloadFile("audio_key", { kind: "file", messageId: "om_in" });
+
+    expect(received).toContainEqual(expect.objectContaining({ kind: "audio", caption: "transcribe", audio: { fileId: "audio_key", fileName: "voice.ogg" } }));
+    expect([...new Uint8Array(file.bytes)]).toEqual([1, 2, 3]);
+    expect(channel.messageResourceDownloads).toContainEqual({ messageId: "om_in", fileKey: "audio_key", type: "file" });
+  });
+
   test("falls back to channel resource downloads without message context", async () => {
     const channel = new FakeLarkChannel();
     channel.resources.set("img_key", Buffer.from([4, 5, 6]));

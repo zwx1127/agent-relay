@@ -110,6 +110,10 @@ export class SQLiteStore implements RelayStore {
     this.repositories.transcripts.append(event);
   }
 
+  clearTranscript(scopeKey: ConversationId, workspaceName: string): void {
+    this.repositories.transcripts.clear(scopeKey, workspaceName);
+  }
+
   latestTranscriptEvent(scopeKey: ConversationId, workspaceName: string, role: TranscriptRole): TranscriptEvent | undefined {
     return this.repositories.transcripts.latest(scopeKey, workspaceName, role);
   }
@@ -146,6 +150,10 @@ export class SQLiteStore implements RelayStore {
 
   deletePagedOutput(token: string): void {
     this.repositories.pagedOutputs.delete(token);
+  }
+
+  deletePagedOutputsForSession(sessionKey: string): void {
+    this.repositories.pagedOutputs.deleteForSession(sessionKey);
   }
 
   prunePagedOutputs(now = Date.now()): void {

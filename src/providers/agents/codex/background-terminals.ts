@@ -17,9 +17,19 @@ export class BackgroundTerminalTracker {
 
   list(): AgentBackgroundTerminalSummary[] {
     return Array.from(this.terminals.values()).map((terminal) => ({
+      itemId: terminal.callId,
+      processId: terminal.key,
       commandDisplay: terminal.commandDisplay,
       recentChunks: [...terminal.recentChunks],
     }));
+  }
+
+  recentLines(itemId: string, processId: string): string[] {
+    const direct = this.terminals.get(processId);
+    const terminal = direct?.callId === itemId
+      ? direct
+      : Array.from(this.terminals.values()).find((candidate) => candidate.callId === itemId || candidate.key === processId);
+    return terminal ? [...terminal.recentChunks] : [];
   }
 
   started(params: Record<string, unknown> | undefined): void {

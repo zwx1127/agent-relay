@@ -48,7 +48,8 @@ Scan the Telegram QR code below to join the project community group.
 
 - Remote-control local Codex sessions from Telegram or Lark/Feishu.
 - Select, create, browse, and delete workspaces from chat.
-- Send normal prompts, images, files, and follow-up steering messages.
+- Send normal prompts, images, voice/audio, file mentions, skills, and follow-up steering messages.
+- Follow reasoning summaries, plan progress, tools, file changes, warnings, and diffs in one editable activity card; long details remain available for 24 hours.
 - Answer Codex questions and approve actions inline.
 - Use direct chats or allowed group chats; group messages are handled only when they mention the bot.
 - Use common Codex workflows such as review, Plan mode, goals, resume, fork, side conversations, interrupt, and background terminal cleanup.
@@ -85,7 +86,7 @@ Send `/relay` to the bot, select or create a workspace, then send a normal messa
 - Bun 1.3 or newer.
 - Git.
 - A local `codex` CLI on `PATH`, or a full path set with `CODEX_BIN`.
-- A Codex CLI version that supports `codex app-server --listen stdio://`.
+- Codex CLI 0.145.0 or newer with `codex app-server --listen stdio://`.
 - A Telegram bot token, or a Lark/Feishu self-built app.
 
 ## Daily usage
@@ -105,6 +106,8 @@ Common commands:
 | `/side <prompt>` | Ask in a temporary side conversation. |
 | `/interrupt` | Stop the active turn. |
 | `/ps` | List Codex background terminals. |
+| `/skills [search]` | Select a Codex skill, then reply with the task. |
+| `/mention [search]` | Select a workspace file or directory, then reply with the task. |
 | `/stop` | Ask Codex to clean background terminals. |
 
 In group chats, mention the bot when sending text, images, files, or slash commands. Keep normal bot mentions as separate tokens, such as `/relay @relay_bot` or `@relay_bot review this change`. Telegram's native `/relay@relay_bot` command form is also accepted. Use `ALLOWED_CONVERSATION_IDS` when a bot should only respond in specific groups.

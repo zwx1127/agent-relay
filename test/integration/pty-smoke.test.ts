@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
+const unixOnlyTest = process.platform === "win32" ? test.skip : test;
+
 describe("bun pty smoke", () => {
-  test("writes to and reads from /bin/cat", async () => {
+  unixOnlyTest("writes to and reads from /bin/cat", async () => {
     let output = "";
     const proc = Bun.spawn(["/bin/cat"], {
       terminal: {

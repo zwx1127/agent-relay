@@ -61,7 +61,7 @@ export class TaskCoordinator {
         scopeKey: scope.scopeKey,
         workspaceName: workspace.name,
         text,
-        input: input && input.images?.length ? input : undefined,
+        input: hasStructuredInput(input) ? input : undefined,
         status: "waiting",
         userMessageId,
       });
@@ -76,7 +76,7 @@ export class TaskCoordinator {
       scopeKey: scope.scopeKey,
       workspaceName: workspace.name,
       text,
-      input: input && input.images?.length ? input : undefined,
+      input: hasStructuredInput(input) ? input : undefined,
       status: shouldQueue ? "queued" : "running",
       userMessageId,
     });
@@ -115,13 +115,13 @@ export class TaskCoordinator {
     await this.syncTaskReaction(task.id);
   }
 
-  async completeAndDispatchNext(sessionKeyValue: string, turnId: string | undefined): Promise<void> {
+  async completeAndDispatchNext(sessionKeyValue: string, turnId: string | undefined, terminalStatus: "done" | "interrupted" | "failed" = "done"): Promise<void> {
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) return;
     // Turn completion may race with local task updates, so completion first tries
     // the exact turn id and then falls back to the current active task.
     const completed = turnId
-      ? this.deps.store.updateTasksByTurn(parsed.scopeKey, parsed.workspaceName, turnId, ["running", "blocked"], "done")
+      ? this.deps.store.updateTasksByTurn(parsed.scopeKey, parsed.workspaceName, turnId, ["running", "blocked"], terminalStatus)
       : [];
     if (completed.length > 0) {
       for (const task of completed) {
@@ -131,14 +131,14 @@ export class TaskCoordinator {
     } else {
       const active = this.deps.store.activeTask(parsed.scopeKey, parsed.workspaceName);
       if (active && active.status !== "waiting" && (!turnId || !active.turnId || active.turnId === turnId)) {
-        this.updateTaskStatus(active.id, "done");
+        this.updateTaskStatus(active.id, terminalStatus);
         await this.syncTaskReaction(active.id);
       }
     }
     const workspace = this.deps.currentWorkspace(parsed.scopeKey);
     if (!workspace || workspace.name !== parsed.workspaceName) return;
     const status = this.deps.agent.getStatus(sessionKeyValue);
-    if (status?.waitingForApproval || status?.waitingForUserInput || status?.activeTurnId) return;
+    if (!status?.running || status.waitingForApproval || status.waitingForUserInput || status.activeTurnId) return;
     // Waiting tasks have already been sent to Codex as steering input. Do not
     // start queued work until Codex has acknowledged or completed them.
     if (this.deps.store.countTasks(parsed.scopeKey, parsed.workspaceName, ["waiting"]) > 0) return;
@@ -220,6 +220,7 @@ export class TaskCoordinator {
       session_key: key,
       text_len: input.text.length,
       image_count: input.images?.length ?? 0,
+      attachment_count: input.attachments?.length ?? 0,
     });
     this.deps.logger.debug("router.user_input_text", {
       conversation_id: scope.conversationId,
@@ -243,6 +244,7 @@ export class TaskCoordinator {
       const mode = this.deps.store.getCollaborationMode(key);
       const sendOptions: AgentSendOptions = {
         collaborationMode: mode,
+        ...(input.attachments?.length ? { attachments: input.attachments } : {}),
         ...(input.images?.length ? { images: input.images } : {}),
       };
       result = await this.deps.agent.send(key, input.text, Object.keys(sendOptions).length > 0 ? sendOptions : undefined);
@@ -302,4 +304,8 @@ export class TaskCoordinator {
       turn_id: turnId,
     });
   }
+}
+
+function hasStructuredInput(input: AgentTaskInput | undefined): input is AgentTaskInput {
+  return Boolean(input && ((input.attachments?.length ?? 0) > 0 || (input.images?.length ?? 0) > 0));
 }

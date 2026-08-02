@@ -105,6 +105,21 @@ describe("telegram adapter", () => {
     });
   });
 
+  test("routes voice, audio, and audio documents as audio", async () => {
+    const adapter = new TelegramAdapter("token", async () => Response.json({ ok: true, result: [] }));
+    const voice = (adapter as any).toInboundMessage({
+      update_id: 5,
+      message: { message_id: 9, date: 1, chat: { id: 2 }, from: { id: 3 }, voice: { file_id: "voice", duration: 4, file_size: 12 } },
+    });
+    const document = (adapter as any).toInboundMessage({
+      update_id: 6,
+      message: { message_id: 10, date: 1, caption: "transcribe", chat: { id: 2 }, from: { id: 3 }, document: { file_id: "audio-doc", file_name: "clip.mp3", mime_type: "audio/mpeg" } },
+    });
+
+    expect(voice).toMatchObject({ kind: "audio", audio: { fileId: "voice", fileName: "voice-9.ogg", mimeType: "audio/ogg", fileSize: 12 }, durationSeconds: 4 });
+    expect(document).toMatchObject({ kind: "audio", caption: "transcribe", audio: { fileId: "audio-doc", fileName: "clip.mp3", mimeType: "audio/mpeg" } });
+  });
+
   test("marks and strips telegram bot mentions in group text", async () => {
     const adapter = new TelegramAdapter("token", async () => Response.json({ ok: true, result: [] }), noopLogger, {
       botUsername: "relay_bot",

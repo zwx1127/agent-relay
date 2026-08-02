@@ -205,6 +205,10 @@ export class TranscriptRepository {
       }
       : undefined;
   }
+
+  clear(scopeKey: ConversationId, workspaceName: string): void {
+    this.db.query("DELETE FROM transcript_events WHERE scope_key = ? AND workspace_name = ?").run(String(scopeKey), workspaceName);
+  }
 }
 
 export class PromptRepository {
@@ -317,6 +321,10 @@ export class PagedOutputRepository {
 
   delete(token: string): void {
     this.db.query("DELETE FROM paged_outputs WHERE token = ?").run(token);
+  }
+
+  deleteForSession(sessionKey: string): void {
+    this.db.query("DELETE FROM paged_outputs WHERE session_key = ?").run(sessionKey);
   }
 
   prune(now = Date.now()): void {

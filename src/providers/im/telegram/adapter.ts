@@ -64,6 +64,21 @@ interface TelegramUpdate {
       mime_type?: string;
       file_size?: number;
     };
+    voice?: {
+      file_id: string;
+      file_unique_id?: string;
+      duration: number;
+      mime_type?: string;
+      file_size?: number;
+    };
+    audio?: {
+      file_id: string;
+      file_unique_id?: string;
+      duration: number;
+      file_name?: string;
+      mime_type?: string;
+      file_size?: number;
+    };
     chat: { id: number; type?: "private" | "group" | "supergroup" | "channel" };
     message_thread_id?: number;
     from?: { id: number };
@@ -171,20 +186,21 @@ export class TelegramAdapter implements ImAdapter {
             has_text: Boolean(update.message?.text),
             has_photo: Boolean(update.message?.photo?.length),
             has_document: Boolean(update.message?.document),
+            has_audio: Boolean(update.message?.audio || update.message?.voice),
             has_from: Boolean(update.message?.from || update.callback_query?.from),
             has_callback_query: Boolean(update.callback_query),
             has_callback_data: Boolean(update.callback_query?.data),
           });
           continue;
         }
-        this.logger.debug(inbound.kind === "message" ? "telegram.message_received" : inbound.kind === "media" ? "telegram.media_received" : inbound.kind === "file" ? "telegram.file_received" : "telegram.callback_query_received", {
+        this.logger.debug(inbound.kind === "message" ? "telegram.message_received" : inbound.kind === "media" ? "telegram.media_received" : inbound.kind === "audio" ? "telegram.audio_received" : inbound.kind === "file" ? "telegram.file_received" : "telegram.callback_query_received", {
           update_id: update.update_id,
           message_id: inbound.kind === "message" ? inbound.id : inbound.messageId,
           conversation_id: inbound.conversationId,
           user_id: inbound.userId,
           kind: inbound.kind,
-          text_len: inbound.kind === "message" ? inbound.text.length : inbound.kind === "media" || inbound.kind === "file" ? inbound.caption?.length ?? 0 : inbound.data.length,
-          message_text: inbound.kind === "message" ? inbound.text : inbound.kind === "media" || inbound.kind === "file" ? inbound.caption ?? "" : inbound.data,
+          text_len: inbound.kind === "message" ? inbound.text.length : inbound.kind === "media" || inbound.kind === "audio" || inbound.kind === "file" ? inbound.caption?.length ?? 0 : inbound.data.length,
+          message_text: inbound.kind === "message" ? inbound.text : inbound.kind === "media" || inbound.kind === "audio" || inbound.kind === "file" ? inbound.caption ?? "" : inbound.data,
         });
         try {
           await onMessage(inbound);
@@ -405,6 +421,32 @@ export class TelegramAdapter implements ImAdapter {
           ...(typeof photo.file_size === "number" ? { fileSize: photo.file_size } : {}),
         })),
         ...(message.media_group_id ? { mediaGroupId: message.media_group_id } : {}),
+        ...(message.reply_to_message ? { replyToMessageId: String(message.reply_to_message.message_id) } : {}),
+        date: message.date,
+      };
+    }
+
+    const audio = message?.voice ?? message?.audio ?? (message?.document?.mime_type?.startsWith("audio/") ? message.document : undefined);
+    if (audio && message?.from) {
+      const mention = mentionContextForTelegram(message.caption ?? "", message.caption_entities, message.chat.type, this.botUsername);
+      const topic = telegramTopic(message.message_thread_id ?? message.reply_to_message?.message_thread_id);
+      return {
+        kind: "audio",
+        id: String(message.message_id),
+        messageId: String(message.message_id),
+        conversationId: String(message.chat.id),
+        userId: String(message.from.id),
+        ...(mention.text ? { caption: mention.text } : {}),
+        ...mention.context,
+        ...(topic ? { topic } : {}),
+        audio: {
+          fileId: audio.file_id,
+          ...(audio.file_unique_id ? { fileUniqueId: audio.file_unique_id } : {}),
+          ...("file_name" in audio && audio.file_name ? { fileName: audio.file_name } : message.voice ? { fileName: `voice-${message.message_id}.ogg` } : {}),
+          ...(audio.mime_type ? { mimeType: audio.mime_type } : message.voice ? { mimeType: "audio/ogg" } : {}),
+          ...(typeof audio.file_size === "number" ? { fileSize: audio.file_size } : {}),
+        },
+        ...("duration" in audio && typeof audio.duration === "number" ? { durationSeconds: audio.duration } : {}),
         ...(message.reply_to_message ? { replyToMessageId: String(message.reply_to_message.message_id) } : {}),
         date: message.date,
       };

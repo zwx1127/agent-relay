@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { codexAppServerSpawnCommand, formatCodexSpawnError } from "../../src/providers/agents/codex/spawn.ts";
+import { codexAppServerSpawnCommand, codexVersionSpawnCommand, formatCodexSpawnError, isCodexVersionSupported, parseCodexVersion } from "../../src/providers/agents/codex/spawn.ts";
 
 describe("codex app-server spawn command", () => {
   test("keeps direct spawn behavior on non-Windows platforms", () => {
@@ -9,6 +9,27 @@ describe("codex app-server spawn command", () => {
       resolvedCodexBin: "codex",
     });
     expect(codexAppServerSpawnCommand("codex", {}, "linux").windowsVerbatimArguments).toBeUndefined();
+  });
+
+  test("uses the same resolved binary for version preflight", () => {
+    const shim = String.raw`C:\Users\Admin\AppData\Roaming\npm\codex.cmd`;
+    const command = codexVersionSpawnCommand(shim, { ComSpec: "cmd.exe" }, "win32", (path) => path === shim);
+
+    expect(command).toEqual({
+      command: "cmd.exe",
+      args: ["/d", "/s", "/c", String.raw`call "C:\Users\Admin\AppData\Roaming\npm\codex.cmd" --version`],
+      resolvedCodexBin: shim,
+      windowsVerbatimArguments: true,
+    });
+  });
+
+  test("parses Codex versions and enforces the 0.145.0 floor", () => {
+    expect(parseCodexVersion("codex-cli 0.145.0")).toBe("0.145.0");
+    expect(parseCodexVersion("codex 1.2.3-beta.1")).toBe("1.2.3");
+    expect(parseCodexVersion("unknown")).toBeUndefined();
+    expect(isCodexVersionSupported("0.144.99")).toBe(false);
+    expect(isCodexVersionSupported("0.145.0")).toBe(true);
+    expect(isCodexVersionSupported("1.0.0")).toBe(true);
   });
 
   test("resolves a Windows cmd shim from PATH and launches it through cmd.exe", () => {
