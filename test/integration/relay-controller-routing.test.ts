@@ -266,7 +266,10 @@ describe("relay controller routing and output", () => {
 
     expect(adapter.sent.map((message) => message.text)).toEqual(["before", "after"]);
     expect(adapter.edited).toEqual([]);
-    expect(adapter.reactions).toEqual([{ conversationId: "1", messageId: "1", emoji: "✍" }]);
+    expect(adapter.reactions).toEqual([
+      { conversationId: "1", messageId: "1", emoji: "🫡", options: { isBig: true } },
+      { conversationId: "1", messageId: "1", emoji: "✍" },
+    ]);
     expect(agent.sent.at(-1)).toEqual(sentPrompt("follow up"));
   });
 

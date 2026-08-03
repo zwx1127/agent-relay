@@ -4,7 +4,7 @@ import { parseChatScopeKey } from "../domain/scope.ts";
 import type { Logger } from "../domain/logger.ts";
 import { isRealDirectory } from "../domain/workspace.ts";
 import type { AgentDriver, AgentSendOptions, AgentSessionStatus, AgentTaskInput } from "../ports/agent.ts";
-import type { ImAdapter, SendMessageOptions } from "../ports/im.ts";
+import type { ImAdapter, MessageReactionOptions, SendMessageOptions } from "../ports/im.ts";
 import type { RelayStore } from "../storage/store.ts";
 import type { RelayTask, WorkspaceRecord } from "./types.ts";
 import { reactionForTaskStatus, taskInputFromTask, transcriptTextForInput } from "./tasks/input.ts";
@@ -16,9 +16,9 @@ export type TaskSubmitPreference = "auto" | "immediate" | "queue";
 /**
  * Coordinates relay-local task state with provider turn state.
  *
- * The store is the source of truth for user-visible task reactions, while the
- * agent status determines whether an input starts a new turn, steers a running
- * turn, or must wait behind a user/approval prompt.
+ * New submissions receive a reaction before agent startup. Once the task exists,
+ * the store is the source of truth for later reactions, while the agent status
+ * determines whether the input starts a turn, steers it, or waits behind a gate.
  */
 export interface TaskCoordinatorDeps {
   store: RelayStore;
@@ -46,10 +46,53 @@ export class TaskCoordinator {
       return;
     }
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
-    const status = await this.deps.ensureAgentStarted(scope.scopeKey, workspace);
-    if (await this.sendWaitingPromptNotice(scope.scopeKey, status)) return;
+
+    const existingStatus = this.deps.agent.getStatus(sessionKey(scope.scopeKey, workspace.name));
+    if (existingStatus) {
+      if (await this.sendWaitingPromptNotice(scope.scopeKey, existingStatus)) return;
+      if (preference === "immediate" && existingStatus.activeTurnId) {
+        await this.deps.sendRendered(scope.scopeKey, messageWithTitle("Codex is busy.", "Wait for the current turn before running this command."));
+        return;
+      }
+    }
+
+    const receiptReactionApplied = await this.trySetMessageReaction({
+      conversationId: scope.conversationId,
+      messageId: userMessageId,
+      emoji: "🫡",
+      phase: "received",
+      options: { isBig: true },
+    });
+    let status: AgentSessionStatus;
+    try {
+      status = await this.deps.ensureAgentStarted(scope.scopeKey, workspace);
+    } catch (error) {
+      await this.trySetMessageReaction({
+        conversationId: scope.conversationId,
+        messageId: userMessageId,
+        emoji: "😱",
+        phase: "status",
+        status: "failed",
+      });
+      throw error;
+    }
+    if (await this.sendWaitingPromptNotice(scope.scopeKey, status)) {
+      await this.trySetMessageReaction({
+        conversationId: scope.conversationId,
+        messageId: userMessageId,
+        emoji: "🤔",
+        phase: "status",
+        status: "blocked",
+      });
+      return;
+    }
     const busy = Boolean(status.activeTurnId);
     if (preference === "immediate" && busy) {
+      await this.trySetMessageReaction({
+        conversationId: scope.conversationId,
+        messageId: userMessageId,
+        phase: "status",
+      });
       await this.deps.sendRendered(scope.scopeKey, messageWithTitle("Codex is busy.", "Wait for the current turn before running this command."));
       return;
     }
@@ -65,7 +108,7 @@ export class TaskCoordinator {
         status: "waiting",
         userMessageId,
       });
-      await this.syncTaskReaction(task.id);
+      if (!receiptReactionApplied) await this.syncTaskReaction(task.id);
       await this.sendToAgent(scope.scopeKey, workspace, taskInput, userMessageId, task);
       return;
     }
@@ -81,7 +124,7 @@ export class TaskCoordinator {
       userMessageId,
     });
     if (shouldQueue) {
-      await this.syncTaskReaction(task.id);
+      if (!receiptReactionApplied) await this.syncTaskReaction(task.id);
       return;
     }
     await this.runTask(workspace, task);
@@ -278,17 +321,48 @@ export class TaskCoordinator {
   private async syncTaskReaction(taskId: number): Promise<void> {
     const task = this.deps.store.getTask(taskId);
     if (!task?.userMessageId) return;
-    if (!this.deps.adapter.setMessageReaction) return;
+    await this.trySetMessageReaction({
+      conversationId: task.conversationId,
+      messageId: task.userMessageId,
+      emoji: reactionForTaskStatus(task.status),
+      phase: "status",
+      taskId: task.id,
+      status: task.status,
+    });
+  }
+
+  private async trySetMessageReaction(input: {
+    conversationId: ConversationId;
+    messageId?: MessageId;
+    emoji?: string;
+    phase: "received" | "status";
+    taskId?: number;
+    status?: RelayTask["status"];
+    options?: MessageReactionOptions;
+  }): Promise<boolean> {
+    if (!input.messageId || !this.deps.adapter.setMessageReaction) return false;
     try {
-      await this.deps.adapter.setMessageReaction(task.conversationId, task.userMessageId, reactionForTaskStatus(task.status));
+      await this.deps.adapter.setMessageReaction(input.conversationId, input.messageId, input.emoji, input.options);
+      this.deps.logger.info("router.task_reaction_applied", {
+        conversation_id: input.conversationId,
+        message_id: input.messageId,
+        emoji: input.emoji,
+        phase: input.phase,
+        task_id: input.taskId,
+        status: input.status,
+      });
+      return true;
     } catch (error) {
       this.deps.logger.warn("router.task_reaction_failed", {
-        conversation_id: task.conversationId,
-        task_id: task.id,
-        message_id: task.userMessageId,
-        status: task.status,
+        conversation_id: input.conversationId,
+        message_id: input.messageId,
+        emoji: input.emoji,
+        phase: input.phase,
+        task_id: input.taskId,
+        status: input.status,
         error: error instanceof Error ? error : new Error(String(error)),
       });
+      return false;
     }
   }
 

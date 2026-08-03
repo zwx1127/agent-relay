@@ -20,6 +20,11 @@ export interface ImAdapterCapabilities {
   fileUpload: boolean;
 }
 
+export interface MessageReactionOptions {
+  /** Ask providers that support it to emphasize the reaction animation. */
+  isBig?: boolean;
+}
+
 export interface ImAdapter {
   readonly providerId: ProviderId;
   /** Capabilities describe provider support; optional methods are still checked at call sites. */
@@ -33,6 +38,6 @@ export interface ImAdapter {
   deleteMessage?(conversationId: ConversationId, messageId: MessageId): Promise<void>;
   answerCallbackQuery?(callbackQueryId: string, text?: string): Promise<void>;
   sendChatAction?(conversationId: ConversationId, action?: "typing", options?: { topic?: ImTopicContext }): Promise<void>;
-  setMessageReaction?(conversationId: ConversationId, messageId: MessageId, emoji?: string): Promise<void>;
+  setMessageReaction?(conversationId: ConversationId, messageId: MessageId, emoji?: string, options?: MessageReactionOptions): Promise<void>;
   downloadFile?(fileId: string, options?: DownloadFileOptions): Promise<DownloadedFile>;
 }

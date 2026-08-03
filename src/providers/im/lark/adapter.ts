@@ -17,6 +17,7 @@ import type {
   EditMessageTextOptions,
   InboundMessage,
   ImAdapter,
+  MessageReactionOptions,
   SendFileOptions,
   SendMessageOptions,
   SendMessageResult,
@@ -193,7 +194,7 @@ export class LarkAdapter implements ImAdapter {
     return;
   }
 
-  async setMessageReaction(_conversationId: ConversationId, messageId: MessageId, emoji?: string): Promise<void> {
+  async setMessageReaction(_conversationId: ConversationId, messageId: MessageId, emoji?: string, _options: MessageReactionOptions = {}): Promise<void> {
     const key = String(messageId);
     const previous = this.reactionIds.get(key);
     if (previous && this.channel.removeReactionByEmoji) {

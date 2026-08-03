@@ -15,6 +15,7 @@ export interface GoalCommandDeps {
   commandSession(conversationId: ConversationId): Promise<{ workspace: WorkspaceRecord; status: AgentSessionStatus; key: string }>;
   requireCurrentWorkspace(conversationId: ConversationId): WorkspaceRecord;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: string | number }>;
+  refreshActivityContext(sessionKey: string): Promise<void>;
 }
 
 export class GoalCommandService {
@@ -59,16 +60,20 @@ export class GoalCommandService {
     switch (normalized.toLowerCase()) {
       case "pause": {
         const goal = await this.deps.agent.setThreadGoal(key, { status: "paused" });
+        await this.deps.refreshActivityContext(key);
         await this.deps.sendRendered(conversationId, formatGoalUpdatedMessage(goal));
         return;
       }
       case "resume": {
         const goal = await this.deps.agent.setThreadGoal(key, { status: "active" });
+        await this.deps.refreshActivityContext(key);
         await this.deps.sendRendered(conversationId, formatGoalUpdatedMessage(goal));
         return;
       }
       case "clear": {
-        await this.deps.sendRendered(conversationId, formatGoalClearedMessage(await this.deps.agent.clearThreadGoal(key)));
+        const cleared = await this.deps.agent.clearThreadGoal(key);
+        await this.deps.refreshActivityContext(key);
+        await this.deps.sendRendered(conversationId, formatGoalClearedMessage(cleared));
         return;
       }
     }
@@ -80,6 +85,7 @@ export class GoalCommandService {
       return;
     }
     const goal = await this.deps.agent.setThreadGoal(key, { objective: normalized, status: "active", tokenBudget: null });
+    await this.deps.refreshActivityContext(key);
     await this.deps.sendRendered(conversationId, formatGoalUpdatedMessage(goal));
   }
 
@@ -94,7 +100,9 @@ export class GoalCommandService {
     const objective = text.trim();
     validateGoalObjective(objective);
     if (!this.deps.agent.setThreadGoal) throw new Error("Agent driver does not support thread goals.");
-    await this.deps.sendRendered(conversationId, formatGoalUpdatedMessage(await this.deps.agent.setThreadGoal(key, { objective })));
+    const goal = await this.deps.agent.setThreadGoal(key, { objective });
+    await this.deps.refreshActivityContext(key);
+    await this.deps.sendRendered(conversationId, formatGoalUpdatedMessage(goal));
   }
 }
 

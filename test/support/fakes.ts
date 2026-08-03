@@ -1,7 +1,7 @@
 import { sessionKey } from "../../src/domain/session.ts";
 import type { ConversationId, MessageId } from "../../src/domain/ids.ts";
-import type { AgentBackgroundTerminalSummary, AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentFileSearchOptions, AgentFileSearchResult, AgentInterruptResult, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentSkillListOptions, AgentSkillSummary, AgentThreadGoal, AgentThreadGoalSetOptions, AgentThreadListOptions, AgentThreadSummary } from "../../src/ports/agent.ts";
-import type { EditMessageTextOptions, SendMessageOptions } from "../../src/ports/im.ts";
+import type { AgentBackgroundTerminalSummary, AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentDriverCapabilities, AgentFileSearchOptions, AgentFileSearchResult, AgentInterruptResult, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentSkillListOptions, AgentSkillSummary, AgentThreadGoal, AgentThreadGoalSetOptions, AgentThreadListOptions, AgentThreadSummary } from "../../src/ports/agent.ts";
+import type { EditMessageTextOptions, MessageReactionOptions, SendMessageOptions } from "../../src/ports/im.ts";
 
 export class FakeImAdapter {
   readonly providerId = "fake";
@@ -22,7 +22,7 @@ export class FakeImAdapter {
   deleted: Array<{ conversationId: ConversationId; messageId: MessageId }> = [];
   answered: Array<{ callbackQueryId: string; text?: string }> = [];
   chatActions: Array<{ conversationId: ConversationId; action?: "typing"; options?: { topic?: SendMessageOptions["topic"] } }> = [];
-  reactions: Array<{ conversationId: ConversationId; messageId: MessageId; emoji?: string }> = [];
+  reactions: Array<{ conversationId: ConversationId; messageId: MessageId; emoji?: string; options?: MessageReactionOptions }> = [];
   downloads = new Map<string, ArrayBuffer>();
   nextMessageId = 100;
   sendMessageDelayMs = 0;
@@ -83,13 +83,14 @@ export class FakeImAdapter {
     this.chatActions.push({ conversationId, action, ...(options ? { options } : {}) });
   }
 
-  async setMessageReaction(conversationId: ConversationId, messageId: MessageId, emoji?: string): Promise<void> {
+  async setMessageReaction(conversationId: ConversationId, messageId: MessageId, emoji?: string, options?: MessageReactionOptions): Promise<void> {
     if (this.failReaction) throw this.failReaction;
-    this.reactions.push({ conversationId, messageId, emoji });
+    this.reactions.push({ conversationId, messageId, emoji, ...(options ? { options } : {}) });
   }
 }
 
 export class FakeAgent implements AgentDriver {
+  capabilities?: Partial<AgentDriverCapabilities>;
   statuses = new Map<string, AgentSessionStatus>();
   sent: Array<{ key: string; text: string; options?: AgentSendOptions }> = [];
   stopped: string[] = [];
@@ -197,6 +198,8 @@ export class FakeAgent implements AgentDriver {
 
   async getThreadGoal(key: string): Promise<AgentThreadGoal | null> {
     this.goalGets.push(key);
+    const status = this.statuses.get(key);
+    if (status) status.threadGoal = this.goal;
     return this.goal;
   }
 
@@ -212,6 +215,8 @@ export class FakeAgent implements AgentDriver {
       createdAt: this.goal?.createdAt ?? 1,
       updatedAt: 2,
     };
+    const status = this.statuses.get(key);
+    if (status) status.threadGoal = this.goal;
     return this.goal;
   }
 
@@ -219,6 +224,8 @@ export class FakeAgent implements AgentDriver {
     this.goalClears.push(key);
     const cleared = Boolean(this.goal);
     this.goal = null;
+    const status = this.statuses.get(key);
+    if (status) status.threadGoal = null;
     return cleared;
   }
 

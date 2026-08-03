@@ -1,5 +1,5 @@
 import type { ConversationId, MessageId } from "../../../domain/ids.ts";
-import type { DownloadedFile, EditMessageTextOptions, InboundMessage, ImAdapter, SendFileOptions, SendMessageOptions, SendPhotoOptions } from "../../../ports/im.ts";
+import type { DownloadedFile, EditMessageTextOptions, InboundMessage, ImAdapter, MessageReactionOptions, SendFileOptions, SendMessageOptions, SendPhotoOptions } from "../../../ports/im.ts";
 import { splitForTelegram, splitHtmlForTelegram, splitRenderedForTelegram } from "../../../presentation/telegram/text.ts";
 import { noopLogger, type Logger } from "../../../domain/logger.ts";
 import { normalizeBotUsername, toTelegramInboundMessage, type TelegramUpdate } from "./inbound.ts";
@@ -296,12 +296,14 @@ export class TelegramAdapter implements ImAdapter {
     });
   }
 
-  async setMessageReaction(conversationId: ConversationId, messageId: MessageId, emoji?: string): Promise<void> {
-    await this.request("setMessageReaction", {
+  async setMessageReaction(conversationId: ConversationId, messageId: MessageId, emoji?: string, options: MessageReactionOptions = {}): Promise<void> {
+    const applied = await this.request<boolean>("setMessageReaction", {
       chat_id: conversationId,
       message_id: Number(messageId),
       reaction: emoji ? [{ type: "emoji", emoji }] : [],
+      ...(options.isBig ? { is_big: true } : {}),
     });
+    if (applied !== true) throw new Error("Telegram setMessageReaction did not confirm success");
   }
 
   async downloadFile(fileId: string): Promise<DownloadedFile> {

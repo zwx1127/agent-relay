@@ -43,6 +43,7 @@ describe("relay controller Codex prompts", () => {
     expect(adapter.edited.at(-1)?.text).toContain("Answered");
     expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
     expect(adapter.reactions).toEqual([
+      { conversationId: "1", messageId: "1", emoji: "🫡", options: { isBig: true } },
       { conversationId: "1", messageId: "1", emoji: "✍" },
       { conversationId: "1", messageId: "1", emoji: "🤔" },
       { conversationId: "1", messageId: "1", emoji: "✍" },
@@ -506,6 +507,7 @@ describe("relay controller Codex prompts", () => {
     expect(adapter.edited.at(-1)?.text).toContain("/tmp/demo");
     expect(adapter.edited.at(-1)?.text).toContain("bun test");
     expect(adapter.reactions).toEqual([
+      { conversationId: "1", messageId: "1", emoji: "🫡", options: { isBig: true } },
       { conversationId: "1", messageId: "1", emoji: "✍" },
       { conversationId: "1", messageId: "1", emoji: "🤔" },
       { conversationId: "1", messageId: "1", emoji: "✍" },

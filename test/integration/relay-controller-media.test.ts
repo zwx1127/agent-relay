@@ -142,7 +142,7 @@ describe("relay controller tasks and media", () => {
     expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(0);
     expect(store.listTasks(1, "demo", ["waiting"])).toHaveLength(0);
     expect(adapter.reactions).toEqual([
-      { conversationId: "1", messageId: "1", emoji: "🫡" },
+      { conversationId: "1", messageId: "1", emoji: "🫡", options: { isBig: true } },
       { conversationId: "1", messageId: "1", emoji: "✍" },
     ]);
   });
@@ -198,7 +198,7 @@ describe("relay controller tasks and media", () => {
     expect(store.getTask(1)?.status).toBe("failed");
     expect(adapter.sent.at(-1)?.text).toContain("Error:");
     expect(adapter.reactions).toEqual([
-      { conversationId: "1", messageId: "1", emoji: "🫡" },
+      { conversationId: "1", messageId: "1", emoji: "🫡", options: { isBig: true } },
       { conversationId: "1", messageId: "1", emoji: "😱" },
     ]);
   });
@@ -368,7 +368,7 @@ describe("relay controller tasks and media", () => {
 
     expect(store.listTasks(1, "demo", ["queued"])).toHaveLength(1);
     expect(adapter.sent).toEqual([]);
-    expect(adapter.reactions).toEqual([{ conversationId: "1", messageId: "88", emoji: "🫡" }]);
+    expect(adapter.reactions).toEqual([{ conversationId: "1", messageId: 88, emoji: "🫡", options: { isBig: true } }]);
   });
 
   test("prompt without a user message id does not send a status card or reaction", async () => {
@@ -414,6 +414,7 @@ describe("relay controller tasks and media", () => {
     expect(adapter.sent).toEqual([]);
     expect(adapter.edited).toEqual([]);
     expect(adapter.reactions).toEqual([
+      { conversationId: "1", messageId: "1", emoji: "🫡", options: { isBig: true } },
       { conversationId: "1", messageId: "1", emoji: "✍" },
       { conversationId: "1", messageId: "1", emoji: "😎" },
     ]);
@@ -433,6 +434,7 @@ describe("relay controller tasks and media", () => {
     expect(adapter.sent.at(-1)?.text).toContain("Error:");
     expect(adapter.edited).toEqual([]);
     expect(adapter.reactions).toEqual([
+      { conversationId: "1", messageId: "1", emoji: "🫡", options: { isBig: true } },
       { conversationId: "1", messageId: "1", emoji: "✍" },
       { conversationId: "1", messageId: "1", emoji: "😱" },
     ]);
@@ -690,47 +692,62 @@ describe("relay controller tasks and media", () => {
     expect(agent.sent.at(-1)?.options?.attachments).toEqual([{ type: "mention", name: "README.md", path: readme }]);
   });
 
-  test("activity stays in one editable card and exposes safe details and diff pages", async () => {
-    const { router, store, adapter, root } = fixture();
+  test("activity mirrors the Codex TUI hierarchy in one editable card", async () => {
+    const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
     store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
     store.bindConversation(1, "demo");
-    await router.handle(textMessage("work"));
+    agent.capabilities = { threadGoals: true };
+    agent.goal = { threadId: "thread-1", objective: "Ship safely", status: "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1 };
+    await router.handle(textMessage("/plan work"));
     const key = "codex:1:demo";
-    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: "r1", activity: { kind: "reasoning", summary: "r".repeat(500) } });
+    expect(agent.goalGets).toEqual([key]);
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: "r1", activity: { kind: "reasoning", summary: "Earlier reasoning", sectionIndex: 0 } });
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: "r1", activity: { kind: "reasoning", summary: `Current reasoning ${"r".repeat(500)}`, sectionIndex: 1 } });
     await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "plan", steps: Array.from({ length: 8 }, (_, index) => ({ step: `Step ${index} ${"x".repeat(180)}`, status: index === 2 ? "inProgress" as const : index < 2 ? "completed" as const : "pending" as const })) } });
     await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "diff", diff: "diff --git a/a b/a\n+changed" } });
-    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "goal", goal: { threadId: "thread-1", objective: "Ship safely", status: "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1 } } });
     await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "settings", changes: { model: "old" } } });
     await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "settings", changes: { model: "new" } } });
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "notice", level: "warning", title: "Hidden warning" } });
     for (let index = 0; index < 7; index++) {
       await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: `item-${index}`, activity: { kind: "item", category: "fileChange", label: `Changed ${index} ${"y".repeat(180)}`, status: "completed", files: [{ path: join(path, `${"long-".repeat(25)}${index}.ts`), kind: "update" }] } });
     }
     await waitForStreamFlush();
 
-    const card = adapter.sent.find((message) => message.text.startsWith("Codex activity"))!;
-    expect(adapter.sent.filter((message) => message.text.startsWith("Codex activity"))).toHaveLength(1);
+    const cards = adapter.sent.filter((message) => message.text.startsWith("● Codex"));
+    expect(cards).toHaveLength(1);
+    const card = cards[0]!;
     expect(card.text.length).toBeLessThanOrEqual(3000);
-    expect(card.text).toContain("Goal: active: Ship safely");
-    expect(card.text).toContain("model: new");
-    expect(card.text).not.toContain("model: old");
-    const buttons = card.options?.replyMarkup?.inline_keyboard.flat() ?? [];
-    expect(buttons.map((button) => button.text)).toEqual(["View details", "View diff"]);
-    const detailsToken = buttons[0]!.callback_data.split(":")[2]!;
-    const diffToken = buttons[1]!.callback_data.split(":")[2]!;
-    const detailsPage = store.getPagedOutput(detailsToken)!;
-    expect(detailsPage.text).not.toContain("raw stdout");
-    expect(detailsPage.expiresAt - Date.now()).toBeGreaterThan(23 * 60 * 60 * 1000);
-    expect(detailsPage.expiresAt - Date.now()).toBeLessThanOrEqual(24 * 60 * 60 * 1000);
-    expect(store.getPagedOutput(diffToken)?.text).toContain("+changed");
+    expect(card.text).toContain("Mode Plan · ");
+    expect(card.text).toContain("Goal Active · Ship safely");
+    expect(card.text).toContain("Current reasoning");
+    expect(card.text).not.toContain("Earlier reasoning");
+    expect(card.text).toContain("Plan 2/8");
+    for (let index = 0; index < 8; index++) expect(card.text).toContain(`Step ${index}`);
+    expect(card.text).toContain("Recent activity");
+    expect(card.text).not.toContain("Files");
+    expect(card.text).not.toContain("long-long-");
+    expect(card.text).not.toContain("model: new");
+    expect(card.text).not.toContain("Hidden warning");
+    expect(card.text).not.toContain("+changed");
+    expect(card.options?.replyMarkup).toEqual({ inline_keyboard: [] });
+    const boldLabels = (card.options?.entities ?? [])
+      .filter((entity) => entity.type === "bold")
+      .map((entity) => card.text.slice(entity.offset, entity.offset + entity.length));
+    expect(boldLabels).toEqual(["● Codex · Working", "Reasoning", "Plan 2/8", "Recent activity"]);
+
+    await router.handle(textMessage("/goal pause"));
+    expect(adapter.edited.at(-1)?.text).toContain("Goal Paused · Ship safely");
 
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: key, turnId: "turn-1", status: "completed", durationMs: 20 });
-    expect(adapter.edited.at(-1)?.text).toContain("Completed");
+    expect(adapter.edited.at(-1)?.text.startsWith("✓ Codex · Completed")).toBe(true);
+    expect(adapter.edited.at(-1)?.text).toContain("Mode Plan · 20ms");
+    expect(adapter.edited.at(-1)?.options.replyMarkup).toEqual({ inline_keyboard: [] });
     expect(store.latestTranscriptEvent("1", "demo", "system")?.text).toContain("[Activity done:");
   });
 
-  test("activity edit failures create one replacement card and lifecycle cleanup removes pages", async () => {
+  test("activity edit failures create one button-free replacement card", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -738,18 +755,100 @@ describe("relay controller tasks and media", () => {
     store.bindConversation(1, "demo");
     await router.handle(textMessage("work"));
     const key = "codex:1:demo";
-    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "diff", diff: "diff --git a/a b/a" } });
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: "command-1", activity: { kind: "item", category: "command", label: "Run tests", status: "completed" } });
     await waitForStreamFlush();
-    const first = adapter.sent.find((message) => message.text.startsWith("Codex activity"))!;
-    const diffToken = first.options!.replyMarkup!.inline_keyboard[0]![0]!.callback_data.split(":")[2]!;
+    const first = adapter.sent.find((message) => message.text.startsWith("● Codex"))!;
+    expect(first.options?.replyMarkup).toEqual({ inline_keyboard: [] });
     adapter.failEditMessage = new Error("cannot edit");
-    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "notice", level: "warning", title: "Important" } });
-    expect(adapter.sent.filter((message) => message.text.startsWith("Codex activity"))).toHaveLength(2);
-    expect(store.getPagedOutput(diffToken)).toBeDefined();
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: "command-1", activity: { kind: "item", category: "command", label: "Run tests", status: "failed", detail: "Exit 1" } });
+    const cards = adapter.sent.filter((message) => message.text.startsWith("● Codex"));
+    expect(cards).toHaveLength(2);
+    expect(cards.at(-1)?.text).toContain("× Run tests · Exit 1");
+    expect(cards.at(-1)?.options?.replyMarkup).toEqual({ inline_keyboard: [] });
 
     await router.handleAgentOutput({ type: "thread_lifecycle", sessionKey: key, threadId: "thread-1", action: "closed" });
-    expect(store.getPagedOutput(diffToken)).toBeUndefined();
+    expect(adapter.sent.filter((message) => message.text.startsWith("● Codex"))).toHaveLength(2);
   });
+
+  test("activity preserves every plan step while compacting oversized content", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("work"));
+    const key = "codex:1:demo";
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "plan", steps: Array.from({ length: 20 }, (_, index) => ({ step: `Step ${index} ${"x".repeat(400)}`, status: index === 3 ? "inProgress" as const : index < 3 ? "completed" as const : "pending" as const })) } });
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: "reasoning", activity: { kind: "reasoning", summary: "r".repeat(800), sectionIndex: 0 } });
+    for (let index = 0; index < 12; index++) {
+      await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: `activity-${index}`, activity: { kind: "item", category: "command", label: `Activity ${index} ${"y".repeat(400)}`, status: "completed" } });
+    }
+    await waitForStreamFlush();
+
+    const card = adapter.sent.find((message) => message.text.startsWith("● Codex"))!;
+    expect(card.text.length).toBeLessThanOrEqual(3000);
+    expect(card.text).toContain("Plan 3/20");
+    for (let index = 0; index < 20; index++) expect(card.text).toContain(`Step ${index}`);
+    expect(card.text).toContain("Recent activity");
+    expect(card.options?.replyMarkup).toEqual({ inline_keyboard: [] });
+  });
+
+  test("activity falls back to plan progress and the current step when step structure cannot fit", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("work"));
+    const key = "codex:1:demo";
+    await router.handleAgentOutput({
+      type: "activity",
+      sessionKey: key,
+      turnId: "turn-1",
+      activity: { kind: "plan", steps: Array.from({ length: 900 }, (_, index) => ({ step: `Current step ${index}`, status: index === 450 ? "inProgress" as const : index < 450 ? "completed" as const : "pending" as const })) },
+    });
+    await waitForStreamFlush();
+
+    const card = adapter.sent.find((message) => message.text.startsWith("● Codex"))!;
+    expect(card.text.length).toBeLessThanOrEqual(3000);
+    expect(card.text).toContain("Plan 450/900");
+    expect(card.text).toContain("→ Current step 450");
+    expect(card.text).not.toContain("Current step 899");
+  });
+
+  for (const scenario of [
+    { status: "interrupted" as const, header: "■ Codex · Interrupted" },
+    { status: "failed" as const, header: "× Codex · Failed", error: "Command failed safely" },
+  ]) {
+    test(`activity renders the ${scenario.status} TUI status without details controls`, async () => {
+      const { router, store, adapter, agent, root } = fixture();
+      const path = join(root, "demo");
+      mkdirSync(path);
+      store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+      store.bindConversation(1, "demo");
+      agent.capabilities = { threadGoals: true };
+      await router.handle(textMessage("work"));
+      const key = "codex:1:demo";
+      await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "plan", steps: [{ step: "Inspect state", status: "inProgress" }] } });
+      await waitForStreamFlush();
+      await router.handleAgentOutput({
+        type: "turn_completed",
+        sessionKey: key,
+        turnId: "turn-1",
+        status: scenario.status,
+        durationMs: 1250,
+        ...(scenario.error ? { error: { message: scenario.error } } : {}),
+      });
+
+      const final = adapter.edited.at(-1)!;
+      expect(final.text.startsWith(scenario.header)).toBe(true);
+      expect(final.text).toContain("Mode Default · 1.3s");
+      expect(final.text).toContain("Goal None");
+      if (scenario.error) expect(final.text).toContain(`Error · ${scenario.error}`);
+      else expect(final.text).not.toContain("Error ·");
+      expect(final.options.replyMarkup).toEqual({ inline_keyboard: [] });
+    });
+  }
 
   test("codex image output is sent as photo and copied to outgoing media", async () => {
     const { router, store, adapter, root } = fixture();

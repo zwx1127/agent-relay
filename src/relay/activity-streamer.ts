@@ -1,33 +1,37 @@
 import type { ConversationId, MessageId } from "../domain/ids.ts";
 import { parseSessionKey } from "../domain/session.ts";
 import type { Logger } from "../domain/logger.ts";
-import type { AgentActivity, AgentActivityEvent, AgentActivityFile, AgentPlanStep, AgentTurnStatus } from "../ports/agent.ts";
+import type {
+  AgentActivity,
+  AgentActivityEvent,
+  AgentActivityFile,
+  AgentCollaborationMode,
+  AgentPlanStep,
+  AgentThreadGoal,
+  AgentTurnStatus,
+} from "../ports/agent.ts";
 import type { EditMessageTextOptions, SendMessageOptions } from "../ports/im.ts";
-import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
+import { renderTelegramText, type RenderedTelegramText, type TelegramTextPart } from "../presentation/telegram/text.ts";
 import type { RelayStore } from "../storage/store.ts";
-import { shortToken } from "./ui/callback-data.ts";
-import { activityDetailsKeyboard } from "./ui/keyboards.ts";
 import {
-  ACTIVITY_FILES,
   ACTIVITY_ITEM_CHARS,
   ACTIVITY_ITEMS,
   ACTIVITY_MAX_CHARS,
-  ACTIVITY_PATH_CHARS,
-  ACTIVITY_PLAN_STEPS,
   ACTIVITY_REASONING_CHARS,
-  PAGED_OUTPUT_TTL_MS,
   STREAM_MAX_MS,
   STREAM_QUIET_MS,
 } from "./ui/constants.ts";
-import { textMessage } from "./ui/text-parts.ts";
 
 interface ActivityItemState {
   key: string;
   label: string;
-  category: string;
   status: string;
   detail?: string;
-  durationMs?: number;
+}
+
+interface ReasoningSection {
+  text: string;
+  order: number;
 }
 
 interface ActivityState {
@@ -38,21 +42,18 @@ interface ActivityState {
   turnId?: string;
   startedAt: number;
   lastFlushAt: number;
-  reasoning: string;
+  mode: AgentCollaborationMode;
+  goal: AgentThreadGoal | null | undefined;
+  reasoningSections: Map<string, ReasoningSection>;
+  nextReasoningOrder: number;
   plan?: { explanation?: string; steps: AgentPlanStep[] };
   items: ActivityItemState[];
   files: AgentActivityFile[];
-  notices: Array<{ level: string; title: string; detail?: string }>;
-  diff?: string;
-  goalText?: string;
-  settings: string[];
   status: "working" | "done" | "interrupted" | "failed";
   error?: string;
   durationMs?: number;
   messageId?: MessageId;
   replyToMessageId?: MessageId;
-  detailsToken?: string;
-  diffToken?: string;
   timer?: Timer;
   flushPromise?: Promise<void>;
   lastRendered?: string;
@@ -60,10 +61,12 @@ interface ActivityState {
 }
 
 export interface ActivityStreamerDeps {
-  store: Pick<RelayStore, "setPagedOutput" | "deletePagedOutputsForSession" | "appendTranscript">;
+  store: Pick<RelayStore, "deletePagedOutputsForSession" | "appendTranscript">;
   logger: Logger;
   canEdit: boolean;
   getReplyToMessageId(sessionKey: string): MessageId | undefined;
+  getCollaborationMode(sessionKey: string): AgentCollaborationMode;
+  getThreadGoal(sessionKey: string): AgentThreadGoal | null | undefined;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
   editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: Omit<EditMessageTextOptions, "entities" | "parseMode">): Promise<void>;
   timing?: { quietMs?: number; maxMs?: number };
@@ -80,11 +83,11 @@ export class ActivityStreamer {
   }
 
   async handle(event: AgentActivityEvent): Promise<void> {
+    if (isHiddenActivity(event.activity)) return;
     const state = this.stateFor(event);
     if (!state) return;
     this.apply(state, event.activity, event.itemId);
-    const immediate = isImmediate(event.activity);
-    await this.schedule(state, immediate);
+    await this.schedule(state, isImmediate(event.activity));
   }
 
   async finalize(sessionKey: string, turnId: string | undefined, status: AgentTurnStatus, error?: string, durationMs?: number): Promise<void> {
@@ -97,16 +100,24 @@ export class ActivityStreamer {
     state.error = error;
     state.durationMs = durationMs;
     await this.flush(state, true);
-    const summary = finalTranscriptSummary(state);
     this.deps.store.appendTranscript({
       conversationId: state.conversationId,
       scopeKey: state.scopeKey,
       workspaceName: state.workspaceName,
       role: "system",
-      text: summary,
+      text: finalTranscriptSummary(state),
       createdAt: Date.now(),
     });
     this.states.delete(sessionKey);
+  }
+
+  async refreshContext(sessionKey: string): Promise<void> {
+    const state = this.states.get(sessionKey);
+    if (!state) return;
+    state.mode = this.deps.getCollaborationMode(sessionKey);
+    const goal = this.deps.getThreadGoal(sessionKey);
+    if (goal !== undefined) state.goal = goal;
+    await this.flush(state, false);
   }
 
   clearSession(sessionKey: string, deletePages = true): void {
@@ -138,11 +149,12 @@ export class ActivityStreamer {
         turnId: event.turnId,
         startedAt: now,
         lastFlushAt: now,
-        reasoning: "",
+        mode: this.deps.getCollaborationMode(event.sessionKey),
+        goal: this.deps.getThreadGoal(event.sessionKey),
+        reasoningSections: new Map(),
+        nextReasoningOrder: 0,
         items: [],
         files: [],
-        notices: [],
-        settings: [],
         status: "working",
         replyToMessageId: this.deps.getReplyToMessageId(event.sessionKey),
       };
@@ -155,14 +167,15 @@ export class ActivityStreamer {
 
   private apply(state: ActivityState, activity: AgentActivity, itemId?: string): void {
     switch (activity.kind) {
-      case "reasoning":
-        state.reasoning += activity.summary;
+      case "reasoning": {
+        const key = `${itemId ?? "reasoning"}:${activity.sectionIndex ?? 0}`;
+        const existing = state.reasoningSections.get(key);
+        if (existing) existing.text += activity.summary;
+        else state.reasoningSections.set(key, { text: activity.summary, order: state.nextReasoningOrder++ });
         break;
+      }
       case "plan":
         state.plan = { ...(activity.explanation ? { explanation: activity.explanation } : {}), steps: activity.steps };
-        break;
-      case "diff":
-        state.diff = activity.diff;
         break;
       case "item": {
         const key = itemId ?? `${activity.category}:${activity.label}`;
@@ -170,31 +183,20 @@ export class ActivityStreamer {
         const next: ActivityItemState = {
           key,
           label: activity.label,
-          category: activity.category,
           status: activity.status,
           ...(activity.detail ? { detail: activity.detail } : {}),
-          ...(activity.durationMs !== undefined ? { durationMs: activity.durationMs } : {}),
         };
         if (existing) Object.assign(existing, next);
         else state.items.push(next);
         for (const file of activity.files ?? []) upsertFile(state.files, file);
         break;
       }
-      case "notice":
-        if (!state.notices.some((notice) => notice.level === activity.level && notice.title === activity.title && notice.detail === activity.detail)) {
-          state.notices.push(activity);
-        }
-        break;
       case "goal":
-        state.goalText = activity.goal ? `${activity.goal.status}: ${activity.goal.objective}` : "cleared";
+        state.goal = activity.goal;
         break;
+      case "diff":
+      case "notice":
       case "settings":
-        for (const [name, value] of Object.entries(activity.changes)) {
-          const setting = `${name}: ${value}`;
-          const existing = state.settings.findIndex((candidate) => candidate.startsWith(`${name}: `));
-          if (existing >= 0) state.settings[existing] = setting;
-          else state.settings.push(setting);
-        }
         break;
     }
   }
@@ -231,22 +233,15 @@ export class ActivityStreamer {
   private async flushOnce(state: ActivityState, final: boolean): Promise<void> {
     if (state.timer) clearTimeout(state.timer);
     state.timer = undefined;
-    const { text, details, overflow } = renderActivity(state);
-    if (!final && text === state.lastRendered) return;
-    if (overflow) {
-      state.detailsToken ??= shortToken();
-      this.savePage(state, state.detailsToken, details);
-    }
-    if (state.diff) {
-      state.diffToken ??= shortToken();
-      this.savePage(state, state.diffToken, state.diff);
-    }
-    const keyboard = activityDetailsKeyboard(overflow ? state.detailsToken : undefined, state.diff ? state.diffToken : undefined);
-    const rendered = textMessage(text);
+    const currentGoal = this.deps.getThreadGoal(state.sessionKey);
+    if (currentGoal !== undefined) state.goal = currentGoal;
+    const rendered = renderActivity(state);
+    if (!final && rendered.text === state.lastRendered) return;
+    const emptyKeyboard = { inline_keyboard: [] };
     if (state.messageId && this.deps.canEdit) {
       try {
-        await this.deps.editRendered(state.scopeKey, rendered, { messageId: state.messageId, replyMarkup: keyboard });
-        state.lastRendered = text;
+        await this.deps.editRendered(state.scopeKey, rendered, { messageId: state.messageId, replyMarkup: emptyKeyboard });
+        state.lastRendered = rendered.text;
         state.lastFlushAt = Date.now();
         return;
       } catch (error) {
@@ -257,31 +252,36 @@ export class ActivityStreamer {
     }
     const result = await this.deps.sendRendered(state.scopeKey, rendered, {
       replyToMessageId: state.sentOnce ? undefined : state.replyToMessageId,
-      replyMarkup: keyboard,
+      replyMarkup: emptyKeyboard,
       disableWebPagePreview: true,
     });
     state.messageId = result.messageId;
     state.sentOnce = true;
-    state.lastRendered = text;
+    state.lastRendered = rendered.text;
     state.lastFlushAt = Date.now();
-  }
-
-  private savePage(state: ActivityState, token: string, text: string): void {
-    this.deps.store.setPagedOutput({
-      token,
-      scopeKey: state.scopeKey,
-      conversationId: state.conversationId,
-      sessionKey: state.sessionKey,
-      text,
-      createdAt: state.startedAt,
-      expiresAt: Date.now() + PAGED_OUTPUT_TTL_MS,
-    });
   }
 }
 
+type RecentMode = "items" | "count";
+type PlanMode = "all" | "current" | "none";
+
+interface ActivityRenderOptions {
+  recentMode: RecentMode;
+  recentLimit: number;
+  recentChars: number;
+  reasoningChars: number;
+  goalChars: number;
+  errorChars: number;
+  planMode: PlanMode;
+  planStepChars: number;
+}
+
+function isHiddenActivity(activity: AgentActivity): boolean {
+  return activity.kind === "diff" || activity.kind === "notice" || activity.kind === "settings";
+}
+
 function isImmediate(activity: AgentActivity): boolean {
-  return activity.kind === "notice" && activity.level !== "info"
-    || activity.kind === "item" && (activity.category === "guardian" || activity.status === "failed");
+  return activity.kind === "item" && (activity.category === "guardian" || activity.status === "failed");
 }
 
 function upsertFile(files: AgentActivityFile[], file: AgentActivityFile): void {
@@ -290,112 +290,161 @@ function upsertFile(files: AgentActivityFile[], file: AgentActivityFile): void {
   else files.push(file);
 }
 
-function renderActivity(state: ActivityState): { text: string; details: string; overflow: boolean } {
-  const details = detailText(state);
-  const normal = cardText(state, { fileLimit: ACTIVITY_FILES, itemLimit: ACTIVITY_ITEMS, planMode: "normal" });
-  if (normal.length <= ACTIVITY_MAX_CHARS) return { text: normal, details, overflow: hasDetailOverflow(state) };
-  const fewerFiles = cardText(state, { fileLimit: 4, itemLimit: ACTIVITY_ITEMS, planMode: "normal" });
-  if (fewerFiles.length <= ACTIVITY_MAX_CHARS) return { text: fewerFiles, details, overflow: true };
-  const fewerItems = cardText(state, { fileLimit: 4, itemLimit: 3, planMode: "normal" });
-  if (fewerItems.length <= ACTIVITY_MAX_CHARS) return { text: fewerItems, details, overflow: true };
-  const currentPlan = cardText(state, { fileLimit: 4, itemLimit: 3, planMode: "current" });
-  if (currentPlan.length <= ACTIVITY_MAX_CHARS) return { text: currentPlan, details, overflow: true };
-  return { text: minimalCardText(state).slice(0, ACTIVITY_MAX_CHARS), details, overflow: true };
+function renderActivity(state: ActivityState): RenderedTelegramText {
+  const options: ActivityRenderOptions = {
+    recentMode: "items",
+    recentLimit: ACTIVITY_ITEMS,
+    recentChars: ACTIVITY_ITEM_CHARS,
+    reasoningChars: ACTIVITY_REASONING_CHARS,
+    goalChars: ACTIVITY_ITEM_CHARS,
+    errorChars: 240,
+    planMode: "all",
+    planStepChars: ACTIVITY_ITEM_CHARS,
+  };
+  let rendered = buildActivity(state, options);
+  if (rendered.text.length <= ACTIVITY_MAX_CHARS) return rendered;
+
+  for (const recentLimit of [4, 3, 2, 1]) {
+    options.recentLimit = recentLimit;
+    rendered = buildActivity(state, options);
+    if (rendered.text.length <= ACTIVITY_MAX_CHARS) return rendered;
+  }
+  for (const recentChars of [120, 80, 40]) {
+    options.recentChars = recentChars;
+    rendered = buildActivity(state, options);
+    if (rendered.text.length <= ACTIVITY_MAX_CHARS) return rendered;
+  }
+  options.recentMode = "count";
+  rendered = buildActivity(state, options);
+  if (rendered.text.length <= ACTIVITY_MAX_CHARS) return rendered;
+
+  for (const reasoningChars of [240, 160, 80, 40]) {
+    options.reasoningChars = reasoningChars;
+    rendered = buildActivity(state, options);
+    if (rendered.text.length <= ACTIVITY_MAX_CHARS) return rendered;
+  }
+  for (const goalChars of [120, 80, 40, 0]) {
+    options.goalChars = goalChars;
+    rendered = buildActivity(state, options);
+    if (rendered.text.length <= ACTIVITY_MAX_CHARS) return rendered;
+  }
+  for (const errorChars of [160, 80, 40]) {
+    options.errorChars = errorChars;
+    rendered = buildActivity(state, options);
+    if (rendered.text.length <= ACTIVITY_MAX_CHARS) return rendered;
+  }
+  for (const planStepChars of [120, 80, 40, 16]) {
+    options.planStepChars = planStepChars;
+    rendered = buildActivity(state, options);
+    if (rendered.text.length <= ACTIVITY_MAX_CHARS) return rendered;
+  }
+
+  const dynamicPlanChars = dynamicPlanStepBudget(state, options);
+  if (dynamicPlanChars !== undefined) {
+    options.planStepChars = dynamicPlanChars;
+    rendered = buildActivity(state, options);
+    if (rendered.text.length <= ACTIVITY_MAX_CHARS) return rendered;
+  }
+
+  options.planMode = "current";
+  for (const planStepChars of [160, 80, 40, 16]) {
+    options.planStepChars = planStepChars;
+    rendered = buildActivity(state, options);
+    if (rendered.text.length <= ACTIVITY_MAX_CHARS) return rendered;
+  }
+
+  options.reasoningChars = 24;
+  options.errorChars = 24;
+  options.planStepChars = 12;
+  rendered = buildActivity(state, options);
+  return rendered.text.length <= ACTIVITY_MAX_CHARS ? rendered : clipRendered(rendered, ACTIVITY_MAX_CHARS);
 }
 
-function hasDetailOverflow(state: ActivityState): boolean {
-  return state.reasoning.trim().length > ACTIVITY_REASONING_CHARS
-    || (state.plan?.steps.length ?? 0) > ACTIVITY_PLAN_STEPS
-    || state.plan?.steps.some((step) => step.step.length > ACTIVITY_ITEM_CHARS) === true
-    || state.items.length > ACTIVITY_ITEMS
-    || state.items.some((item) => `${item.label}${item.detail ? ` — ${item.detail}` : ""}`.length > ACTIVITY_ITEM_CHARS)
-    || state.files.length > ACTIVITY_FILES
-    || state.files.some((file) => file.path.length > ACTIVITY_PATH_CHARS)
-    || state.notices.length > 3
-    || (state.goalText?.length ?? 0) > ACTIVITY_ITEM_CHARS
-    || state.settings.length > 3
-    || state.settings.some((setting) => setting.length > ACTIVITY_ITEM_CHARS);
+function dynamicPlanStepBudget(state: ActivityState, options: ActivityRenderOptions): number | undefined {
+  const steps = state.plan?.steps ?? [];
+  if (!steps.length) return undefined;
+  const withoutPlan = buildActivity(state, { ...options, planMode: "none" }).text.length;
+  const title = `Plan ${completedPlanCount(steps)}/${steps.length}`;
+  const fixedPlanChars = 2 + title.length + steps.length * 3;
+  const availableStepChars = ACTIVITY_MAX_CHARS - withoutPlan - fixedPlanChars;
+  if (availableStepChars < steps.length) return undefined;
+  return Math.max(1, Math.floor(availableStepChars / steps.length));
 }
 
-function cardText(state: ActivityState, options: { fileLimit: number; itemLimit: number; planMode: "normal" | "current" }): string {
-  const lines = [header(state)];
-  appendNotices(lines, state);
-  appendGoalAndSettings(lines, state);
-  if (state.reasoning.trim()) lines.push("", "Reasoning", truncate(state.reasoning.trim(), ACTIVITY_REASONING_CHARS));
-  appendPlan(lines, state.plan, options.planMode);
-  const items = state.items.slice(-options.itemLimit);
-  if (items.length) {
-    lines.push("", "Recent activity");
-    for (const item of items) lines.push(`• ${statusIcon(item.status)} ${truncate(item.label + (item.detail ? ` — ${item.detail}` : ""), ACTIVITY_ITEM_CHARS)}`);
+function buildActivity(state: ActivityState, options: ActivityRenderOptions): RenderedTelegramText {
+  const parts: TelegramTextPart[] = [
+    { text: header(state), entity: "bold" },
+    "\n",
+    `Mode ${modeLabel(state.mode)} · ${formatDuration(state.durationMs ?? Date.now() - state.startedAt)}`,
+    "\n",
+    goalLine(state.goal, options.goalChars),
+  ];
+  if (state.error) parts.push("\n", `Error · ${truncate(state.error.trim(), options.errorChars)}`);
+
+  const reasoning = latestReasoning(state);
+  if (reasoning) {
+    parts.push("\n\n", { text: "Reasoning", entity: "bold" }, "\n", truncate(reasoning, options.reasoningChars));
   }
-  const files = state.files.slice(-options.fileLimit);
-  if (files.length) {
-    lines.push("", "Files");
-    for (const file of files) lines.push(`• ${middleTruncate(file.path, ACTIVITY_PATH_CHARS)}${file.kind ? ` (${file.kind})` : ""}`);
-  }
-  appendMeta(lines, state);
-  return lines.join("\n");
+
+  appendPlan(parts, state.plan, options.planMode, options.planStepChars);
+  appendRecentActivity(parts, state.items, options);
+  return renderTelegramText(parts);
 }
 
-function detailText(state: ActivityState): string {
-  const lines = [header(state)];
-  appendNotices(lines, state, false);
-  if (state.reasoning.trim()) lines.push("", "Reasoning summary", state.reasoning.trim());
-  appendPlan(lines, state.plan, "all");
-  if (state.items.length) {
-    lines.push("", "Activity");
-    for (const item of state.items) lines.push(`• ${statusIcon(item.status)} ${item.label}${item.detail ? ` — ${item.detail}` : ""}${item.durationMs !== undefined ? ` (${formatDuration(item.durationMs)})` : ""}`);
-  }
-  if (state.files.length) {
-    lines.push("", "Files");
-    for (const file of state.files) lines.push(`• ${file.path}${file.kind ? ` (${file.kind})` : ""}`);
-  }
-  if (state.goalText) lines.push("", `Goal: ${state.goalText}`);
-  if (state.settings.length) lines.push("", "Settings", ...state.settings.map((setting) => `• ${setting}`));
-  appendMeta(lines, state);
-  return lines.join("\n");
+function appendPlan(parts: TelegramTextPart[], plan: ActivityState["plan"], mode: PlanMode, stepChars: number): void {
+  if (!plan?.steps.length || mode === "none") return;
+  parts.push("\n\n", { text: `Plan ${completedPlanCount(plan.steps)}/${plan.steps.length}`, entity: "bold" });
+  const steps = mode === "current" ? [currentPlanStep(plan.steps)].filter(Boolean) as AgentPlanStep[] : plan.steps;
+  for (const step of steps) parts.push("\n", `${planIcon(step.status)} ${truncate(step.step.trim(), stepChars)}`);
 }
 
-function minimalCardText(state: ActivityState): string {
-  const lines = [header(state)];
-  appendNotices(lines, state);
-  const current = currentPlanStep(state.plan?.steps);
-  if (current) lines.push("", `Current: ${truncate(current.step, ACTIVITY_ITEM_CHARS)}`);
-  lines.push("", `Activity ${state.items.length} · Files ${state.files.length} · Plan ${completedPlanCount(state.plan?.steps)}/${state.plan?.steps.length ?? 0}`);
-  return lines.join("\n");
+function appendRecentActivity(parts: TelegramTextPart[], items: ActivityItemState[], options: ActivityRenderOptions): void {
+  if (!items.length) return;
+  parts.push("\n\n", { text: "Recent activity", entity: "bold" });
+  if (options.recentMode === "count") {
+    parts.push("\n", `• ${items.length} activities`);
+    return;
+  }
+  for (const item of items.slice(-options.recentLimit)) {
+    const text = `${item.label}${item.detail ? ` · ${item.detail}` : ""}`;
+    parts.push("\n", `${statusIcon(item.status)} ${truncate(text, options.recentChars)}`);
+  }
 }
 
 function header(state: ActivityState): string {
+  const icon = state.status === "working" ? "●" : state.status === "done" ? "✓" : state.status === "interrupted" ? "■" : "×";
   const label = state.status === "working" ? "Working" : state.status === "done" ? "Completed" : state.status === "interrupted" ? "Interrupted" : "Failed";
-  return `Codex activity · ${label}`;
+  return `${icon} Codex · ${label}`;
 }
 
-function appendNotices(lines: string[], state: ActivityState, truncateValues = true): void {
-  if (state.error) lines.push("", `Error: ${truncateValues ? truncate(state.error, 500) : state.error}`);
-  for (const notice of state.notices.filter((entry) => entry.level !== "info").slice(-3)) {
-    const value = `${notice.title}${notice.detail ? ` — ${notice.detail}` : ""}`;
-    lines.push("", `${notice.level === "error" ? "Error" : "Warning"}: ${truncateValues ? truncate(value, 500) : value}`);
+function modeLabel(mode: AgentCollaborationMode): string {
+  return mode === "plan" ? "Plan" : "Default";
+}
+
+function goalLine(goal: AgentThreadGoal | null | undefined, objectiveChars: number): string {
+  if (goal === undefined) return "Goal Unknown";
+  if (goal === null) return "Goal None";
+  const objective = truncate(goal.objective.trim(), objectiveChars);
+  return `Goal ${goalStatusLabel(goal.status)}${objective ? ` · ${objective}` : ""}`;
+}
+
+function goalStatusLabel(status: AgentThreadGoal["status"]): string {
+  switch (status) {
+    case "active": return "Active";
+    case "paused": return "Paused";
+    case "blocked": return "Blocked";
+    case "usageLimited": return "Usage limited";
+    case "budgetLimited": return "Budget limited";
+    case "complete": return "Complete";
   }
 }
 
-function appendGoalAndSettings(lines: string[], state: ActivityState): void {
-  if (state.goalText) lines.push("", `Goal: ${truncate(state.goalText, ACTIVITY_ITEM_CHARS)}`);
-  if (state.settings.length) {
-    lines.push("", "Settings");
-    for (const setting of state.settings.slice(-3)) lines.push(`- ${truncate(setting, ACTIVITY_ITEM_CHARS)}`);
+function latestReasoning(state: ActivityState): string | undefined {
+  let latest: ReasoningSection | undefined;
+  for (const section of state.reasoningSections.values()) {
+    if (!latest || section.order > latest.order) latest = section;
   }
-}
-
-function appendPlan(lines: string[], plan: ActivityState["plan"], mode: "normal" | "current" | "all"): void {
-  if (!plan?.steps.length) return;
-  lines.push("", `Plan · ${completedPlanCount(plan.steps)}/${plan.steps.length}`);
-  const steps = mode === "current" ? [currentPlanStep(plan.steps)].filter(Boolean) as AgentPlanStep[] : mode === "all" ? plan.steps : plan.steps.slice(0, ACTIVITY_PLAN_STEPS);
-  for (const step of steps) lines.push(`${planIcon(step.status)} ${mode === "all" ? step.step : truncate(step.step, ACTIVITY_ITEM_CHARS)}`);
-  if (mode === "normal" && plan.steps.length > steps.length) lines.push(`… ${plan.steps.length - steps.length} more step(s)`);
-}
-
-function appendMeta(lines: string[], state: ActivityState): void {
-  if (state.status !== "working" || state.durationMs !== undefined) lines.push("", `Duration: ${formatDuration(state.durationMs ?? Date.now() - state.startedAt)}`);
+  return latest?.text.trim() || undefined;
 }
 
 function finalTranscriptSummary(state: ActivityState): string {
@@ -412,7 +461,7 @@ function completedPlanCount(steps: AgentPlanStep[] | undefined): number {
 }
 
 function statusIcon(status: string): string {
-  return status === "completed" ? "✓" : status === "failed" || status === "declined" ? "✕" : status === "warning" ? "!" : status === "interrupted" ? "■" : "•";
+  return status === "completed" ? "✓" : status === "failed" || status === "declined" ? "×" : status === "warning" ? "!" : status === "interrupted" ? "■" : status === "pending" ? "○" : "→";
 }
 
 function planIcon(status: AgentPlanStep["status"]): string {
@@ -420,17 +469,24 @@ function planIcon(status: AgentPlanStep["status"]): string {
 }
 
 function truncate(value: string, max: number): string {
+  if (max <= 0) return "";
   if (value.length <= max) return value;
-  return `${value.slice(0, Math.max(0, max - 1))}…`;
-}
-
-function middleTruncate(value: string, max: number): string {
-  if (value.length <= max) return value;
-  const left = Math.ceil((max - 1) / 2);
-  return `${value.slice(0, left)}…${value.slice(value.length - (max - 1 - left))}`;
+  if (max === 1) return "…";
+  return `${value.slice(0, max - 1)}…`;
 }
 
 function formatDuration(durationMs: number): string {
   if (durationMs < 1000) return `${Math.max(0, Math.round(durationMs))}ms`;
   return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)}s`;
+}
+
+function clipRendered(rendered: RenderedTelegramText, max: number): RenderedTelegramText {
+  const text = rendered.text.slice(0, max);
+  return {
+    text,
+    entities: rendered.entities.flatMap((entity) => {
+      if (entity.offset >= text.length) return [];
+      return [{ ...entity, length: Math.min(entity.length, text.length - entity.offset) }];
+    }),
+  };
 }

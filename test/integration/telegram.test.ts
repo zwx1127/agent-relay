@@ -688,7 +688,7 @@ describe("telegram adapter", () => {
       return Response.json({ ok: true, result: true });
     });
 
-    await adapter.setMessageReaction(1, 2, "😎");
+    await adapter.setMessageReaction(1, 2, "😎", { isBig: true });
     await adapter.setMessageReaction(1, 2);
 
     expect(requests).toEqual([
@@ -698,6 +698,7 @@ describe("telegram adapter", () => {
           chat_id: 1,
           message_id: 2,
           reaction: [{ type: "emoji", emoji: "😎" }],
+          is_big: true,
         },
       },
       {
@@ -718,6 +719,12 @@ describe("telegram adapter", () => {
     }, { status: 400 }));
 
     await expect(adapter.setMessageReaction(1, 2, "😎")).rejects.toThrow("reaction is not allowed");
+  });
+
+  test("rejects unconfirmed message reaction responses", async () => {
+    const adapter = new TelegramAdapter("token", async () => Response.json({ ok: true, result: false }));
+
+    await expect(adapter.setMessageReaction(1, 2, "🫡")).rejects.toThrow("did not confirm success");
   });
 
   test("ignores message is not modified edit errors", async () => {

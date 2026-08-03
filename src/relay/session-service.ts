@@ -29,7 +29,10 @@ export class RelaySessionService {
     const scope = parseChatScopeKey(String(conversationId));
     const key = sessionKey(scope.scopeKey, workspace.name);
     const existing = this.deps.agent.getStatus(key);
-    if (existing?.running && !threadId) return existing;
+    if (existing?.running && !threadId) {
+      await this.hydrateThreadGoal(key, existing);
+      return existing;
+    }
 
     const resumePrevious = options.resumePrevious ?? true;
     const previous = threadId || !resumePrevious ? undefined : this.deps.store.getSession(key);
@@ -62,8 +65,22 @@ export class RelaySessionService {
       });
     }
     this.deps.store.markSessionStarted(key, scope.conversationId, workspace.name, Date.now(), status.threadId, scope.scopeKey);
+    await this.hydrateThreadGoal(key, status);
     this.deps.logger.info("router.session_started", { conversation_id: scope.conversationId, scope_key: scope.scopeKey, workspace: workspace.name, session_key: key, thread_id: status.threadId });
     return status;
+  }
+
+  private async hydrateThreadGoal(key: string, status: AgentSessionStatus): Promise<void> {
+    if (status.threadGoal !== undefined || this.deps.agent.capabilities?.threadGoals !== true || !this.deps.agent.getThreadGoal) return;
+    try {
+      status.threadGoal = await this.deps.agent.getThreadGoal(key);
+    } catch (error) {
+      this.deps.logger.warn("router.session_goal_load_failed", {
+        session_key: key,
+        thread_id: status.threadId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
   }
 
   appendSystem(conversationId: ConversationId, text: string): void {

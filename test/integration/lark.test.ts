@@ -765,7 +765,7 @@ describe("lark adapter", () => {
     const channel = new FakeLarkChannel();
     const adapter = adapterWith(channel);
 
-    await adapter.setMessageReaction("oc_chat", "om_waiting", "🫡");
+    await adapter.setMessageReaction("oc_chat", "om_waiting", "🫡", { isBig: true });
     await adapter.setMessageReaction("oc_chat", "om_running", "✍");
     await adapter.setMessageReaction("oc_chat", "om_blocked", "🤔");
     await adapter.setMessageReaction("oc_chat", "om_done", "😎");

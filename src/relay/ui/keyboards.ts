@@ -59,13 +59,6 @@ export function attachmentPickerKeyboard(
   return { inline_keyboard: rows };
 }
 
-export function activityDetailsKeyboard(detailsToken?: string, diffToken?: string): InlineKeyboardMarkup {
-  const row: InlineKeyboardMarkup["inline_keyboard"][number] = [];
-  if (detailsToken) row.push({ text: "View details", callback_data: `ar:p:${detailsToken}:0` });
-  if (diffToken) row.push({ text: "View diff", callback_data: `ar:p:${diffToken}:0` });
-  return { inline_keyboard: row.length ? [row] : [] };
-}
-
 export function commandConfirmKeyboard(token: string, command: string, confirmLabel: string, action = "confirm"): InlineKeyboardMarkup {
   return {
     inline_keyboard: [[

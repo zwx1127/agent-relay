@@ -30,7 +30,13 @@ export function relayFixture(logLevel: LogLevel = "info", configOverrides: Parti
   const agent = new FakeAgent();
   const logLines: string[] = [];
   const logger = new TextLogger(logLevel, (line) => logLines.push(line), () => new Date("2026-05-02T08:00:00.000Z"));
-  const config: AppConfig = {
+  const config = relayTestConfig(root, logLevel, configOverrides);
+  const router = new RelayController({ config, store, adapter, agent, logger, streamTiming: { quietMs: TEST_STREAM_QUIET_MS } });
+  return { router, store, adapter, agent, root, logLines };
+}
+
+export function relayTestConfig(root: string, logLevel: LogLevel = "info", configOverrides: Partial<AppConfig> = {}): AppConfig {
+  return {
     imProvider: "telegram",
     agentProvider: "codex",
     telegramBotToken: "token",
@@ -53,8 +59,6 @@ export function relayFixture(logLevel: LogLevel = "info", configOverrides: Parti
     logLevel,
     ...configOverrides,
   };
-  const router = new RelayController({ config, store, adapter, agent, logger, streamTiming: { quietMs: TEST_STREAM_QUIET_MS } });
-  return { router, store, adapter, agent, root, logLines };
 }
 
 export function cleanupRelayFixtures(): void {

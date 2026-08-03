@@ -39,6 +39,7 @@ export interface ThreadCommandDeps {
   ensureAgentStarted(conversationId: ConversationId, workspace: WorkspaceRecord, threadId?: string, options?: { resumePrevious?: boolean }): Promise<AgentSessionStatus>;
   finalizeSessionOutput(sessionKey: string): Promise<void>;
   clearActivityForSession(sessionKey: string): void;
+  refreshActivityContext(sessionKey: string): Promise<void>;
   interruptActiveTasks(sessionKey: string): Promise<void>;
   interruptTasksByStatus(sessionKey: string, statuses: TaskStatus[]): Promise<void>;
   submitTask(conversationId: ConversationId, text: string, userMessageId?: MessageId, preference?: TaskSubmitPreference, input?: AgentTaskInput): Promise<void>;
@@ -83,6 +84,7 @@ export class ThreadCommandService {
       commandSession: (conversationId) => this.commandSession(conversationId),
       requireCurrentWorkspace: deps.requireCurrentWorkspace,
       sendRendered: deps.sendRendered,
+      refreshActivityContext: deps.refreshActivityContext,
     });
     this.plans = new PlanCommandService({
       store: deps.store,

@@ -501,8 +501,10 @@ describe("relay controller thread commands", () => {
     expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
     expect(agent.sent.at(-1)).toEqual(sentPrompt("Implement the approved plan."));
     expect(adapter.reactions).toEqual([
+      { conversationId: "1", messageId: "1", emoji: "🫡", options: { isBig: true } },
       { conversationId: "1", messageId: "1", emoji: "✍" },
       { conversationId: "1", messageId: "1", emoji: "😎" },
+      { conversationId: "1", messageId: 100, emoji: "🫡", options: { isBig: true } },
       { conversationId: "1", messageId: "100", emoji: "✍" },
     ]);
 
