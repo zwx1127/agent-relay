@@ -21,7 +21,8 @@ export interface RelayAgentEventRouterDeps {
   activity: {
     handle(event: AgentActivityEvent): Promise<void>;
     finalize(sessionKey: string, turnId: string | undefined, status: string, error?: string, durationMs?: number): Promise<void>;
-    clearSession(sessionKey: string): void;
+    setPhase(sessionKey: string, phase: "working" | "waitingForInput" | "waitingForApproval", detail?: string): Promise<void>;
+    terminate(sessionKey: string, phase: "interrupted" | "failed", detail?: string): Promise<void>;
   };
   media: { sendAgentImageOutput(event: AgentImageOutputEvent): Promise<void> };
   prompts: {
@@ -37,7 +38,8 @@ export interface RelayAgentEventRouterDeps {
   markActiveTask(sessionKey: string, status: "blocked", turnId?: string): Promise<void>;
   cancelActiveTasks(sessionKey: string): Promise<void>;
   failActiveTasks(sessionKey: string): Promise<void>;
-  clearPrompts(sessionKey: string): void;
+  currentThreadId(sessionKey: string): string | undefined;
+  resetSessionPresentation(sessionKey: string, options?: { deletePages?: boolean }): Promise<void>;
 }
 
 export class RelayAgentEventRouter {
@@ -57,13 +59,13 @@ export class RelayAgentEventRouter {
         await this.handleTurnCompleted(event);
         return true;
       case "user_input_request":
-        await this.blockForPrompt(event, () => this.deps.prompts.handleUserInputRequest(event));
+        await this.blockForPrompt(event, "waitingForInput", () => this.deps.prompts.handleUserInputRequest(event));
         return true;
       case "approval_request":
-        await this.blockForPrompt(event, () => this.deps.prompts.handleApprovalRequest(event));
+        await this.blockForPrompt(event, "waitingForApproval", () => this.deps.prompts.handleApprovalRequest(event));
         return true;
       case "mcp_elicitation_request":
-        await this.blockForPrompt(event, () => this.deps.prompts.handleMcpElicitationRequest(event));
+        await this.blockForPrompt(event, "waitingForInput", () => this.deps.prompts.handleMcpElicitationRequest(event));
         return true;
       case "thread_lifecycle":
         await this.handleThreadLifecycle(event);
@@ -101,9 +103,11 @@ export class RelayAgentEventRouter {
 
   private async blockForPrompt(
     event: AgentUserInputRequestEvent | AgentApprovalRequestEvent | AgentMcpElicitationRequestEvent,
+    phase: "waitingForInput" | "waitingForApproval",
     render: () => Promise<void>,
   ): Promise<void> {
     await this.deps.finalizeOutput(event.sessionKey);
+    await this.deps.activity.setPhase(event.sessionKey, phase);
     await this.deps.markActiveTask(event.sessionKey, "blocked", event.turnId);
     await render();
   }
@@ -111,9 +115,18 @@ export class RelayAgentEventRouter {
   private async handleThreadLifecycle(event: AgentThreadLifecycleEvent): Promise<void> {
     const parsed = parseSessionKey(event.sessionKey);
     if (!parsed) return;
-    this.deps.activity.clearSession(event.sessionKey);
-    await this.deps.finalizeOutput(event.sessionKey);
-    this.deps.clearPrompts(event.sessionKey);
+    const currentThreadId = this.deps.currentThreadId(event.sessionKey);
+    if (currentThreadId && currentThreadId !== event.threadId) {
+      this.deps.logger.info("router.thread_lifecycle_stale", {
+        session_key: event.sessionKey,
+        event_thread_id: event.threadId,
+        current_thread_id: currentThreadId,
+        action: event.action,
+      });
+      return;
+    }
+    await this.deps.activity.terminate(event.sessionKey, "interrupted", `Chat ${event.action}.`);
+    await this.deps.resetSessionPresentation(event.sessionKey, { deletePages: true });
     this.deps.store.markSessionStopped(event.sessionKey);
     if (event.action === "archived" || event.action === "deleted") {
       this.deps.store.clearSessionThreadId(event.sessionKey);

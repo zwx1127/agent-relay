@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { sessionKey } from "../../src/domain/session.ts";
 import { chatScopeKey } from "../../src/domain/scope.ts";
 import { workspaceCallbackToken } from "../../src/relay/ui/callback-data.ts";
-import { callbackMessage, cleanupRelayFixtures, relayFixture as fixture, sentPrompt, textMessage } from "../support/relay-fixture.ts";
+import { callbackMessage, cleanupRelayFixtures, relayFixture as fixture, sentPrompt, textMessage, waitForStreamFlush } from "../support/relay-fixture.ts";
 
 afterEach(cleanupRelayFixtures);
 
@@ -355,6 +355,118 @@ describe("relay controller thread commands", () => {
     expect(agent.getStatus("codex:1:demo")?.threadId).toBe("saved-thread");
     expect(store.getSession("codex:1:demo")?.thread_id).toBe("saved-thread");
     expect(adapter.edited.at(-1)?.text).toContain("Resumed chat.");
+  });
+
+  test("repeated resume freezes the old activity card and stale lifecycle events cannot close the new chat", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "source-thread" });
+    const key = "codex:1:demo";
+
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, threadId: "source-thread", activity: { kind: "goal", goal: null } });
+    expect(adapter.sent.some((message) => message.text.includes("Codex ·"))).toBe(false);
+
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, threadId: "source-thread", turnId: "source-turn", activity: { kind: "plan", steps: [{ step: "Old work", status: "inProgress" }] } });
+    const oldCard = adapter.sent.find((message) => message.text.startsWith("● Codex"))!;
+    agent.threads = [{ id: "resume-a", name: "Resume A", cwd: path, updatedAt: 2 }];
+    await router.handle(textMessage("/resume"));
+    let picker = adapter.sent.at(-1)!;
+    let button = picker.options?.replyMarkup?.inline_keyboard.flat()[0]!;
+    await router.handle(callbackMessage(button.callback_data, 7, "resume-a", picker.messageId));
+
+    agent.threads = [{ id: "resume-b", name: "Resume B", cwd: path, updatedAt: 3 }];
+    await router.handle(textMessage("/resume"));
+    picker = adapter.sent.at(-1)!;
+    button = picker.options?.replyMarkup?.inline_keyboard.flat()[0]!;
+    await router.handle(callbackMessage(button.callback_data, 7, "resume-b", picker.messageId));
+
+    await router.handleAgentOutput({ type: "thread_lifecycle", sessionKey: key, threadId: "resume-a", action: "closed" });
+    expect(agent.getStatus(key)?.threadId).toBe("resume-b");
+    expect(store.getSession(key)?.thread_id).toBe("resume-b");
+
+    await router.handle(textMessage("new work"));
+    const turnId = agent.getStatus(key)?.activeTurnId!;
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, threadId: "resume-b", turnId, activity: { kind: "plan", steps: [{ step: "New work", status: "inProgress" }] } });
+    await waitForStreamFlush();
+
+    const cards = adapter.sent.filter((message) => message.text.startsWith("● Codex"));
+    expect(cards).toHaveLength(2);
+    expect(cards[0]?.messageId).toBe(oldCard.messageId);
+    expect(cards[1]?.text).toContain("Chat resume-b");
+    expect(adapter.edited.some((edit) => edit.options.messageId === oldCard.messageId && edit.text.includes("New work"))).toBe(false);
+  });
+
+  test("resume failure restores the source chat and its collaboration mode", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    const key = "codex:1:demo";
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "source-thread" });
+    store.markSessionStarted(key, 1, "demo", 1, "source-thread");
+    store.setCollaborationMode(key, "plan");
+    agent.threads = [{ id: "missing-thread", name: "Missing", cwd: path, updatedAt: 2 }];
+    agent.failStartForThreadIds.set("missing-thread", new Error("target unavailable"));
+
+    await router.handle(textMessage("/resume"));
+    const picker = adapter.sent.at(-1)!;
+    const button = picker.options?.replyMarkup?.inline_keyboard.flat()[0]!;
+    await router.handle(callbackMessage(button.callback_data, 7, "resume-fail", picker.messageId));
+
+    expect(agent.getStatus(key)?.threadId).toBe("source-thread");
+    expect(store.getSession(key)?.thread_id).toBe("source-thread");
+    expect(store.getCollaborationMode(key)).toBe("plan");
+    expect(adapter.edited.at(-1)?.text).toContain("Restored: source-thread");
+  });
+
+  test("resume reports both errors and stays stopped when rollback also fails", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    const key = "codex:1:demo";
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "source-thread" });
+    store.markSessionStarted(key, 1, "demo", 1, "source-thread");
+    agent.threads = [{ id: "missing-thread", name: "Missing", cwd: path, updatedAt: 2 }];
+    agent.failStartForThreadIds.set("missing-thread", new Error("target unavailable"));
+    agent.failStartForThreadIds.set("source-thread", new Error("rollback unavailable"));
+
+    await router.handle(textMessage("/resume"));
+    const picker = adapter.sent.at(-1)!;
+    const button = picker.options?.replyMarkup?.inline_keyboard.flat()[0]!;
+    await router.handle(callbackMessage(button.callback_data, 7, "resume-double-fail", picker.messageId));
+
+    expect(agent.getStatus(key)).toBeUndefined();
+    expect(store.getSession(key)?.status).toBe("stopped");
+    expect(store.getSession(key)?.thread_id).toBe("source-thread");
+    expect(adapter.edited.at(-1)?.text).toContain("target unavailable");
+    expect(adapter.edited.at(-1)?.text).toContain("rollback unavailable");
+  });
+
+  test("resume picker expires after another successful thread switch", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    const key = "codex:1:demo";
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "source-thread" });
+    agent.threads = [{ id: "saved-thread", name: "Saved", cwd: path, updatedAt: 2 }];
+
+    await router.handle(textMessage("/resume"));
+    const picker = adapter.sent.at(-1)!;
+    const button = picker.options?.replyMarkup?.inline_keyboard.flat()[0]!;
+    await router.handle(textMessage("/new"));
+    const switchedThread = agent.getStatus(key)?.threadId;
+    await router.handle(callbackMessage(button.callback_data, 7, "stale-resume", picker.messageId));
+
+    expect(agent.getStatus(key)?.threadId).toBe(switchedThread);
+    expect(agent.getStatus(key)?.threadId).not.toBe("saved-thread");
   });
 
   test("/resume rechecks busy state before switching and never cancels the active turn", async () => {

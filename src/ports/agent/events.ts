@@ -52,6 +52,8 @@ export interface AgentActivityEvent {
   type: "activity";
   sessionKey: string;
   activity: AgentActivity;
+  /** Thread identity captured when the provider emitted the activity. */
+  threadId?: string;
   turnId?: string;
   itemId?: string;
 }

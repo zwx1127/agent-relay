@@ -88,8 +88,17 @@ export class RelayController {
       logger: this.logger,
       canEdit: deps.adapter.capabilities.editMessage,
       getReplyToMessageId: (sessionKeyValue) => this.lastUserMessageIds.get(sessionKeyValue),
-      getCollaborationMode: (sessionKeyValue) => deps.store.getCollaborationMode(sessionKeyValue),
-      getThreadGoal: (sessionKeyValue) => deps.agent.getStatus(sessionKeyValue)?.threadGoal,
+      getSessionContext: (sessionKeyValue) => {
+        const status = deps.agent.getStatus(sessionKeyValue);
+        const stored = deps.store.getSession(sessionKeyValue);
+        return {
+          threadId: status?.threadId ?? stored?.thread_id ?? undefined,
+          threadName: status?.threadName,
+          collaborationMode: deps.store.getCollaborationMode(sessionKeyValue),
+          goal: status?.threadGoal,
+          activeTurnId: status?.activeTurnId,
+        };
+      },
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
       editRendered: (conversationId, rendered, options) => this.editRendered(conversationId, rendered, options),
       timing: deps.streamTiming,
@@ -112,9 +121,7 @@ export class RelayController {
       agent: deps.agent,
       logger: this.logger,
       ensureAgentStarted: (conversationId, workspace, threadId, options) => this.ensureAgentStarted(conversationId, workspace, threadId, options),
-      finalizeSessionOutput: (sessionKeyValue) => this.finalizeSessionOutput(sessionKeyValue),
-      clearActivityForSession: (sessionKeyValue) => this.activityStreamer.clearSession(sessionKeyValue),
-      clearCodexPromptsForSession: (sessionKeyValue) => this.clearCodexPromptsForSession(sessionKeyValue),
+      resetSessionPresentation: (sessionKeyValue, options) => this.resetSessionPresentation(sessionKeyValue, options),
       cancelActiveTasks: (sessionKeyValue) => this.cancelActiveTasks(sessionKeyValue),
       statusView: (conversationId) => this.statusView(conversationId),
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
@@ -161,7 +168,7 @@ export class RelayController {
       requireCurrentWorkspace: (conversationId) => this.workspaceFlow.requireCurrentWorkspace(conversationId),
       ensureAgentStarted: (conversationId, workspace, threadId, options) => this.ensureAgentStarted(conversationId, workspace, threadId, options),
       finalizeSessionOutput: (sessionKeyValue) => this.finalizeSessionOutput(sessionKeyValue),
-      clearActivityForSession: (sessionKeyValue) => this.activityStreamer.clearSession(sessionKeyValue),
+      resetSessionPresentation: (sessionKeyValue, options) => this.resetSessionPresentation(sessionKeyValue, options),
       refreshActivityContext: (sessionKeyValue) => this.activityStreamer.refreshContext(sessionKeyValue),
       interruptActiveTasks: (sessionKeyValue) => this.interruptActiveTasks(sessionKeyValue),
       interruptTasksByStatus: (sessionKeyValue, statuses) => this.interruptTasksByStatus(sessionKeyValue, statuses),
@@ -187,7 +194,8 @@ export class RelayController {
       markActiveTask: (sessionKeyValue, status, turnId) => this.markActiveTask(sessionKeyValue, status, turnId),
       cancelActiveTasks: (sessionKeyValue) => this.cancelActiveTasks(sessionKeyValue),
       failActiveTasks: (sessionKeyValue) => this.failActiveTasks(sessionKeyValue),
-      clearPrompts: (sessionKeyValue) => this.clearCodexPromptsForSession(sessionKeyValue),
+      currentThreadId: (sessionKeyValue) => deps.agent.getStatus(sessionKeyValue)?.threadId ?? deps.store.getSession(sessionKeyValue)?.thread_id ?? undefined,
+      resetSessionPresentation: (sessionKeyValue, options) => this.resetSessionPresentation(sessionKeyValue, options),
     });
     this.capabilityService = new RelayCapabilityService({
       config: deps.config,
@@ -448,10 +456,11 @@ export class RelayController {
       conversation_id: parsed.conversationId,
       workspace: parsed.workspaceName,
     });
+    await this.activityStreamer.terminate(sessionKeyValue, "failed", exitText).catch((error) => {
+      this.logger.warn("router.agent_exit_activity_finalize_failed", { session_key: sessionKeyValue, error: error instanceof Error ? error : new Error(String(error)) });
+    });
+    await this.resetSessionPresentation(sessionKeyValue, { deletePages: true });
     this.deps.store.markSessionStopped(sessionKeyValue);
-    this.activityStreamer.clearSession(sessionKeyValue);
-    await this.finalizeSessionOutput(sessionKeyValue);
-    this.clearCodexPromptsForSession(sessionKeyValue);
     await this.failActiveTasks(sessionKeyValue);
     await this.sendRendered(parsed.scopeKey, messageWithTitle(exitText));
   }
@@ -686,6 +695,7 @@ export class RelayController {
 
   private async markActiveTask(sessionKeyValue: string, status: "blocked" | "running", turnId?: string): Promise<void> {
     await this.taskCoordinator.markActive(sessionKeyValue, status, turnId);
+    if (status === "running") await this.activityStreamer.setPhase(sessionKeyValue, "working");
   }
 
   private async completeTaskAndDispatchNext(sessionKeyValue: string, turnId: string | undefined, status: "done" | "interrupted" | "failed" = "done"): Promise<void> {
@@ -710,6 +720,15 @@ export class RelayController {
 
   private clearCodexPromptsForSession(sessionKeyValue: string): void {
     this.codexPromptFlow.clearForSession(sessionKeyValue);
+  }
+
+  private async resetSessionPresentation(sessionKeyValue: string, options: { deletePages?: boolean } = {}): Promise<void> {
+    await this.activityStreamer.invalidateSession(sessionKeyValue, options.deletePages ?? false);
+    await this.finalizeSessionOutput(sessionKeyValue);
+    this.clearCodexPromptsForSession(sessionKeyValue);
+    this.deps.store.deletePendingPromptsForSession(sessionKeyValue);
+    this.lastUserMessageIds.delete(sessionKeyValue);
+    this.threadCommands?.clearSessionState(sessionKeyValue);
   }
 
   private isStaleConsoleCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): boolean {

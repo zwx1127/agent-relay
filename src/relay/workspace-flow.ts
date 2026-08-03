@@ -28,9 +28,7 @@ export interface WorkspaceFlowDeps {
   agent: Pick<AgentDriver, "stop">;
   logger: Logger;
   ensureAgentStarted(conversationId: ConversationId, workspace: WorkspaceRecord, threadId?: string, options?: { resumePrevious?: boolean }): Promise<AgentSessionStatus>;
-  finalizeSessionOutput(sessionKey: string): Promise<void>;
-  clearActivityForSession(sessionKey: string): void;
-  clearCodexPromptsForSession(sessionKey: string): void;
+  resetSessionPresentation(sessionKey: string, options?: { deletePages?: boolean }): Promise<void>;
   cancelActiveTasks(sessionKey: string): Promise<void>;
   statusView(conversationId: ConversationId): StatusView;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
@@ -160,9 +158,7 @@ export class WorkspaceFlow {
     const key = sessionKey(message.conversationId, workspace.name);
     // Finalize buffered output before stopping/deleting so the user sees the last
     // agent text even if the workspace is removed immediately after.
-    await this.deps.finalizeSessionOutput(key);
-    this.deps.clearActivityForSession(key);
-    this.deps.clearCodexPromptsForSession(key);
+    await this.deps.resetSessionPresentation(key, { deletePages: true });
     await this.deps.agent.stop(key).catch((error) => {
       this.deps.logger.warn("router.workspace_delete_stop_failed", {
         conversation_id: message.conversationId,
@@ -182,9 +178,7 @@ export class WorkspaceFlow {
     const workspace = this.requireCurrentWorkspace(message.conversationId);
     await this.deps.renderStrictCallbackPage(message, messageWithTitle("Stopping session.", workspace.name), { inline_keyboard: [] });
     const key = sessionKey(message.conversationId, workspace.name);
-    await this.deps.finalizeSessionOutput(key);
-    this.deps.clearActivityForSession(key);
-    this.deps.clearCodexPromptsForSession(key);
+    await this.deps.resetSessionPresentation(key, { deletePages: true });
     await this.deps.agent.stop(key);
     await this.deps.cancelActiveTasks(key);
     this.deps.store.markSessionStopped(key);

@@ -1096,11 +1096,15 @@ export class CodexDriver implements AgentDriver {
     params?: Record<string, unknown>,
     itemId?: string,
   ): Promise<void> {
+    const running = this.sessions.get(sessionKeyValue);
+    const turnId = getTurnId(params) ?? running?.status.activeTurnId;
+    const threadId = running?.status.threadId;
     await this.onOutput({
       type: "activity",
       sessionKey: sessionKeyValue,
       activity,
-      ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
+      ...(threadId ? { threadId } : {}),
+      ...(turnId ? { turnId } : {}),
       ...(itemId ? { itemId } : {}),
     });
   }

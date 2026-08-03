@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sessionKey } from "../../src/domain/session.ts";
+import { estimateImRows } from "../../src/relay/activity-streamer.ts";
 import { MEDIA_GROUP_QUIET_MS } from "../../src/relay/ui/constants.ts";
 import { sleep } from "../support/fakes.ts";
 import { audioMessage, callbackMessage, cleanupRelayFixtures, fileMessage, mediaMessage, relayFixture as fixture, sentPrompt, textMessage, waitForStreamFlush } from "../support/relay-fixture.ts";
@@ -717,15 +718,18 @@ describe("relay controller tasks and media", () => {
 
     const cards = adapter.sent.filter((message) => message.text.startsWith("● Codex"));
     expect(cards).toHaveLength(1);
-    const card = cards[0]!;
+    const card = adapter.edited.at(-1) ?? cards[0]!;
     expect(card.text.length).toBeLessThanOrEqual(3000);
+    expect(estimateImRows(card.text)).toBeLessThanOrEqual(18);
     expect(card.text).toContain("Mode Plan · ");
     expect(card.text).toContain("Goal Active · Ship safely");
     expect(card.text).toContain("Current reasoning");
     expect(card.text).not.toContain("Earlier reasoning");
-    expect(card.text).toContain("Plan 2/8");
-    for (let index = 0; index < 8; index++) expect(card.text).toContain(`Step ${index}`);
-    expect(card.text).toContain("Recent activity");
+    expect(card.text).toContain("Plan 2/8 · showing 1–5");
+    for (let index = 0; index < 5; index++) expect(card.text).toContain(`Step ${index}`);
+    expect(card.text).not.toContain("Step 5");
+    expect(card.text).toContain("Recent activity · 7");
+    expect(card.text).toContain("File changes (7)");
     expect(card.text).not.toContain("Files");
     expect(card.text).not.toContain("long-long-");
     expect(card.text).not.toContain("model: new");
@@ -735,14 +739,14 @@ describe("relay controller tasks and media", () => {
     const boldLabels = (card.options?.entities ?? [])
       .filter((entity) => entity.type === "bold")
       .map((entity) => card.text.slice(entity.offset, entity.offset + entity.length));
-    expect(boldLabels).toEqual(["● Codex · Working", "Reasoning", "Plan 2/8", "Recent activity"]);
+    expect(boldLabels).toEqual(["● Codex · Working", "Reasoning", "Plan 2/8 · showing 1–5", "Recent activity · 7"]);
 
     await router.handle(textMessage("/goal pause"));
     expect(adapter.edited.at(-1)?.text).toContain("Goal Paused · Ship safely");
 
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: key, turnId: "turn-1", status: "completed", durationMs: 20 });
     expect(adapter.edited.at(-1)?.text.startsWith("✓ Codex · Completed")).toBe(true);
-    expect(adapter.edited.at(-1)?.text).toContain("Mode Plan · 20ms");
+    expect(adapter.edited.at(-1)?.text).toContain("Mode Plan · 0s");
     expect(adapter.edited.at(-1)?.options.replyMarkup).toEqual({ inline_keyboard: [] });
     expect(store.latestTranscriptEvent("1", "demo", "system")?.text).toContain("[Activity done:");
   });
@@ -770,7 +774,7 @@ describe("relay controller tasks and media", () => {
     expect(adapter.sent.filter((message) => message.text.startsWith("● Codex"))).toHaveLength(2);
   });
 
-  test("activity preserves every plan step while compacting oversized content", async () => {
+  test("activity keeps a current-centered plan window within the IM row budget", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -778,19 +782,94 @@ describe("relay controller tasks and media", () => {
     store.bindConversation(1, "demo");
     await router.handle(textMessage("work"));
     const key = "codex:1:demo";
-    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "plan", steps: Array.from({ length: 20 }, (_, index) => ({ step: `Step ${index} ${"x".repeat(400)}`, status: index === 3 ? "inProgress" as const : index < 3 ? "completed" as const : "pending" as const })) } });
+    await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", activity: { kind: "plan", steps: Array.from({ length: 31 }, (_, index) => ({ step: `Step ${index} ${"x".repeat(400)}`, status: index === 3 ? "inProgress" as const : index < 3 ? "completed" as const : "pending" as const })) } });
     await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: "reasoning", activity: { kind: "reasoning", summary: "r".repeat(800), sectionIndex: 0 } });
     for (let index = 0; index < 12; index++) {
       await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: `activity-${index}`, activity: { kind: "item", category: "command", label: `Activity ${index} ${"y".repeat(400)}`, status: "completed" } });
     }
     await waitForStreamFlush();
 
-    const card = adapter.sent.find((message) => message.text.startsWith("● Codex"))!;
+    const card = adapter.edited.at(-1) ?? adapter.sent.find((message) => message.text.startsWith("● Codex"))!;
     expect(card.text.length).toBeLessThanOrEqual(3000);
-    expect(card.text).toContain("Plan 3/20");
-    for (let index = 0; index < 20; index++) expect(card.text).toContain(`Step ${index}`);
-    expect(card.text).toContain("Recent activity");
+    expect(estimateImRows(card.text)).toBeLessThanOrEqual(18);
+    expect(card.text).toContain("Plan 3/31 · showing 2–6");
+    for (let index = 1; index <= 5; index++) expect(card.text).toContain(`Step ${index}`);
+    expect(card.text).not.toContain("Step 0");
+    expect(card.text).not.toContain("Step 6");
+    expect(card.text).toContain("Recent activity · 12");
     expect(card.options?.replyMarkup).toEqual({ inline_keyboard: [] });
+  });
+
+  test("activity derives Goal mode, exposes waiting phases, and keeps CJK and emoji content bounded", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.capabilities = { threadGoals: true };
+    await router.handle(textMessage("work"));
+    const key = "codex:1:demo";
+    agent.goal = { threadId: "thread-1", objective: `安全发布🚀${"界".repeat(80)}`, status: "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1 };
+    await agent.getThreadGoal(key);
+    await router.handleAgentOutput({
+      type: "activity",
+      sessionKey: key,
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "reasoning",
+      activity: { kind: "reasoning", summary: `正在检查线程生命周期🧭${"状态".repeat(100)}` },
+    });
+    await router.handleAgentOutput({
+      type: "activity",
+      sessionKey: key,
+      threadId: "thread-1",
+      turnId: "turn-1",
+      activity: { kind: "plan", steps: Array.from({ length: 31 }, (_, index) => ({ step: `步骤${index} 🔧 ${"修复".repeat(40)}`, status: index === 15 ? "inProgress" as const : index < 15 ? "completed" as const : "pending" as const })) },
+    });
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: key,
+      turnId: "turn-1",
+      requestId: "question",
+      questions: [{ id: "choice", header: "选择", question: "继续吗？", options: [{ label: "继续", description: "继续工作" }] }],
+    });
+
+    let activityCard = adapter.edited.filter((message) => message.text.includes("Codex ·")).at(-1)!;
+    expect(activityCard.text).toContain("Codex · Waiting for input");
+    expect(activityCard.text).toContain("Mode Goal");
+    expect(activityCard.text).toContain("Reasoning");
+    expect(activityCard.text).toContain("Plan 15/31");
+    expect(activityCard.text.length).toBeLessThanOrEqual(3000);
+    expect(estimateImRows(activityCard.text)).toBeLessThanOrEqual(18);
+
+    await router.handleAgentOutput({
+      type: "approval_request",
+      sessionKey: key,
+      turnId: "turn-1",
+      requestId: "approval",
+      method: "item/commandExecution/requestApproval",
+      approvalKind: "command",
+      title: "执行命令",
+      body: "需要批准",
+      params: {},
+    });
+    activityCard = adapter.edited.filter((message) => message.text.includes("Codex ·")).at(-1)!;
+    expect(activityCard.text).toContain("Codex · Waiting for approval");
+    expect(estimateImRows(activityCard.text)).toBeLessThanOrEqual(18);
+
+    await router.handleAgentOutput({
+      type: "turn_completed",
+      sessionKey: key,
+      turnId: "turn-1",
+      status: "failed",
+      error: { message: `执行失败⚠️${"错误详情".repeat(100)}` },
+      durationMs: 64_000,
+    });
+    activityCard = adapter.edited.filter((message) => message.text.includes("Codex ·")).at(-1)!;
+    expect(activityCard.text).toContain("× Codex · Failed");
+    expect(activityCard.text).toContain("1m 04s");
+    expect(activityCard.text).toContain("Error · 执行失败");
+    expect(estimateImRows(activityCard.text)).toBeLessThanOrEqual(18);
   });
 
   test("activity falls back to plan progress and the current step when step structure cannot fit", async () => {
@@ -842,7 +921,7 @@ describe("relay controller tasks and media", () => {
 
       const final = adapter.edited.at(-1)!;
       expect(final.text.startsWith(scenario.header)).toBe(true);
-      expect(final.text).toContain("Mode Default · 1.3s");
+      expect(final.text).toContain("Mode Default · 1s");
       expect(final.text).toContain("Goal None");
       if (scenario.error) expect(final.text).toContain(`Error · ${scenario.error}`);
       else expect(final.text).not.toContain("Error ·");

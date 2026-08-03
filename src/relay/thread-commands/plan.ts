@@ -54,6 +54,13 @@ export class PlanCommandService {
     this.interruptedTurns.add(`${sessionKeyValue}:${turnId}`);
   }
 
+  clearSession(sessionKeyValue: string): void {
+    const prefix = `${sessionKeyValue}:`;
+    for (const key of this.interruptedTurns) {
+      if (key.startsWith(prefix)) this.interruptedTurns.delete(key);
+    }
+  }
+
   async handleCallback(message: CallbackMessage, pending: PendingPrompt, data: Record<string, unknown>, action: string | undefined): Promise<void> {
     const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
     const key = sessionKey(message.conversationId, workspace.name);

@@ -38,7 +38,7 @@ export interface ThreadCommandDeps {
   requireCurrentWorkspace(conversationId: ConversationId): WorkspaceRecord;
   ensureAgentStarted(conversationId: ConversationId, workspace: WorkspaceRecord, threadId?: string, options?: { resumePrevious?: boolean }): Promise<AgentSessionStatus>;
   finalizeSessionOutput(sessionKey: string): Promise<void>;
-  clearActivityForSession(sessionKey: string): void;
+  resetSessionPresentation(sessionKey: string, options?: { deletePages?: boolean }): Promise<void>;
   refreshActivityContext(sessionKey: string): Promise<void>;
   interruptActiveTasks(sessionKey: string): Promise<void>;
   interruptTasksByStatus(sessionKey: string, statuses: TaskStatus[]): Promise<void>;
@@ -101,6 +101,10 @@ export class ThreadCommandService {
     });
   }
 
+  clearSessionState(sessionKeyValue: string): void {
+    this.plans.clearSession(sessionKeyValue);
+  }
+
   async runReviewCommand(conversationId: ConversationId, text: string): Promise<void> {
     const target = parseReviewTarget(commandArgs(text));
     await this.runBuiltinCommand(conversationId, { type: "review", target });
@@ -136,19 +140,26 @@ export class ThreadCommandService {
       await this.sendBusyCommandNotice(conversationId);
       return;
     }
-    await this.deps.finalizeSessionOutput(key);
+    const sourceThreadId = existing?.threadId ?? this.deps.store.getSession(key)?.thread_id ?? undefined;
+    const sourceThreadName = existing?.threadName;
+    const sourceMode = this.deps.store.getCollaborationMode(key);
+    await this.deps.resetSessionPresentation(key, { deletePages: false });
     await this.deps.agent.stop(key);
-    this.deps.store.deletePendingPromptsForSession(key);
     this.deps.store.markSessionStopped(key);
     this.deps.store.clearSessionThreadId(key);
-    const status = await this.deps.ensureAgentStarted(conversationId, workspace);
+    let status: AgentSessionStatus;
+    try {
+      status = await this.deps.ensureAgentStarted(conversationId, workspace);
+    } catch (error) {
+      await this.restoreThreadAfterFailedSwitch(conversationId, workspace, key, sourceThreadId, sourceThreadName, sourceMode, "start a new chat", error);
+      return;
+    }
     if (name.trim()) {
       if (!this.deps.agent.renameThread) throw new Error("Agent driver cannot rename threads.");
       await this.deps.agent.renameThread(key, name.trim());
       status.threadName = name.trim();
     }
     if (clearDisplay) {
-      this.deps.clearActivityForSession(key);
       this.deps.store.clearTranscript(conversationId, workspace.name);
       this.deps.store.deletePagedOutputsForSession(key);
     }
@@ -181,10 +192,18 @@ export class ThreadCommandService {
     if (!result.messageId) throw new Error("IM adapter did not return a resume picker message id.");
     this.deps.store.setPendingPrompt({
       conversationId,
+      scopeKey: String(conversationId),
       promptMessageId: result.messageId,
       kind: "relay_command",
       createdAt: Date.now(),
-      payloadJson: JSON.stringify({ command: "resume", token, threads: threads.map((thread) => ({ id: thread.id, name: thread.name })) }),
+      sessionKey: key,
+      payloadJson: JSON.stringify({
+        command: "resume",
+        token,
+        sourceWorkspace: workspace.name,
+        sourceThreadId: this.deps.agent.getStatus(key)?.threadId ?? this.deps.store.getSession(key)?.thread_id ?? null,
+        threads: threads.map((thread) => ({ id: thread.id, name: thread.name })),
+      }),
       expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
     });
   }
@@ -197,6 +216,7 @@ export class ThreadCommandService {
     }
     if (!this.deps.agent.forkThread) throw new Error("Agent driver cannot fork threads.");
     const result = await this.deps.agent.forkThread(key);
+    await this.deps.resetSessionPresentation(key, { deletePages: false });
     this.deps.store.setSessionThreadId(key, result.threadId);
     await this.deps.sendRendered(conversationId, messageWithTitle("Forked chat.", `Thread: ${result.threadName ?? result.threadId}`));
     this.deps.logger.info("router.thread_forked", { conversation_id: conversationId, workspace: workspace.name, thread_id: result.threadId });
@@ -205,7 +225,8 @@ export class ThreadCommandService {
   async sideConversationCommand(conversationId: ConversationId, prompt: string, userMessageId?: MessageId): Promise<void> {
     const normalized = prompt.trim();
     if (!normalized) {
-      this.deps.requireCurrentWorkspace(conversationId);
+      const workspace = this.deps.requireCurrentWorkspace(conversationId);
+      const key = sessionKey(conversationId, workspace.name);
       const result = await this.deps.sendRendered(conversationId, textMessage("Side question requested."), {
         forceReply: true,
         forceReplyInstruction: "Reply to this prompt, or send your next message with the side question.",
@@ -218,6 +239,7 @@ export class ThreadCommandService {
         promptMessageId: result.messageId,
         kind: "relay_command",
         createdAt: Date.now(),
+        sessionKey: key,
         payloadJson: JSON.stringify({ command: "side" }),
         expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
       });
@@ -257,6 +279,8 @@ export class ThreadCommandService {
       await this.renameCurrentThread(conversationId, name.trim());
       return;
     }
+    const workspace = this.deps.requireCurrentWorkspace(conversationId);
+    const key = sessionKey(conversationId, workspace.name);
     const result = await this.deps.sendRendered(conversationId, textMessage("New chat name requested."), {
       forceReply: true,
       forceReplyInstruction: "Reply to this prompt, or send your next message with the new chat name.",
@@ -269,6 +293,7 @@ export class ThreadCommandService {
       promptMessageId: result.messageId,
       kind: "relay_command",
       createdAt: Date.now(),
+      sessionKey: key,
       payloadJson: JSON.stringify({ command: "rename" }),
       expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
     });
@@ -531,10 +556,8 @@ export class ThreadCommandService {
       if (!this.deps.agent.deleteThread) throw new Error("Agent driver cannot delete threads.");
       await this.deps.agent.deleteThread(key);
     }
-    await this.deps.finalizeSessionOutput(key);
+    await this.deps.resetSessionPresentation(key, { deletePages: true });
     await this.deps.agent.stop(key);
-    this.deps.store.deletePendingPromptsForSession(key);
-    this.deps.clearCodexPromptsForSession(key);
     this.deps.store.markSessionStopped(key);
     this.deps.store.clearSessionThreadId(key);
     await this.deps.renderCallbackPage(message, messageWithTitle(command === "archive" ? "Chat archived." : "Chat deleted."), { inline_keyboard: [] });
@@ -555,25 +578,77 @@ export class ThreadCommandService {
     const threadName = typeof selected?.name === "string" ? selected.name : threadId;
     const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
     const key = sessionKey(message.conversationId, workspace.name);
-    if (this.commandBusy(message.conversationId, workspace.name, this.deps.agent.getStatus(key))) {
+    const statusBefore = this.deps.agent.getStatus(key);
+    const sourceMode = this.deps.store.getCollaborationMode(key);
+    const currentThreadId = statusBefore?.threadId ?? this.deps.store.getSession(key)?.thread_id ?? undefined;
+    const sourceThreadId = typeof data.sourceThreadId === "string" ? data.sourceThreadId : undefined;
+    const sourceWorkspace = typeof data.sourceWorkspace === "string" ? data.sourceWorkspace : undefined;
+    if (pending.sessionKey !== key || sourceWorkspace !== workspace.name || sourceThreadId !== currentThreadId) {
+      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Resume selection expired.", "The active chat changed. Open a new resume picker."), { inline_keyboard: [] });
+      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+      return;
+    }
+    if (this.commandBusy(message.conversationId, workspace.name, statusBefore)) {
       await this.deps.renderStrictCallbackPage(message, messageWithTitle("Codex is busy.", "The current chat was not changed."), { inline_keyboard: [] });
+      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+      return;
+    }
+    if (threadId === currentThreadId) {
+      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Already using this chat.", threadName), { inline_keyboard: [] });
       this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
       return;
     }
     await this.deps.renderStrictCallbackPage(message, messageWithTitle("Resuming chat.", threadName), { inline_keyboard: [] });
     this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-    await this.deps.finalizeSessionOutput(key);
+    await this.deps.resetSessionPresentation(key, { deletePages: false });
     await this.deps.agent.stop(key);
-    this.deps.store.deletePendingPromptsForSession(key);
-    this.deps.clearCodexPromptsForSession(key);
     this.deps.store.markSessionStopped(key);
-    const status = await this.deps.ensureAgentStarted(message.conversationId, workspace, threadId);
+    let status: AgentSessionStatus;
+    try {
+      status = await this.deps.ensureAgentStarted(message.conversationId, workspace, threadId);
+    } catch (error) {
+      await this.restoreThreadAfterFailedSwitch(message.conversationId, workspace, key, currentThreadId, statusBefore?.threadName, sourceMode, `resume ${threadName}`, error, message);
+      return;
+    }
     this.deps.store.setSessionThreadId(key, status.threadId ?? threadId);
     await this.deps.renderCallbackPage(message, messageWithTitle("Resumed chat.", status.threadName ?? status.threadId ?? threadId), { inline_keyboard: [] });
   }
 
   async sendPlanReadyPrompt(sessionKeyValue: string, completedTurnId?: string): Promise<void> {
     await this.plans.sendReadyPrompt(sessionKeyValue, completedTurnId);
+  }
+
+  private async restoreThreadAfterFailedSwitch(
+    conversationId: ConversationId,
+    workspace: WorkspaceRecord,
+    key: string,
+    sourceThreadId: string | undefined,
+    sourceThreadName: string | undefined,
+    sourceMode: "default" | "plan",
+    operation: string,
+    switchError: unknown,
+    callbackMessage?: CallbackMessage,
+  ): Promise<void> {
+    const switchDetail = errorMessage(switchError);
+    let body: string;
+    if (!sourceThreadId) {
+      this.deps.store.markSessionStopped(key);
+      body = `Could not ${operation}: ${switchDetail}\nNo previous chat was available to restore.`;
+    } else {
+      try {
+        const restored = await this.deps.ensureAgentStarted(conversationId, workspace, sourceThreadId);
+        this.deps.store.setSessionThreadId(key, restored.threadId ?? sourceThreadId);
+        this.deps.store.setCollaborationMode(key, sourceMode);
+        body = `Could not ${operation}: ${switchDetail}\nRestored: ${restored.threadName ?? sourceThreadName ?? sourceThreadId}`;
+      } catch (rollbackError) {
+        this.deps.store.markSessionStopped(key);
+        this.deps.store.setSessionThreadId(key, sourceThreadId);
+        body = `Could not ${operation}: ${switchDetail}\nCould not restore the previous chat: ${errorMessage(rollbackError)}`;
+      }
+    }
+    const rendered = messageWithTitle("Chat switch failed.", body);
+    if (callbackMessage) await this.deps.renderCallbackPage(callbackMessage, rendered, { inline_keyboard: [] });
+    else await this.deps.sendRendered(conversationId, rendered);
   }
 
   private commandBusy(conversationId: ConversationId, workspaceName: string, status: AgentSessionStatus | undefined): boolean {
@@ -629,4 +704,8 @@ export class ThreadCommandService {
 
 function capitalize(value: string): string {
   return `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
+}
+
+function errorMessage(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
 }

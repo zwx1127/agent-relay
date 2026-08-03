@@ -155,9 +155,9 @@ describe("CodexDriver activity events", () => {
     await driver.send(status.sessionKey, "activity please");
     await sleep(100);
 
-    expect(events).toContainEqual({ type: "activity", sessionKey: "codex:1:demo", turnId: "turn-1", itemId: "reason-1", activity: { kind: "reasoning", summary: "Safe summary", sectionIndex: 0 } });
-    expect(events).toContainEqual({ type: "activity", sessionKey: "codex:1:demo", turnId: "turn-1", activity: { kind: "plan", explanation: "Do it", steps: [{ step: "Edit file", status: "inProgress" }] } });
-    expect(events).toContainEqual({ type: "activity", sessionKey: "codex:1:demo", turnId: "turn-1", activity: { kind: "diff", diff: "diff --git a/a b/a" } });
+    expect(events).toContainEqual({ type: "activity", sessionKey: "codex:1:demo", threadId: "thread-1", turnId: "turn-1", itemId: "reason-1", activity: { kind: "reasoning", summary: "Safe summary", sectionIndex: 0 } });
+    expect(events).toContainEqual({ type: "activity", sessionKey: "codex:1:demo", threadId: "thread-1", turnId: "turn-1", activity: { kind: "plan", explanation: "Do it", steps: [{ step: "Edit file", status: "inProgress" }] } });
+    expect(events).toContainEqual({ type: "activity", sessionKey: "codex:1:demo", threadId: "thread-1", turnId: "turn-1", activity: { kind: "diff", diff: "diff --git a/a b/a" } });
     expect(events.some((event) => event.type === "message" && event.chunk.includes("secret chain"))).toBe(false);
     await driver.stop(status.sessionKey);
   });
