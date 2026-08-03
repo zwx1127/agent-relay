@@ -12,7 +12,7 @@ import type { StatusView } from "./ui/status-view.ts";
 import { workspaceCallbackToken } from "./ui/callback-data.ts";
 import { confirmMessage, formatWorkspacesMessage } from "./ui/messages.ts";
 import { consoleKeyboard, deleteWorkspaceConfirmKeyboard, workspacesKeyboard } from "./ui/keyboards.ts";
-import { paginateWorkspaces } from "./ui/pagination.ts";
+import { normalizePageIndex, paginateWorkspaces } from "./ui/pagination.ts";
 import { parsePromptPayload } from "./ui/prompt-state.ts";
 import { code, messageWithTitle, textMessage } from "./ui/text-parts.ts";
 import { formatHomeMessage } from "./ui/status-message.ts";
@@ -299,9 +299,4 @@ export class WorkspaceFlow {
     if (result.messageId) this.deps.store.setConsoleMessageId(conversationId, result.messageId);
   }
 
-}
-
-function normalizePageIndex(value: unknown): number {
-  const pageIndex = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(pageIndex) && pageIndex >= 0 ? Math.floor(pageIndex) : 0;
 }

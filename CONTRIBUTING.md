@@ -21,12 +21,17 @@ bun run check
 
 ## Project structure
 
-- `src/runtime/`: configuration, dotenv loading, validation, bootstrap.
-- `src/providers/`: Codex, Telegram, and Lark provider implementations.
-- `src/relay/`: controller, routing, task flow, media, capabilities, and UI state.
-- `src/storage/`: store contract and SQLite implementation.
-- `test/unit/`: focused unit tests.
-- `test/integration/`: adapter, controller, storage, protocol, and smoke tests.
+- `src/ports/agent.ts` and `src/ports/im.ts`: stable compatibility barrels; contracts are grouped by capability in their adjacent subdirectories.
+- `src/runtime/`: environment loading, parsing and validation, final configuration assembly, and bootstrap.
+- `src/providers/agents/codex/`: the public Codex driver plus process/RPC lifecycle, session state, notification, activity, and server-request collaborators.
+- `src/providers/im/`: Telegram and Lark adapters, with provider-specific transport and inbound normalization kept beside each adapter.
+- `src/relay/`: the composition controller and focused services for agent events, thread commands, prompt flows, media, capabilities, and UI state.
+- `src/storage/`: the `RelayStore` contract, the `SQLiteStore` facade, migrations, and domain-specific SQLite repositories.
+- `test/support/`: shared Relay fixtures, message builders, fakes, and the Codex app-server harness.
+- `test/unit/`: focused unit tests, including pure parser and validation behavior.
+- `test/integration/`: adapter, controller, storage, protocol, and smoke tests split by subsystem.
+
+Keep public imports pointed at the compatibility barrels unless an implementation genuinely needs a narrower internal contract. New collaborators should depend on the smallest port or store surface they use rather than the complete controller or store.
 
 ## Reporting bugs
 

@@ -1,8 +1,7 @@
-import { lstat, readFile } from "node:fs/promises";
-import { basename, extname, resolve } from "node:path";
+import { basename } from "node:path";
 import { isAuthorized, type AppConfig } from "../runtime/config.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
-import { parseSessionKey, sessionKey } from "../domain/session.ts";
+import { sessionKey } from "../domain/session.ts";
 import { parseChatScopeKey } from "../domain/scope.ts";
 import { isRealDirectory } from "../domain/workspace.ts";
 import type { AgentDriver, AgentImageInput, AgentImageOutputEvent, AgentSessionStatus, AgentTaskInput } from "../ports/agent.ts";
@@ -14,11 +13,12 @@ import type { SendFileCapabilityRequest } from "./capabilities/send-file.ts";
 import type { TaskSubmitPreference } from "./task-coordinator.ts";
 import type { WorkspaceRecord } from "./types.ts";
 import { CODEX_PROMPT_TTL_MS, MEDIA_GROUP_QUIET_MS } from "./ui/constants.ts";
-import { bestPhoto, formatBytes, pathContains, truncateTelegramCaption } from "./ui/media-format.ts";
+import { bestPhoto, formatBytes } from "./ui/media-format.ts";
 import { formatErrorMessage } from "./ui/messages.ts";
 import { messageWithTitle, textMessage } from "./ui/text-parts.ts";
 import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
-import { extensionFromTelegramPath, fileBlobFromPath, imageBlobFromPath, safeFilename, saveGeneratedImage, saveRelayFile, saveRelayMedia } from "./media.ts";
+import { extensionFromTelegramPath, safeFilename, saveRelayFile, saveRelayMedia } from "./media.ts";
+import { OutboundMediaService } from "./media/outbound.ts";
 
 interface MediaGroupState {
   conversationId: ConversationId;
@@ -72,8 +72,11 @@ export interface MediaRelayDeps {
 
 export class MediaRelayService {
   private readonly mediaGroups = new Map<string, MediaGroupState>();
+  private readonly outbound: OutboundMediaService;
 
-  constructor(private readonly deps: MediaRelayDeps) {}
+  constructor(private readonly deps: MediaRelayDeps) {
+    this.outbound = new OutboundMediaService(deps);
+  }
 
   async handleMediaMessage(message: MediaInboundMessage): Promise<void> {
     const scope = parseChatScopeKey(String(message.conversationId));
@@ -402,172 +405,15 @@ export class MediaRelayService {
   }
 
   async sendAgentImageOutput(event: AgentImageOutputEvent): Promise<void> {
-    const parsed = parseSessionKey(event.sessionKey);
-    if (!parsed) return;
-    const workspace = this.deps.currentWorkspace(parsed.scopeKey);
-    if (!workspace || workspace.name !== parsed.workspaceName) return;
-    try {
-      // All outbound images are copied under the selected workspace before being
-      // sent so the relay enforces one media location and size policy.
-      const path = event.path ? await this.copyOutgoingImage(workspace.path, event.path) : event.data ? await saveGeneratedImage(workspace.path, event.data) : undefined;
-      if (!path) throw new Error("Codex image output did not include image data.");
-      await this.sendStoredImage(parsed.scopeKey, parsed.workspaceName, path, event.caption, this.deps.lastUserMessageId(event.sessionKey));
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      this.deps.logger.error("router.agent_image_send_failed", {
-        conversation_id: parsed.conversationId,
-        session_key: event.sessionKey,
-        error: error instanceof Error ? error : new Error(detail),
-      });
-      await this.deps.trySendRendered(
-        parsed.scopeKey,
-        formatErrorMessage(`Could not send image: ${detail}`),
-        "router.agent_image_error_notice_failed",
-        { session_key: event.sessionKey },
-      );
-      this.deps.appendSystem(parsed.scopeKey, `Error: Could not send image: ${detail}\n`);
-    }
+    await this.outbound.sendAgentImageOutput(event);
   }
 
   async sendDebugImage(input: SendImageCapabilityRequest): Promise<{ path: string }> {
-    const { sessionKey: sessionKeyValue, workspace } = this.resolveCapabilitySession(input, "image");
-    const sourcePath = this.resolveCapabilityPath(input, workspace.path);
-    await this.validateDebugImagePath(sourcePath, workspace.path);
-    const path = await this.copyOutgoingImage(workspace.path, sourcePath);
-    const parsed = parseSessionKey(sessionKeyValue);
-    if (!parsed) throw new Error("Invalid session key.");
-    await this.sendStoredImage(parsed.scopeKey, parsed.workspaceName, path, input.caption, this.deps.lastUserMessageId(sessionKeyValue));
-    this.deps.logger.info("router.debug_image_sent", {
-      conversation_id: parsed.conversationId,
-      workspace: parsed.workspaceName,
-      session_key: sessionKeyValue,
-      source_path: input.path,
-      resolved_source_path: sourcePath,
-      stored_path: path,
-    });
-    return { path };
+    return await this.outbound.sendDebugImage(input);
   }
 
   async sendDebugFile(input: SendFileCapabilityRequest): Promise<{ path: string }> {
-    const { sessionKey: sessionKeyValue, workspace } = this.resolveCapabilitySession(input, "file");
-    const sourcePath = this.resolveCapabilityPath(input, workspace.path);
-    await this.validateDebugFilePath(sourcePath, workspace.path);
-    const path = await this.copyOutgoingFile(workspace.path, sourcePath);
-    const parsed = parseSessionKey(sessionKeyValue);
-    if (!parsed) throw new Error("Invalid session key.");
-    await this.sendStoredFile(parsed.scopeKey, parsed.workspaceName, path, input.caption, this.deps.lastUserMessageId(sessionKeyValue));
-    this.deps.logger.info("router.debug_file_sent", {
-      conversation_id: parsed.conversationId,
-      workspace: parsed.workspaceName,
-      session_key: sessionKeyValue,
-      source_path: input.path,
-      resolved_source_path: sourcePath,
-      stored_path: path,
-    });
-    return { path };
-  }
-
-  private resolveCapabilitySession(input: SendImageCapabilityRequest | SendFileCapabilityRequest, kind: "image" | "file"): { sessionKey: string; workspace: WorkspaceRecord } {
-    if (input.sessionKey) {
-      const parsed = parseSessionKey(input.sessionKey);
-      if (!parsed) throw new Error("sessionKey is invalid");
-      const workspace = this.deps.store.getWorkspace(parsed.workspaceName);
-      if (!workspace) throw new Error("session workspace was not found");
-      const status = this.deps.agent.getStatus(input.sessionKey);
-      if (!status?.running) throw new Error("session is not running");
-      return { sessionKey: input.sessionKey, workspace };
-    }
-
-    // Capability helper calls usually identify a session by cwd. Accept that only
-    // when it maps to exactly one running workspace to avoid cross-chat leaks.
-    const cwd = input.cwd ? resolve(input.cwd) : undefined;
-    const matches = this.deps.store.listRunningSessions()
-      .flatMap((session) => {
-        const workspace = this.deps.store.getWorkspace(session.workspace_name);
-        const key = session.session_key;
-        const status = this.deps.agent.getStatus(key);
-        if (!workspace || !status?.running) return [];
-        if (cwd && !pathContains(workspace.path, cwd)) return [];
-        return [{ sessionKey: key, workspace }];
-      });
-    if (matches.length === 1) return matches[0]!;
-    if (matches.length === 0) throw new Error(`No running relay session matches this ${kind} request.`);
-    throw new Error(`Multiple running relay sessions match this ${kind} request; pass --session-key.`);
-  }
-
-  private resolveCapabilityPath(input: Pick<SendImageCapabilityRequest | SendFileCapabilityRequest, "path" | "cwd">, workspacePath: string): string {
-    return resolve(input.cwd ?? workspacePath, input.path);
-  }
-
-  private async validateDebugImagePath(resolvedPath: string, workspacePath: string): Promise<void> {
-    // The control API is local-only, but still treats workspace containment as
-    // the authorization boundary for agent-produced debug images.
-    if (!pathContains(workspacePath, resolvedPath)) throw new Error("Image path must stay inside the selected workspace.");
-    const extension = extname(resolvedPath).toLowerCase();
-    if (![".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(extension)) {
-      throw new Error("Image must be a PNG, JPG, WEBP, or GIF file.");
-    }
-    const stat = await lstat(resolvedPath);
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Image path must be a regular file.");
-    if (stat.size > this.deps.config.mediaMaxBytes) {
-      throw new Error(`Image is too large (${formatBytes(stat.size)}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
-    }
-  }
-
-  private async validateDebugFilePath(resolvedPath: string, workspacePath: string): Promise<void> {
-    if (!pathContains(workspacePath, resolvedPath)) throw new Error("File path must stay inside the selected workspace.");
-    const stat = await lstat(resolvedPath);
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("File path must be a regular file.");
-    if (stat.size > this.deps.config.mediaMaxBytes) {
-      throw new Error(`File is too large (${formatBytes(stat.size)}). Limit: ${formatBytes(this.deps.config.mediaMaxBytes)}.`);
-    }
-  }
-
-  private async copyOutgoingImage(workspacePath: string, sourcePath: string): Promise<string> {
-    return await saveRelayMedia(workspacePath, "outgoing", await readFile(sourcePath), { extension: extensionFromTelegramPath(sourcePath) });
-  }
-
-  private async copyOutgoingFile(workspacePath: string, sourcePath: string): Promise<string> {
-    return await saveRelayFile(workspacePath, "outgoing", await readFile(sourcePath), { filename: basename(sourcePath) });
-  }
-
-  private async sendStoredImage(conversationId: ConversationId, workspaceName: string, path: string, caption?: string, replyToMessageId?: MessageId): Promise<void> {
-    if (!this.deps.adapter.sendPhoto) throw new Error("IM adapter cannot send images.");
-    const scope = parseChatScopeKey(String(conversationId));
-    const blob = await imageBlobFromPath(path);
-    await this.deps.adapter.sendPhoto(scope.conversationId, blob, {
-      ...(caption ? { caption: truncateTelegramCaption(caption) } : {}),
-      ...(replyToMessageId ? { replyToMessageId } : {}),
-      ...(scope.topic ? { topic: scope.topic } : {}),
-    });
-    this.deps.store.appendTranscript({
-      conversationId: scope.conversationId,
-      scopeKey: scope.scopeKey,
-      workspaceName,
-      role: "agent",
-      text: `[image: ${path}]\n`,
-      createdAt: Date.now(),
-    });
-  }
-
-  private async sendStoredFile(conversationId: ConversationId, workspaceName: string, path: string, caption?: string, replyToMessageId?: MessageId): Promise<void> {
-    if (!this.deps.adapter.sendFile) throw new Error("IM adapter cannot send files.");
-    const scope = parseChatScopeKey(String(conversationId));
-    const blob = await fileBlobFromPath(path);
-    await this.deps.adapter.sendFile(scope.conversationId, blob, {
-      filename: basename(path),
-      ...(caption ? { caption: truncateTelegramCaption(caption) } : {}),
-      ...(replyToMessageId ? { replyToMessageId } : {}),
-      ...(scope.topic ? { topic: scope.topic } : {}),
-    });
-    this.deps.store.appendTranscript({
-      conversationId: scope.conversationId,
-      scopeKey: scope.scopeKey,
-      workspaceName,
-      role: "agent",
-      text: `[file: ${path}]\n`,
-      createdAt: Date.now(),
-    });
+    return await this.outbound.sendDebugFile(input);
   }
 
   private async promptForMediaAction(conversationId: ConversationId, payload: PendingMediaActionPayload): Promise<void> {

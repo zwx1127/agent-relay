@@ -11,6 +11,14 @@ agent-relay 适合用来迭代它自己。你可以把这个仓库作为工作�
 5. 运行 `bun run typecheck` 和 `bun test`。
 6. 在聊天里查看 diff，再决定是否合并。
 
+## 内部扩展点
+
+`src/ports/agent.ts` 和 `src/ports/im.ts` 仍是稳定的公共导入入口。事件、会话、输入、线程、入站和出站协议按职责放在相邻子模块中，并由这两个文件统一重新导出。
+
+Provider 适配器保持轻量：各 provider 的入站归一化和传输辅助逻辑与适配器放在一起。Codex driver 是稳定外观，内部组合 app-server 进程/RPC 生命周期、会话状态、通知转换和服务端请求处理。`RelayController` 组合 Agent 事件、线程命令、提示流程、媒体、能力和工作区 UI 等专用服务；`SQLiteStore` 也以同样方式组合各领域 repository，同时保持 `RelayStore` 协议不变。
+
+扩展子系统时，应把行为加入真正负责该职责的窄协作者，并保持兼容导入路径和工厂函数签名稳定。
+
 ## 添加新的 IM provider
 
 当你想支持另一个聊天工具时，用这个方向。

@@ -11,7 +11,7 @@ import type { WorkspaceRecord } from "./types.ts";
 import { CODEX_PROMPT_TTL_MS, LIST_PAGE_SIZE, PAGE_MAX_CHARS, UI_BUTTON } from "./ui/constants.ts";
 import { deleteWorkspaceCallbackData, shortToken, workspaceCallbackData } from "./ui/callback-data.ts";
 import { buttonLabel } from "./ui/keyboards.ts";
-import { decoratePagedOutput } from "./ui/pagination.ts";
+import { clampPage, decoratePagedOutput, normalizePageIndex } from "./ui/pagination.ts";
 import { bold, code, messageWithTitle } from "./ui/text-parts.ts";
 
 const MAX_TEXT_FILE_BYTES = 256 * 1024;
@@ -429,16 +429,6 @@ function displayPath(path: string): string {
 
 function compareEntries(left: WorkspaceFileEntry, right: WorkspaceFileEntry): number {
   return left.name.localeCompare(right.name);
-}
-
-function clampPage(value: number, totalPages: number): number {
-  if (!Number.isInteger(value)) return 0;
-  return Math.max(0, Math.min(totalPages - 1, value));
-}
-
-function normalizePageIndex(value: unknown): number {
-  const pageIndex = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(pageIndex) && pageIndex >= 0 ? Math.floor(pageIndex) : 0;
 }
 
 function isExpired(prompt: { expiresAt?: number }): boolean {

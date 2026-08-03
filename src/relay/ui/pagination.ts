@@ -26,3 +26,8 @@ export function clampPage(value: number, totalPages: number): number {
   if (!Number.isInteger(value)) return 0;
   return Math.max(0, Math.min(totalPages - 1, value));
 }
+
+export function normalizePageIndex(value: unknown): number {
+  const pageIndex = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(pageIndex) && pageIndex >= 0 ? Math.floor(pageIndex) : 0;
+}

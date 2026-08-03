@@ -14,7 +14,7 @@ import { parseChatScopeKey } from "../domain/scope.ts";
 import type { RelayStore } from "../storage/store.ts";
 import { CODEX_PROMPT_TTL_MS } from "./ui/constants.ts";
 import { codexRequestKey, shortToken } from "./ui/callback-data.ts";
-import { approvalKeyboard, codexQuestionConfirmKeyboard, codexQuestionKeyboard, mcpElicitationKeyboard } from "./ui/keyboards.ts";
+import { approvalKeyboard, codexQuestionConfirmKeyboard, codexQuestionKeyboard } from "./ui/keyboards.ts";
 import { approvalChoices, approvalResponse, asPromptRecord, isExpired, parsePromptPayload } from "./ui/prompt-state.ts";
 import {
   answeredMessage,
@@ -28,6 +28,7 @@ import {
 import { messageWithTitle } from "./ui/text-parts.ts";
 import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
 import type { RenderCallbackPageResult } from "./controller-types.ts";
+import { McpElicitationFlow } from "./prompt-flows/mcp-elicitation.ts";
 
 type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
 
@@ -59,15 +60,11 @@ export class CodexPromptFlow {
     questions: AgentUserInputQuestion[];
     answers: Record<string, { answers: string[] }>;
   }>();
-  private readonly mcpRequests = new Map<string, {
-    sessionKey: string;
-    requestId: string | number;
-    scopeKey: string;
-    timer: ReturnType<typeof setTimeout>;
-    promptMessageId?: MessageId;
-  }>();
+  private readonly mcp: McpElicitationFlow;
 
-  constructor(private readonly deps: CodexPromptFlowDeps) {}
+  constructor(private readonly deps: CodexPromptFlowDeps) {
+    this.mcp = new McpElicitationFlow(deps);
+  }
 
   async handleUserInputRequest(event: AgentUserInputRequestEvent): Promise<void> {
     const parsed = parseSessionKey(event.sessionKey);
@@ -329,242 +326,15 @@ export class CodexPromptFlow {
   }
 
   async handleMcpElicitationRequest(event: AgentMcpElicitationRequestEvent): Promise<void> {
-    const parsed = parseSessionKey(event.sessionKey);
-    if (!parsed) return;
-    const token = shortToken();
-    const expiresAt = Date.now() + CODEX_PROMPT_TTL_MS;
-    const requestKey = codexRequestKey(event.sessionKey, event.requestId);
-    const timer = setTimeout(() => { void this.timeoutMcpRequest(requestKey); }, CODEX_PROMPT_TTL_MS);
-    this.mcpRequests.set(requestKey, { sessionKey: event.sessionKey, requestId: event.requestId, scopeKey: parsed.scopeKey, timer });
-    if (event.mode === "url") {
-      const result = await this.deps.sendRendered(parsed.scopeKey, messageWithTitle(
-        `MCP request from ${event.serverName}`,
-        `${event.message}\n\n${event.url ?? "URL unavailable"}`,
-      ), {
-        replyMarkup: mcpElicitationKeyboard(token, [
-          { action: "complete", label: "Complete" },
-          { action: "decline", label: "Decline" },
-          { action: "cancel", label: "Cancel" },
-        ]),
-        disableWebPagePreview: true,
-      });
-      if (!result.messageId) throw new Error("IM adapter did not return an MCP elicitation message id.");
-      this.deps.store.setPendingPrompt({
-        conversationId: parsed.conversationId,
-        scopeKey: parsed.scopeKey,
-        promptMessageId: result.messageId,
-        kind: "codex_mcp_elicitation",
-        createdAt: Date.now(),
-        sessionKey: event.sessionKey,
-        payloadJson: JSON.stringify({ token, requestId: event.requestId, mode: "url", serverName: event.serverName }),
-        expiresAt,
-      });
-      const request = this.mcpRequests.get(requestKey);
-      if (request) request.promptMessageId = result.messageId;
-      return;
-    }
-
-    const fields = Object.entries(event.requestedSchema?.properties ?? {}).map(([name, schema]) => ({
-      name,
-      schema,
-      required: event.requestedSchema?.required?.includes(name) ?? false,
-    }));
-    const state = { token, requestId: event.requestId, mode: "form", serverName: event.serverName, message: event.message, fields, index: 0, answers: {} };
-    await this.sendMcpFormStep(parsed.scopeKey, event.sessionKey, state, expiresAt);
-  }
-
-  private async sendMcpFormStep(
-    conversationId: ConversationId,
-    sessionKeyValue: string,
-    state: Record<string, unknown>,
-    expiresAt: number,
-    forceInput = false,
-  ): Promise<void> {
-    const fields = Array.isArray(state.fields) ? state.fields : [];
-    const index = typeof state.index === "number" ? state.index : 0;
-    const field = asPromptRecord(fields[index]);
-    const token = typeof state.token === "string" ? state.token : shortToken();
-    if (!field) {
-      const answers = asPromptRecord(state.answers) ?? {};
-      const result = await this.deps.sendRendered(conversationId, messageWithTitle(
-        "Submit MCP form?",
-        Object.keys(answers).length > 0 ? JSON.stringify(answers, null, 2) : "No values were entered.",
-      ), {
-        replyMarkup: mcpElicitationKeyboard(token, [
-          { action: "submit", label: "Submit" },
-          { action: "decline", label: "Decline" },
-          { action: "cancel", label: "Cancel" },
-        ]),
-      });
-      await this.storeMcpPrompt(result.messageId, conversationId, sessionKeyValue, state, expiresAt);
-      return;
-    }
-    const schema = asPromptRecord(field.schema);
-    const fieldName = typeof field.name === "string" ? field.name : `field-${index + 1}`;
-    const required = field.required === true;
-    const title = typeof schema?.title === "string" ? schema.title : fieldName;
-    const description = [
-      typeof schema?.description === "string" ? schema.description : undefined,
-      required ? "Required." : "Optional.",
-      mcpInputHint(schema),
-    ].filter(Boolean).join("\n");
-    const enumValues = mcpEnumValues(schema);
-    const type = typeof schema?.type === "string" ? schema.type : "string";
-    const actions: Array<{ action: string; label: string }> = [];
-    if (type === "boolean") {
-      actions.push({ action: "true", label: "True" }, { action: "false", label: "False" });
-    } else if (enumValues && type !== "array") {
-      enumValues.forEach((value, valueIndex) => actions.push({ action: `v${valueIndex}`, label: String(value) }));
-    } else if (!forceInput) {
-      actions.push({ action: "input", label: "Enter value" });
-    }
-    if (!required && !forceInput) actions.push({ action: "skip", label: "Skip" });
-    if (!forceInput) actions.push({ action: "cancel", label: "Cancel" });
-    const useForceReply = forceInput;
-    const result = await this.deps.sendRendered(conversationId, messageWithTitle(
-      `MCP field ${index + 1}/${fields.length}: ${title}`,
-      description,
-    ), {
-      ...(useForceReply
-        ? { forceReply: true, forceReplyInstruction: "Reply with the field value.", inputFieldPlaceholder: title }
-        : { replyMarkup: mcpElicitationKeyboard(token, actions) }),
-      disableWebPagePreview: true,
-    });
-    await this.storeMcpPrompt(result.messageId, conversationId, sessionKeyValue, state, expiresAt);
-  }
-
-  private async storeMcpPrompt(
-    messageId: MessageId | undefined,
-    conversationId: ConversationId,
-    sessionKeyValue: string,
-    state: Record<string, unknown>,
-    expiresAt: number,
-  ): Promise<void> {
-    if (!messageId) throw new Error("IM adapter did not return an MCP form message id.");
-    const scope = parseChatScopeKey(String(conversationId));
-    this.deps.store.setPendingPrompt({
-      conversationId: scope.conversationId,
-      scopeKey: scope.scopeKey,
-      promptMessageId: messageId,
-      kind: "codex_mcp_elicitation",
-      createdAt: Date.now(),
-      sessionKey: sessionKeyValue,
-      payloadJson: JSON.stringify(state),
-      expiresAt,
-    });
-    const requestId = state.requestId as string | number | undefined;
-    if (requestId !== undefined) {
-      const request = this.mcpRequests.get(codexRequestKey(sessionKeyValue, requestId));
-      if (request) request.promptMessageId = messageId;
-    }
+    await this.mcp.handle(event);
   }
 
   async answerMcpCallback(message: CallbackMessage, payload: string): Promise<void> {
-    const [, token, action] = payload.split(":");
-    const pending = message.messageId ? this.deps.store.getPendingPrompt(message.conversationId, message.messageId) : undefined;
-    const state = parsePromptPayload(pending?.payloadJson);
-    if (!pending || pending.kind !== "codex_mcp_elicitation" || !state || state.token !== token || isExpired(pending)) {
-      await this.expireMcpPrompt(message, pending, state);
-      return;
-    }
-    if (!pending.sessionKey) throw new Error("MCP elicitation session is missing.");
-    if (action === "decline" || action === "cancel" || (state.mode === "url" && action === "complete")) {
-      await this.deps.renderStrictCallbackPage(message, messageWithTitle(action === "complete" ? "MCP action completed." : action === "decline" ? "MCP request declined." : "MCP request cancelled."), { inline_keyboard: [] });
-      this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-      await this.respondMcp(pending.sessionKey, state.requestId as string | number, action === "complete" ? "accept" : action, null);
-      return;
-    }
-    if (action === "submit") {
-      await this.deps.renderStrictCallbackPage(message, messageWithTitle("MCP form submitted."), { inline_keyboard: [] });
-      this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-      await this.respondMcp(pending.sessionKey, state.requestId as string | number, "accept", asPromptRecord(state.answers) ?? {});
-      return;
-    }
-    const fields = Array.isArray(state.fields) ? state.fields : [];
-    const index = typeof state.index === "number" ? state.index : 0;
-    const field = asPromptRecord(fields[index]);
-    const schema = asPromptRecord(field?.schema);
-    if (!field || !schema) throw new Error("MCP form field expired.");
-    if (action === "input") {
-      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Enter MCP field value."), { inline_keyboard: [] });
-      this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-      await this.sendMcpFormStep(message.conversationId, pending.sessionKey, state, pending.expiresAt ?? Date.now() + CODEX_PROMPT_TTL_MS, true);
-      return;
-    }
-    let value: unknown;
-    if (action === "skip" && field.required !== true) value = undefined;
-    else if (action === "true" || action === "false") value = action === "true";
-    else if (action?.startsWith("v")) value = mcpEnumValues(schema)?.[Number(action.slice(1))];
-    else throw new Error("MCP form action is unavailable.");
-    await this.deps.renderStrictCallbackPage(message, messageWithTitle(value === undefined ? "MCP field skipped." : "MCP field recorded."), { inline_keyboard: [] });
-    this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-    await this.advanceMcpForm(message.conversationId, pending, state, typeof field.name === "string" ? field.name : "field", value);
+    await this.mcp.answerCallback(message, payload);
   }
 
   async answerMcpFreeText(conversationId: ConversationId, promptMessageId: MessageId, text: string): Promise<void> {
-    const pending = this.deps.store.getPendingPrompt(conversationId, promptMessageId);
-    const state = parsePromptPayload(pending?.payloadJson);
-    if (!pending || pending.kind !== "codex_mcp_elicitation" || !state || isExpired(pending) || !pending.sessionKey) {
-      this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
-      await this.deps.sendRendered(conversationId, messageWithTitle("MCP form expired."));
-      return;
-    }
-    const fields = Array.isArray(state.fields) ? state.fields : [];
-    const index = typeof state.index === "number" ? state.index : 0;
-    const field = asPromptRecord(fields[index]);
-    const schema = asPromptRecord(field?.schema);
-    if (!field || !schema || typeof field.name !== "string") throw new Error("MCP form field expired.");
-    const parsed = parseMcpFieldValue(text, schema, field.required === true);
-    if (typeof parsed === "string") {
-      await this.deps.sendRendered(conversationId, messageWithTitle("Invalid MCP field value.", parsed));
-      this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
-      await this.sendMcpFormStep(conversationId, pending.sessionKey, state, pending.expiresAt ?? Date.now() + CODEX_PROMPT_TTL_MS, true);
-      return;
-    }
-    this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
-    await this.deps.sendRendered(conversationId, messageWithTitle(parsed.value === undefined ? "MCP field skipped." : "MCP field recorded."));
-    await this.advanceMcpForm(conversationId, pending, state, field.name, parsed.value);
-  }
-
-  private async advanceMcpForm(
-    conversationId: ConversationId,
-    pending: PendingPrompt,
-    state: Record<string, unknown>,
-    fieldName: string,
-    value: unknown,
-  ): Promise<void> {
-    if (!pending.sessionKey) return;
-    const answers = { ...(asPromptRecord(state.answers) ?? {}) };
-    if (value !== undefined) answers[fieldName] = value;
-    const next = { ...state, answers, index: (typeof state.index === "number" ? state.index : 0) + 1 };
-    await this.sendMcpFormStep(conversationId, pending.sessionKey, next, pending.expiresAt ?? Date.now() + CODEX_PROMPT_TTL_MS);
-  }
-
-  private async respondMcp(sessionKeyValue: string, requestId: string | number, action: string, content: unknown): Promise<void> {
-    if (!this.deps.agent.respond) throw new Error("Agent driver cannot answer MCP elicitations.");
-    const key = codexRequestKey(sessionKeyValue, requestId);
-    const request = this.mcpRequests.get(key);
-    if (request) clearTimeout(request.timer);
-    this.mcpRequests.delete(key);
-    await this.deps.agent.respond(sessionKeyValue, requestId, { action, content, _meta: null });
-    await this.deps.markActiveTask(sessionKeyValue, "running");
-  }
-
-  private async timeoutMcpRequest(key: string): Promise<void> {
-    const request = this.mcpRequests.get(key);
-    if (!request) return;
-    this.mcpRequests.delete(key);
-    if (request.promptMessageId !== undefined) this.deps.store.deletePendingPrompt(request.scopeKey, request.promptMessageId);
-    await this.deps.agent.respond?.(request.sessionKey, request.requestId, { action: "cancel", content: null, _meta: null }).catch(() => undefined);
-    await this.deps.markActiveTask(request.sessionKey, "running");
-  }
-
-  private async expireMcpPrompt(message: CallbackMessage, pending: PendingPrompt | undefined, state: Record<string, unknown> | undefined): Promise<void> {
-    if (message.messageId) this.deps.store.deletePendingPrompt(message.conversationId, message.messageId);
-    if (pending?.sessionKey && state?.requestId !== undefined) {
-      await this.respondMcp(pending.sessionKey, state.requestId as string | number, "cancel", null);
-    }
-    await this.deps.renderStrictCallbackPage(message, messageWithTitle("MCP request expired."), { inline_keyboard: [] });
+    await this.mcp.answerFreeText(conversationId, promptMessageId, text);
   }
 
   private async recordCodexAnswer(
@@ -665,71 +435,8 @@ export class CodexPromptFlow {
     for (const key of this.codexRequests.keys()) {
       if (key.startsWith(`${sessionKeyValue}:`)) this.codexRequests.delete(key);
     }
-    for (const [key, request] of this.mcpRequests.entries()) {
-      if (request.sessionKey !== sessionKeyValue) continue;
-      clearTimeout(request.timer);
-      this.mcpRequests.delete(key);
-      void this.deps.agent.respond?.(request.sessionKey, request.requestId, { action: "cancel", content: null, _meta: null }).catch(() => undefined);
-    }
+    this.mcp.clearForSession(sessionKeyValue);
   }
-}
-
-function mcpEnumValues(schema: Record<string, unknown> | undefined): unknown[] | undefined {
-  if (Array.isArray(schema?.enum)) return schema.enum;
-  const items = asPromptRecord(schema?.items);
-  return Array.isArray(items?.enum) ? items.enum : undefined;
-}
-
-function mcpInputHint(schema: Record<string, unknown> | undefined): string | undefined {
-  const type = typeof schema?.type === "string" ? schema.type : undefined;
-  const values = mcpEnumValues(schema);
-  if (type === "array" && values) return `Enter comma-separated values: ${values.join(", ")}`;
-  if (values) return `Choose one of: ${values.join(", ")}`;
-  if (type === "boolean") return "Choose true or false.";
-  if (type === "integer") return "Enter a whole number.";
-  if (type === "number") return "Enter a number.";
-  if (typeof schema?.format === "string") return `Format: ${schema.format}.`;
-  return undefined;
-}
-
-function parseMcpFieldValue(text: string, schema: Record<string, unknown>, required: boolean): { value: unknown } | string {
-  const trimmed = text.trim();
-  if (!trimmed || (!required && trimmed.toLowerCase() === "skip")) {
-    if (schema.default !== undefined) return { value: schema.default };
-    return required ? "A value is required." : { value: undefined };
-  }
-  const type = typeof schema.type === "string" ? schema.type : "string";
-  if (type === "number" || type === "integer") {
-    const value = Number(trimmed);
-    if (!Number.isFinite(value) || (type === "integer" && !Number.isInteger(value))) return type === "integer" ? "Enter a whole number." : "Enter a valid number.";
-    if (typeof schema.minimum === "number" && value < schema.minimum) return `Value must be at least ${schema.minimum}.`;
-    if (typeof schema.maximum === "number" && value > schema.maximum) return `Value must be at most ${schema.maximum}.`;
-    return { value };
-  }
-  if (type === "boolean") {
-    if (/^(true|yes|1)$/i.test(trimmed)) return { value: true };
-    if (/^(false|no|0)$/i.test(trimmed)) return { value: false };
-    return "Enter true or false.";
-  }
-  if (type === "array") {
-    const values = trimmed.split(",").map((value) => value.trim()).filter(Boolean);
-    const allowed = mcpEnumValues(schema);
-    if (allowed && values.some((value) => !allowed.includes(value))) return `Allowed values: ${allowed.join(", ")}.`;
-    if (typeof schema.minItems === "number" && values.length < schema.minItems) return `Select at least ${schema.minItems} values.`;
-    if (typeof schema.maxItems === "number" && values.length > schema.maxItems) return `Select at most ${schema.maxItems} values.`;
-    return { value: values };
-  }
-  if (typeof schema.minLength === "number" && trimmed.length < schema.minLength) return `Value must contain at least ${schema.minLength} characters.`;
-  if (typeof schema.maxLength === "number" && trimmed.length > schema.maxLength) return `Value must contain at most ${schema.maxLength} characters.`;
-  const allowed = mcpEnumValues(schema);
-  if (allowed && !allowed.includes(trimmed)) return `Allowed values: ${allowed.join(", ")}.`;
-  if (schema.format === "email" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) return "Enter a valid email address.";
-  if (schema.format === "uri") {
-    try { new URL(trimmed); } catch { return "Enter a valid URI."; }
-  }
-  if (schema.format === "date" && !/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return "Enter a date in YYYY-MM-DD format.";
-  if (schema.format === "date-time" && Number.isNaN(Date.parse(trimmed))) return "Enter a valid date-time.";
-  return { value: trimmed };
 }
 
 function expiredQuestionMessage(): RenderedTelegramText {

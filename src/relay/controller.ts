@@ -1,5 +1,4 @@
 import { isAuthorized } from "../runtime/config.ts";
-import { resolve } from "node:path";
 import type { SendImageCapabilityRequest } from "./capabilities/send-image.ts";
 import type { SendFileCapabilityRequest } from "./capabilities/send-file.ts";
 import type { MentionAgentCapabilityRequest } from "./capabilities/mention-agent.ts";
@@ -44,7 +43,8 @@ import { WorkspaceFlow } from "./workspace-flow.ts";
 import { ConversationQueue } from "./conversation-queue.ts";
 import { RelayMessageRenderer } from "./rendering.ts";
 import { RelaySessionService } from "./session-service.ts";
-import { pathContains } from "./ui/media-format.ts";
+import { RelayAgentEventRouter } from "./agent-event-router.ts";
+import { RelayCapabilityService } from "./capability-service.ts";
 
 interface InboundRoute {
   scopeKey: string;
@@ -65,6 +65,8 @@ export class RelayController {
   private readonly threadCommands: ThreadCommandService;
   private readonly renderer: RelayMessageRenderer;
   private readonly sessionService: RelaySessionService;
+  private readonly agentEvents: RelayAgentEventRouter;
+  private readonly capabilityService: RelayCapabilityService;
   // IM providers can deliver callbacks, text, and media concurrently. Serializing
   // per conversation keeps prompt state, task state, and home-message edits ordered.
   private readonly conversationQueue = new ConversationQueue();
@@ -167,6 +169,29 @@ export class RelayController {
       expireCallbackPrompt: (message) => this.expireCallbackPrompt(message),
       clearCodexPromptsForSession: (sessionKeyValue) => this.clearCodexPromptsForSession(sessionKeyValue),
       hasTaskCreatedAfter: (conversationId, workspaceName, timestamp) => this.hasTaskCreatedAfter(conversationId, workspaceName, timestamp),
+    });
+    this.agentEvents = new RelayAgentEventRouter({
+      logger: this.logger,
+      store: deps.store,
+      activity: this.activityStreamer,
+      media: this.mediaRelay,
+      prompts: this.codexPromptFlow,
+      finalizeOutput: (sessionKeyValue) => this.finalizeSessionOutput(sessionKeyValue),
+      sendPlanReadyPrompt: (sessionKeyValue, turnId) => this.threadCommands.sendPlanReadyPrompt(sessionKeyValue, turnId),
+      appendSystem: (conversationId, text) => this.appendSystem(conversationId, text),
+      sendRendered: (conversationId, rendered) => this.sendRendered(conversationId, rendered),
+      completeTask: (sessionKeyValue, turnId, status) => this.completeTaskAndDispatchNext(sessionKeyValue, turnId, status),
+      markActiveTask: (sessionKeyValue, status, turnId) => this.markActiveTask(sessionKeyValue, status, turnId),
+      cancelActiveTasks: (sessionKeyValue) => this.cancelActiveTasks(sessionKeyValue),
+      failActiveTasks: (sessionKeyValue) => this.failActiveTasks(sessionKeyValue),
+      clearPrompts: (sessionKeyValue) => this.clearCodexPromptsForSession(sessionKeyValue),
+    });
+    this.capabilityService = new RelayCapabilityService({
+      config: deps.config,
+      store: deps.store,
+      adapter: deps.adapter,
+      agent: deps.agent,
+      logger: this.logger,
     });
     this.slashCommands = new SlashCommandRouter({
       help: async (conversationId) => {
@@ -374,83 +399,8 @@ export class RelayController {
   }
 
   private async handleAgentOutputSerial(session: AgentOutputEvent): Promise<void> {
-    if (session.type === "activity") {
-      await this.activityStreamer.handle(session);
-      return;
-    }
-    if (session.type === "image") {
-      // Text chunks are flushed before image delivery so the IM transcript stays
-      // in the same order the agent produced it.
-      await this.finalizeSessionOutput(session.sessionKey);
-      await this.mediaRelay.sendAgentImageOutput(session);
-      return;
-    }
-    if (session.type === "turn_completed") {
-      const turnStatus = session.status ?? "completed";
-      this.logger.info("router.turn_completed", {
-        session_key: session.sessionKey,
-        turn_id: session.turnId,
-        status: turnStatus,
-        duration_ms: session.durationMs,
-      });
-      await this.activityStreamer.finalize(session.sessionKey, session.turnId, turnStatus, session.error?.message, session.durationMs);
-      await this.finalizeSessionOutput(session.sessionKey);
-      if (turnStatus === "completed") await this.threadCommands.sendPlanReadyPrompt(session.sessionKey, session.turnId);
-      if (turnStatus === "failed") {
-        const parsed = parseSessionKey(session.sessionKey);
-        if (parsed) {
-          const detail = session.error?.message ?? "Codex turn failed.";
-          this.appendSystem(parsed.scopeKey, `Error: ${detail}\n`);
-          await this.sendRendered(parsed.scopeKey, messageWithTitle("Codex turn failed.", detail));
-        }
-      }
-      // Completion is the only point where a queued local task can safely start;
-      // blocked turns must wait for explicit user input or approval handling.
-      await this.completeTaskAndDispatchNext(
-        session.sessionKey,
-        session.turnId,
-        turnStatus === "completed" ? "done" : turnStatus === "interrupted" ? "interrupted" : "failed",
-      );
-      return;
-    }
-    if (session.type === "user_input_request") {
-      await this.finalizeSessionOutput(session.sessionKey);
-      await this.markActiveTask(session.sessionKey, "blocked", session.turnId);
-      await this.codexPromptFlow.handleUserInputRequest(session);
-      return;
-    }
-    if (session.type === "approval_request") {
-      await this.finalizeSessionOutput(session.sessionKey);
-      await this.markActiveTask(session.sessionKey, "blocked", session.turnId);
-      await this.codexPromptFlow.handleApprovalRequest(session);
-      return;
-    }
-    if (session.type === "mcp_elicitation_request") {
-      await this.finalizeSessionOutput(session.sessionKey);
-      await this.markActiveTask(session.sessionKey, "blocked", session.turnId);
-      await this.codexPromptFlow.handleMcpElicitationRequest(session);
-      return;
-    }
-    if (session.type === "thread_lifecycle") {
-      const parsed = parseSessionKey(session.sessionKey);
-      if (!parsed) return;
-      this.activityStreamer.clearSession(session.sessionKey);
-      await this.finalizeSessionOutput(session.sessionKey);
-      this.clearCodexPromptsForSession(session.sessionKey);
-      this.deps.store.markSessionStopped(session.sessionKey);
-      if (session.action === "archived" || session.action === "deleted") {
-        this.deps.store.clearSessionThreadId(session.sessionKey);
-        await this.cancelActiveTasks(session.sessionKey);
-      } else {
-        await this.failActiveTasks(session.sessionKey);
-      }
-      if (!session.initiatedByClient) {
-        await this.sendRendered(parsed.scopeKey, messageWithTitle(
-          session.action === "archived" ? "Chat archived externally." : session.action === "deleted" ? "Chat deleted externally." : "Chat closed.",
-        ));
-      }
-      return;
-    }
+    if (await this.agentEvents.handle(session)) return;
+    if (session.type !== undefined && session.type !== "message") return;
     const parsed = parseSessionKey(session.sessionKey);
     if (!parsed) {
       this.logger.warn("router.agent_output_invalid_session", { session_key: session.sessionKey, chunk_len: session.chunk.length });
@@ -561,76 +511,11 @@ export class RelayController {
   }
 
   async mentionPeerAgent(input: MentionAgentCapabilityRequest): Promise<{ peerId: string }> {
-    const peer = this.deps.config.relayPeerAgents.find((candidate) => candidate.id === input.peerId);
-    if (!peer) throw new Error(`Unknown peer agent: ${input.peerId}`);
-    if (this.deps.config.imProvider === "telegram" && !peer.telegramUsername) {
-      throw new Error(`Peer agent ${input.peerId} does not define telegramUsername`);
-    }
-    if (this.deps.config.imProvider === "lark" && !peer.larkOpenId && !peer.larkUserId) {
-      throw new Error(`Peer agent ${input.peerId} does not define larkOpenId or larkUserId`);
-    }
-    const { sessionKey: sessionKeyValue, conversationId, workspaceName } = this.resolveCapabilitySession(input);
-    const label = peer.name ?? peer.id;
-    const scope = parseChatScopeKey(String(conversationId));
-    const result = await this.deps.adapter.sendMessage(scope.conversationId, input.message, {
-      mentions: [{
-        label,
-        ...(peer.telegramUsername ? { telegramUsername: peer.telegramUsername } : {}),
-        ...(peer.larkOpenId ? { larkOpenId: peer.larkOpenId } : {}),
-        ...(peer.larkUserId ? { larkUserId: peer.larkUserId } : {}),
-      }],
-      ...(scope.topic ? { topic: scope.topic } : {}),
-    });
-    if (result.messageId) this.deps.store.setControlMessage(scope.conversationId, result.messageId, scope.scopeKey, "message");
-    this.deps.store.appendTranscript({
-      conversationId: scope.conversationId,
-      scopeKey: scope.scopeKey,
-      workspaceName,
-      role: "agent",
-      text: `[mentioned peer ${peer.id} via ${sessionKeyValue}]\n${input.message}\n`,
-      createdAt: Date.now(),
-    });
-    this.logger.info("router.peer_agent_mentioned", {
-      conversation_id: scope.conversationId,
-      scope_key: scope.scopeKey,
-      workspace: workspaceName,
-      session_key: sessionKeyValue,
-      peer_id: peer.id,
-    });
-    return { peerId: peer.id };
+    return await this.capabilityService.mentionPeerAgent(input);
   }
 
   private async routeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<string | undefined> {
     return await this.callbacks.route(message);
-  }
-
-  private resolveCapabilitySession(input: { sessionKey?: string; cwd?: string }): { sessionKey: string; conversationId: ConversationId; workspaceName: string } {
-    if (input.sessionKey) {
-      const parsed = parseSessionKey(input.sessionKey);
-      if (!parsed) throw new Error("sessionKey is invalid");
-      const status = this.deps.agent.getStatus(input.sessionKey);
-      if (!status?.running) throw new Error("session is not running");
-      return { sessionKey: input.sessionKey, conversationId: parsed.scopeKey, workspaceName: parsed.workspaceName };
-    }
-
-    // Helper calls normally pass cwd instead of a session key. Match it to one
-    // running workspace only; ambiguous matches require the explicit key.
-    const cwd = input.cwd ? resolve(input.cwd) : undefined;
-    const matches = this.deps.store.listRunningSessions()
-      .flatMap((session) => {
-        const workspace = this.deps.store.getWorkspace(session.workspace_name);
-        const status = this.deps.agent.getStatus(session.session_key);
-        if (!workspace || !status?.running) return [];
-        if (cwd && !pathContains(workspace.path, cwd)) return [];
-        return [{
-          sessionKey: session.session_key,
-          conversationId: session.scope_key ?? session.conversation_id,
-          workspaceName: session.workspace_name,
-        }];
-      });
-    if (matches.length === 1) return matches[0]!;
-    if (matches.length === 0) throw new Error("No running relay session matches this request.");
-    throw new Error("Multiple running relay sessions match this request; pass --session-key.");
   }
 
   private async renderHomeCallback(message: Extract<InboundMessage, { kind: "callback_query" }>): Promise<void> {

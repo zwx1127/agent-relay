@@ -1,3 +1,5 @@
+import { inputRecord, optionalInputString } from "./input.ts";
+
 export const RELAY_CAPABILITY_SEND_IMAGE = "send_image";
 
 export interface SendImageCapabilityRequest {
@@ -8,28 +10,16 @@ export interface SendImageCapabilityRequest {
 }
 
 export function parseSendImageRequest(body: unknown): SendImageCapabilityRequest {
-  const record = asRecord(body);
+  const record = inputRecord(body);
   const path = typeof record?.path === "string" ? record.path.trim() : "";
   if (!path) throw new Error("path is required");
-  const cwd = optionalString(record, "cwd");
-  const sessionKey = optionalString(record, "sessionKey");
-  const caption = optionalString(record, "caption");
+  const cwd = optionalInputString(record, "cwd");
+  const sessionKey = optionalInputString(record, "sessionKey");
+  const caption = optionalInputString(record, "caption");
   return {
     path,
     ...(cwd ? { cwd } : {}),
     ...(sessionKey ? { sessionKey } : {}),
     ...(caption ? { caption } : {}),
   };
-}
-
-function optionalString(record: Record<string, unknown> | undefined, key: string): string | undefined {
-  const value = record?.[key];
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string") throw new Error(`${key} must be a string`);
-  const trimmed = value.trim();
-  return trimmed || undefined;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }

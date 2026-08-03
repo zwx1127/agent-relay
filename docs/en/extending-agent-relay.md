@@ -11,6 +11,14 @@ agent-relay is built so you can use it to improve itself. Run the relay on this 
 5. Run `bun run typecheck` and `bun test`.
 6. Review the diff from chat before merging.
 
+## Internal extension points
+
+`src/ports/agent.ts` and `src/ports/im.ts` remain the stable public import paths. Their event, session, input, thread, inbound, and outbound contracts live in adjacent submodules and are re-exported by those files.
+
+Provider adapters are intentionally thin: provider-specific inbound normalization and transport helpers live beside the adapter. The Codex driver is the stable facade over app-server process/RPC lifecycle, session state, notification conversion, and server-request handling. `RelayController` composes focused relay services for agent events, thread commands, prompt flows, media, capabilities, and workspace UI. `SQLiteStore` similarly composes domain-specific repositories without changing the `RelayStore` contract.
+
+When extending a subsystem, add behavior to the narrow collaborator that owns it and keep compatibility imports and factory signatures stable.
+
 ## Add a new IM provider
 
 Use this when you want to support another chat app.

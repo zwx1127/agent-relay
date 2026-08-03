@@ -1,27 +1,22 @@
-import { existsSync, realpathSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type {
   AgentBuiltinCommand,
   AgentDriver,
-  AgentInputAttachment,
   AgentSessionStatus,
   AgentTaskInput,
 } from "../ports/agent.ts";
-import type { InboundMessage, InlineKeyboardMarkup, SendMessageOptions, ImAdapter } from "../ports/im.ts";
+import type { InlineKeyboardMarkup, SendMessageOptions, ImAdapter } from "../ports/im.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
-import { parseSessionKey, sessionKey } from "../domain/session.ts";
+import { sessionKey } from "../domain/session.ts";
 import type { Logger } from "../domain/logger.ts";
 import type { RelayStore } from "../storage/store.ts";
 import type { PendingPrompt, TaskStatus, WorkspaceRecord } from "./types.ts";
 import { CODEX_PROMPT_TTL_MS, LIST_PAGE_SIZE } from "./ui/constants.ts";
 import { shortToken } from "./ui/callback-data.ts";
 import { commandArgs, parseReviewTarget } from "./ui/commands.ts";
-import { attachmentPickerKeyboard, backgroundTerminalsKeyboard, commandConfirmKeyboard, planReadyKeyboard, resumeKeyboard } from "./ui/keyboards.ts";
+import { commandConfirmKeyboard, resumeKeyboard } from "./ui/keyboards.ts";
 import {
-  formatBackgroundTerminalsMessage,
-  formatGoalClearedMessage,
-  formatGoalMessage,
-  formatGoalUpdatedMessage,
   formatResumeMessage,
 } from "./ui/messages.ts";
 import { asPromptRecord, isExpired, parsePromptPayload } from "./ui/prompt-state.ts";
@@ -29,9 +24,11 @@ import { messageWithTitle, textMessage } from "./ui/text-parts.ts";
 import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
 import type { RenderCallbackPageResult } from "./controller-types.ts";
 import type { TaskSubmitPreference } from "./task-coordinator.ts";
-import { pathContains } from "./ui/media-format.ts";
-
-type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
+import { AttachmentPicker, isWorkspaceMentionPath, parseAttachmentRecord } from "./thread-commands/attachment-picker.ts";
+import { BackgroundTerminalService } from "./thread-commands/background-terminals.ts";
+import { GoalCommandService } from "./thread-commands/goal.ts";
+import { PlanCommandService } from "./thread-commands/plan.ts";
+import type { CallbackMessage } from "./thread-commands/types.ts";
 
 export interface ThreadCommandDeps {
   store: RelayStore;
@@ -54,9 +51,53 @@ export interface ThreadCommandDeps {
 }
 
 export class ThreadCommandService {
-  private readonly interruptedPlanTurns = new Set<string>();
+  private readonly attachments: AttachmentPicker;
+  private readonly backgroundTerminals: BackgroundTerminalService;
+  private readonly goals: GoalCommandService;
+  private readonly plans: PlanCommandService;
 
-  constructor(private readonly deps: ThreadCommandDeps) {}
+  constructor(private readonly deps: ThreadCommandDeps) {
+    this.attachments = new AttachmentPicker({
+      store: deps.store,
+      agent: deps.agent,
+      commandSession: (conversationId) => this.commandSession(conversationId),
+      commandBusy: (conversationId, workspaceName, status) => this.commandBusy(conversationId, workspaceName, status),
+      sendBusyCommandNotice: (conversationId) => this.sendBusyCommandNotice(conversationId),
+      requireCurrentWorkspace: deps.requireCurrentWorkspace,
+      sendRendered: deps.sendRendered,
+      renderStrictCallbackPage: deps.renderStrictCallbackPage,
+      expireCallbackPrompt: deps.expireCallbackPrompt,
+    });
+    this.backgroundTerminals = new BackgroundTerminalService({
+      store: deps.store,
+      agent: deps.agent,
+      logger: deps.logger,
+      commandSession: (conversationId) => this.commandSession(conversationId),
+      requireCurrentWorkspace: deps.requireCurrentWorkspace,
+      sendRendered: deps.sendRendered,
+      renderStrictCallbackPage: deps.renderStrictCallbackPage,
+    });
+    this.goals = new GoalCommandService({
+      store: deps.store,
+      agent: deps.agent,
+      commandSession: (conversationId) => this.commandSession(conversationId),
+      requireCurrentWorkspace: deps.requireCurrentWorkspace,
+      sendRendered: deps.sendRendered,
+    });
+    this.plans = new PlanCommandService({
+      store: deps.store,
+      agent: deps.agent,
+      adapter: deps.adapter,
+      logger: deps.logger,
+      requireCurrentWorkspace: deps.requireCurrentWorkspace,
+      ensureAgentStarted: deps.ensureAgentStarted,
+      sessionBusy: (status) => this.sessionBusy(status),
+      hasTaskCreatedAfter: deps.hasTaskCreatedAfter,
+      submitTask: deps.submitTask,
+      sendRendered: deps.sendRendered,
+      renderStrictCallbackPage: deps.renderStrictCallbackPage,
+    });
+  }
 
   async runReviewCommand(conversationId: ConversationId, text: string): Promise<void> {
     const target = parseReviewTarget(commandArgs(text));
@@ -239,92 +280,15 @@ export class ThreadCommandService {
   }
 
   async planCommand(conversationId: ConversationId, prompt: string, userMessageId?: MessageId): Promise<void> {
-    const workspace = this.deps.requireCurrentWorkspace(conversationId);
-    const status = await this.deps.ensureAgentStarted(conversationId, workspace);
-    if (this.commandBusy(conversationId, workspace.name, status)) {
-      await this.sendBusyCommandNotice(conversationId);
-      return;
-    }
-    const key = sessionKey(conversationId, workspace.name);
-    if (!prompt.trim()) {
-      this.deps.store.setCollaborationMode(key, "plan");
-      await this.deps.sendRendered(conversationId, messageWithTitle("Plan mode enabled."));
-      return;
-    }
-    this.deps.store.setCollaborationMode(key, "plan");
-    await this.deps.submitTask(conversationId, prompt.trim(), userMessageId, "immediate");
+    await this.plans.run(conversationId, prompt, userMessageId);
   }
 
   async goalCommand(conversationId: ConversationId, args: string): Promise<void> {
-    const { key } = await this.commandSession(conversationId);
-    const normalized = args.trim();
-    if (!this.deps.agent.getThreadGoal || !this.deps.agent.setThreadGoal || !this.deps.agent.clearThreadGoal) {
-      throw new Error("Agent driver does not support thread goals.");
-    }
-
-    if (!normalized) {
-      await this.deps.sendRendered(conversationId, formatGoalMessage(await this.deps.agent.getThreadGoal(key)));
-      return;
-    }
-
-    if (normalized.toLowerCase() === "edit") {
-      const current = await this.deps.agent.getThreadGoal(key);
-      if (!current) {
-        await this.deps.sendRendered(conversationId, messageWithTitle("No goal to edit.", "Set one with /goal <objective>."));
-        return;
-      }
-      const result = await this.deps.sendRendered(conversationId, messageWithTitle("Edit goal", `Current objective: ${current.objective}`), {
-        forceReply: true,
-        forceReplyInstruction: "Reply with the new goal objective.",
-        inputFieldPlaceholder: "New goal objective",
-      });
-      if (!result.messageId) throw new Error("IM adapter did not return a goal edit prompt message id.");
-      this.deps.store.setPendingPrompt({
-        conversationId,
-        promptMessageId: result.messageId,
-        kind: "relay_command",
-        createdAt: Date.now(),
-        sessionKey: key,
-        payloadJson: JSON.stringify({ command: "goal_edit", threadId: this.deps.agent.getStatus(key)?.threadId }),
-        expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
-      });
-      return;
-    }
-
-    switch (normalized.toLowerCase()) {
-      case "pause": {
-        const goal = await this.deps.agent.setThreadGoal(key, { status: "paused" });
-        await this.deps.sendRendered(conversationId, formatGoalUpdatedMessage(goal));
-        return;
-      }
-      case "resume": {
-        const goal = await this.deps.agent.setThreadGoal(key, { status: "active" });
-        await this.deps.sendRendered(conversationId, formatGoalUpdatedMessage(goal));
-        return;
-      }
-      case "clear": {
-        await this.deps.sendRendered(conversationId, formatGoalClearedMessage(await this.deps.agent.clearThreadGoal(key)));
-        return;
-      }
-    }
-
-    validateGoalObjective(normalized);
-    const current = await this.deps.agent.getThreadGoal(key);
-    if (current) {
-      await this.deps.sendRendered(conversationId, messageWithTitle("A goal is already set.", "Use /goal edit to revise it, or /goal clear first."));
-      return;
-    }
-
-    const goal = await this.deps.agent.setThreadGoal(key, { objective: normalized, status: "active", tokenBudget: null });
-    await this.deps.sendRendered(conversationId, formatGoalUpdatedMessage(goal));
+    await this.goals.run(conversationId, args);
   }
 
   async cleanBackgroundTerminals(conversationId: ConversationId): Promise<void> {
-    const { key } = await this.commandSession(conversationId);
-    if (!this.deps.agent.cleanBackgroundTerminals) throw new Error("Agent driver cannot clean background terminals.");
-    await this.deps.agent.cleanBackgroundTerminals(key);
-    this.deps.logger.info("router.background_terminals_cleaned", { conversation_id: conversationId, session_key: key });
-    await this.deps.sendRendered(conversationId, messageWithTitle("Background terminals stopped."));
+    await this.backgroundTerminals.clean(conversationId);
   }
 
   async interruptCommand(conversationId: ConversationId, args: string): Promise<void> {
@@ -347,7 +311,7 @@ export class ThreadCommandService {
     const result = await this.deps.agent.interrupt(key);
     if (result.stale) {
       if (result.turnId && this.deps.store.getCollaborationMode(key) === "plan") {
-        this.interruptedPlanTurns.add(`${key}:${result.turnId}`);
+        this.plans.markInterruptedTurn(key, result.turnId);
       }
       this.deps.clearCodexPromptsForSession(key);
       if (mode === "all") {
@@ -388,7 +352,7 @@ export class ThreadCommandService {
     }
 
     if (result.turnId && this.deps.store.getCollaborationMode(key) === "plan") {
-      this.interruptedPlanTurns.add(`${key}:${result.turnId}`);
+      this.plans.markInterruptedTurn(key, result.turnId);
     }
     this.deps.clearCodexPromptsForSession(key);
     if (mode === "all") {
@@ -407,86 +371,15 @@ export class ThreadCommandService {
   }
 
   async renderBackgroundTerminals(conversationId: ConversationId): Promise<void> {
-    const { key } = await this.commandSession(conversationId);
-    if (!this.deps.agent.listBackgroundTerminals) throw new Error("Agent driver cannot list background terminals.");
-    const terminals = await this.deps.agent.listBackgroundTerminals(key);
-    const token = shortToken();
-    const result = await this.deps.sendRendered(conversationId, formatBackgroundTerminalsMessage(terminals), {
-      replyMarkup: backgroundTerminalsKeyboard(token, terminals),
-    });
-    if (result.messageId && terminals.length > 0) {
-      this.deps.store.setPendingPrompt({
-        conversationId,
-        promptMessageId: result.messageId,
-        kind: "relay_command",
-        createdAt: Date.now(),
-        sessionKey: key,
-        payloadJson: JSON.stringify({ command: "terminal", token, threadId: this.deps.agent.getStatus(key)?.threadId, terminals }),
-        expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
-      });
-    }
+    await this.backgroundTerminals.render(conversationId);
   }
 
   async renderSkillPicker(conversationId: ConversationId, searchTerm: string): Promise<void> {
-    const { workspace, status, key } = await this.commandSession(conversationId);
-    if (this.commandBusy(conversationId, workspace.name, status)) {
-      await this.sendBusyCommandNotice(conversationId);
-      return;
-    }
-    if (!this.deps.agent.listSkills) throw new Error("Agent driver cannot list skills.");
-    const query = searchTerm.trim().toLocaleLowerCase();
-    const skills = (await this.deps.agent.listSkills(workspace.path))
-      .filter((skill) => skill.enabled)
-      .filter((skill) => !query || `${skill.name} ${skill.description ?? ""} ${skill.shortDescription ?? ""}`.toLocaleLowerCase().includes(query))
-      .map((skill) => ({ label: skill.name, type: "skill" as const, name: skill.name, path: skill.path }));
-    await this.renderAttachmentPicker(conversationId, key, status.threadId, "skill", skills, searchTerm);
+    await this.attachments.renderSkills(conversationId, searchTerm);
   }
 
   async renderMentionPicker(conversationId: ConversationId, searchTerm: string): Promise<void> {
-    const { workspace, status, key } = await this.commandSession(conversationId);
-    if (this.commandBusy(conversationId, workspace.name, status)) {
-      await this.sendBusyCommandNotice(conversationId);
-      return;
-    }
-    if (!this.deps.agent.searchFiles) throw new Error("Agent driver cannot search workspace files.");
-    const results = await this.deps.agent.searchFiles(workspace.path, searchTerm.trim(), { limit: 100 });
-    const entries = results.flatMap((file) => {
-      const path = resolve(file.root, file.path);
-      if (!isWorkspaceMentionPath(workspace.path, path)) return [];
-      return [{ label: file.path, type: "mention" as const, name: file.fileName || basename(path), path }];
-    });
-    await this.renderAttachmentPicker(conversationId, key, status.threadId, "mention", entries, searchTerm);
-  }
-
-  private async renderAttachmentPicker(
-    conversationId: ConversationId,
-    key: string,
-    threadId: string | undefined,
-    kind: "skill" | "mention",
-    entries: Array<{ label: string; type: "skill" | "mention"; name: string; path: string }>,
-    searchTerm: string,
-  ): Promise<void> {
-    if (entries.length === 0) {
-      await this.deps.sendRendered(conversationId, messageWithTitle(kind === "skill" ? "No matching skills." : "No matching files.", searchTerm ? `Search: ${searchTerm}` : undefined));
-      return;
-    }
-    const token = shortToken();
-    const pageIndex = 0;
-    const totalPages = Math.ceil(entries.length / LIST_PAGE_SIZE);
-    const pageEntries = entries.slice(0, LIST_PAGE_SIZE);
-    const result = await this.deps.sendRendered(conversationId, attachmentPickerMessage(kind, searchTerm, pageIndex, totalPages), {
-      replyMarkup: attachmentPickerKeyboard(token, pageEntries, pageIndex, totalPages),
-    });
-    if (!result.messageId) throw new Error("IM adapter did not return an attachment picker message id.");
-    this.deps.store.setPendingPrompt({
-      conversationId,
-      promptMessageId: result.messageId,
-      kind: "relay_command",
-      createdAt: Date.now(),
-      sessionKey: key,
-      payloadJson: JSON.stringify({ command: "attachment_select", token, kind, searchTerm, pageIndex, threadId, entries }),
-      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
-    });
+    await this.attachments.renderMentions(conversationId, searchTerm);
   }
 
   async requestCompactConfirmation(conversationId: ConversationId): Promise<void> {
@@ -565,12 +458,12 @@ export class ThreadCommandService {
     }
 
     if (command === "attach") {
-      await this.attachmentFromCallback(message, pending, data, action);
+      await this.attachments.handleCallback(message, pending, data, action);
       return;
     }
 
     if (command === "terminal") {
-      await this.stopTerminalFromCallback(message, pending, data, action);
+      await this.backgroundTerminals.stopFromCallback(message, pending, data, action);
       return;
     }
 
@@ -579,75 +472,10 @@ export class ThreadCommandService {
       return;
     }
     if (command === "plan") {
-      await this.planFromCallback(message, pending, data, action);
+      await this.plans.handleCallback(message, pending, data, action);
       return;
     }
     throw new Error("Unknown command callback.");
-  }
-
-  private async attachmentFromCallback(
-    message: CallbackMessage,
-    pending: PendingPrompt,
-    data: Record<string, unknown>,
-    action: string | undefined,
-  ): Promise<void> {
-    if (data.command !== "attachment_select" || !action) {
-      await this.deps.expireCallbackPrompt(message);
-      return;
-    }
-    const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
-    const key = sessionKey(message.conversationId, workspace.name);
-    const status = this.deps.agent.getStatus(key);
-    if (!status?.running || pending.sessionKey !== key || status.threadId !== data.threadId || this.commandBusy(message.conversationId, workspace.name, status)) {
-      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Attachment selection expired.", "The active chat changed or Codex is busy."), { inline_keyboard: [] });
-      return;
-    }
-    const entries = Array.isArray(data.entries) ? data.entries.map(asPromptRecord).filter(Boolean) as Record<string, unknown>[] : [];
-    const kind = data.kind === "skill" ? "skill" : "mention";
-    if (action.startsWith("p")) {
-      const requestedPage = Number(action.slice(1));
-      const totalPages = Math.max(1, Math.ceil(entries.length / LIST_PAGE_SIZE));
-      const pageIndex = Math.min(totalPages - 1, Math.max(0, Number.isInteger(requestedPage) ? requestedPage : 0));
-      const page = entries.slice(pageIndex * LIST_PAGE_SIZE, (pageIndex + 1) * LIST_PAGE_SIZE).map((entry) => ({ label: typeof entry.label === "string" ? entry.label : "Attachment" }));
-      await this.deps.renderStrictCallbackPage(
-        message,
-        attachmentPickerMessage(kind, typeof data.searchTerm === "string" ? data.searchTerm : "", pageIndex, totalPages),
-        attachmentPickerKeyboard(String(data.token), page, pageIndex, totalPages),
-      );
-      this.deps.store.setPendingPrompt({ ...pending, payloadJson: JSON.stringify({ ...data, pageIndex }) });
-      return;
-    }
-    if (!action.startsWith("i")) throw new Error("Attachment selection is unavailable.");
-    const index = Number(action.slice(1));
-    const selected = entries[index];
-    const name = typeof selected?.name === "string" ? selected.name : undefined;
-    const path = typeof selected?.path === "string" ? selected.path : undefined;
-    if (!name || !path) throw new Error("Attachment selection expired.");
-    if (kind === "mention" && !isWorkspaceMentionPath(workspace.path, path)) {
-      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Attachment rejected.", "The selected path is outside the workspace."), { inline_keyboard: [] });
-      return;
-    }
-    const attachment: AgentInputAttachment = { type: kind, name, path };
-    await this.deps.renderStrictCallbackPage(message, messageWithTitle(`${kind === "skill" ? "Skill" : "File"} selected.`, name), { inline_keyboard: [] });
-    this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-    const promptToken = shortToken();
-    const result = await this.deps.sendRendered(message.conversationId, messageWithTitle("What should Codex do?", `${kind === "skill" ? "Skill" : "Mention"}: ${name}`), {
-      forceReply: true,
-      forceReplyInstruction: "Reply with the task for this attachment.",
-      inputFieldPlaceholder: "Task description",
-    });
-    if (!result.messageId) throw new Error("IM adapter did not return an attachment prompt message id.");
-    this.deps.store.setPendingPrompt({
-      conversationId: message.conversationId,
-      promptMessageId: result.messageId,
-      kind: "relay_command",
-      createdAt: Date.now(),
-      sessionKey: key,
-      payloadJson: JSON.stringify({ command: "attachment_task", token: promptToken, threadId: status.threadId, attachment }),
-      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
-    });
   }
 
   private async confirmThreadCommand(
@@ -710,34 +538,6 @@ export class ThreadCommandService {
     await this.deps.renderCallbackPage(message, messageWithTitle(command === "archive" ? "Chat archived." : "Chat deleted."), { inline_keyboard: [] });
   }
 
-  private async stopTerminalFromCallback(
-    message: CallbackMessage,
-    pending: PendingPrompt,
-    data: Record<string, unknown>,
-    action: string | undefined,
-  ): Promise<void> {
-    const index = Number(action);
-    const terminals = Array.isArray(data.terminals) ? data.terminals : [];
-    const selected = asPromptRecord(terminals[index]);
-    const processId = typeof selected?.processId === "string" ? selected.processId : undefined;
-    const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
-    const key = sessionKey(message.conversationId, workspace.name);
-    const status = this.deps.agent.getStatus(key);
-    if (!processId || !status?.running || status.threadId !== data.threadId || pending.sessionKey !== key || !this.deps.agent.terminateBackgroundTerminal) {
-      this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-      await this.renderBackgroundTerminals(message.conversationId);
-      return;
-    }
-    const terminated = await this.deps.agent.terminateBackgroundTerminal(key, processId);
-    this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-    if (!terminated) {
-      await this.renderBackgroundTerminals(message.conversationId);
-      return;
-    }
-    await this.deps.renderStrictCallbackPage(message, messageWithTitle("Background terminal stopped."), { inline_keyboard: [] });
-    await this.renderBackgroundTerminals(message.conversationId);
-  }
-
   private async resumeFromCallback(
     message: CallbackMessage,
     pending: PendingPrompt,
@@ -770,117 +570,8 @@ export class ThreadCommandService {
     await this.deps.renderCallbackPage(message, messageWithTitle("Resumed chat.", status.threadName ?? status.threadId ?? threadId), { inline_keyboard: [] });
   }
 
-  private async planFromCallback(
-    message: CallbackMessage,
-    pending: PendingPrompt,
-    data: Record<string, unknown>,
-    action: string | undefined,
-  ): Promise<void> {
-    const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
-    const key = sessionKey(message.conversationId, workspace.name);
-    if (pending.sessionKey && pending.sessionKey !== key) {
-      this.deps.logger.info("router.plan_callback_expired", {
-        conversation_id: message.conversationId,
-        session_key: pending.sessionKey,
-        reason: "session_mismatch",
-      });
-      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Plan action expired.", "Open the latest Plan ready card."), { inline_keyboard: [] });
-      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-      return;
-    }
-    if (action === "implement") {
-      const status = this.deps.agent.getStatus(key);
-      if (!status?.running) {
-        this.deps.logger.info("router.plan_callback_expired", {
-          conversation_id: message.conversationId,
-          session_key: key,
-          reason: "session_not_running",
-        });
-        await this.deps.renderStrictCallbackPage(message, messageWithTitle("Plan action expired.", "The Codex session is no longer running."), { inline_keyboard: [] });
-        this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-        return;
-      }
-      const promptThreadId = typeof data.threadId === "string" ? data.threadId : undefined;
-      if (this.deps.store.getCollaborationMode(key) !== "plan" || (promptThreadId && promptThreadId !== status.threadId)) {
-        this.deps.logger.info("router.plan_callback_expired", {
-          conversation_id: message.conversationId,
-          session_key: key,
-          reason: "thread_mismatch",
-          prompt_thread_id: promptThreadId,
-          current_thread_id: status.threadId,
-        });
-        await this.deps.renderStrictCallbackPage(message, messageWithTitle("Plan action expired.", "Open the latest Plan ready card."), { inline_keyboard: [] });
-        this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-        return;
-      }
-      if (this.sessionBusy(status) || this.deps.hasTaskCreatedAfter(message.conversationId, workspace.name, pending.createdAt)) {
-        this.deps.logger.info("router.plan_callback_busy", {
-          conversation_id: message.conversationId,
-          session_key: key,
-          active_turn_id: status.activeTurnId,
-          waiting_for_approval: status.waitingForApproval,
-          waiting_for_user_input: status.waitingForUserInput,
-        });
-        await this.deps.renderStrictCallbackPage(message, messageWithTitle("Plan action expired.", "A newer turn is already active or has been submitted."), { inline_keyboard: [] });
-        this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-        return;
-      }
-      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Implementing plan."), { inline_keyboard: [] });
-      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-      this.deps.store.setCollaborationMode(key, "default");
-      this.deps.logger.info("router.plan_callback_implemented", { conversation_id: message.conversationId, session_key: key });
-      await this.deps.submitTask(message.conversationId, "Implement the approved plan.", message.messageId, "immediate");
-      return;
-    }
-    await this.dismissPlanReadyPrompt(message);
-    this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-  }
-
-  private async dismissPlanReadyPrompt(message: CallbackMessage): Promise<void> {
-    if (!message.messageId) return;
-    if (this.deps.adapter.deleteMessage) {
-      try {
-        await this.deps.adapter.deleteMessage(message.conversationId, message.messageId);
-        return;
-      } catch (error) {
-        this.deps.logger.warn("router.plan_ready_delete_failed", {
-          conversation_id: message.conversationId,
-          message_id: message.messageId,
-          error: error instanceof Error ? error : new Error(String(error)),
-        });
-      }
-    }
-    await this.deps.renderStrictCallbackPage(message, textMessage(""), { inline_keyboard: [] });
-  }
-
   async sendPlanReadyPrompt(sessionKeyValue: string, completedTurnId?: string): Promise<void> {
-    const parsed = parseSessionKey(sessionKeyValue);
-    if (!parsed || this.deps.store.getCollaborationMode(sessionKeyValue) !== "plan") return;
-    if (completedTurnId && this.interruptedPlanTurns.delete(`${sessionKeyValue}:${completedTurnId}`)) return;
-    const threadId = this.deps.agent.getStatus(sessionKeyValue)?.threadId ?? this.deps.store.getSession(sessionKeyValue)?.thread_id ?? undefined;
-    const token = shortToken();
-    const result = await this.deps.sendRendered(parsed.scopeKey, messageWithTitle("Plan ready.", "Choose whether to implement it now or keep refining the plan."), {
-      replyMarkup: planReadyKeyboard(token),
-      disableWebPagePreview: true,
-    });
-    if (!result.messageId) return;
-    this.deps.logger.info("router.plan_ready_prompt_sent", {
-      conversation_id: parsed.conversationId,
-      scope_key: parsed.scopeKey,
-      session_key: sessionKeyValue,
-      turn_id: completedTurnId,
-      prompt_message_id: result.messageId,
-    });
-    this.deps.store.setPendingPrompt({
-      conversationId: parsed.conversationId,
-      scopeKey: parsed.scopeKey,
-      promptMessageId: result.messageId,
-      kind: "relay_command",
-      createdAt: Date.now(),
-      sessionKey: sessionKeyValue,
-      payloadJson: JSON.stringify({ command: "plan", token, completedTurnId, threadId }),
-      expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
-    });
+    await this.plans.sendReadyPrompt(sessionKeyValue, completedTurnId);
   }
 
   private commandBusy(conversationId: ConversationId, workspaceName: string, status: AgentSessionStatus | undefined): boolean {
@@ -927,47 +618,13 @@ export class ThreadCommandService {
       return;
     }
     if (data.command === "goal_edit") {
-      const workspace = this.deps.requireCurrentWorkspace(conversationId);
-      const key = sessionKey(conversationId, workspace.name);
-      const status = this.deps.agent.getStatus(key);
-      if (!status?.running || (typeof data.threadId === "string" && status.threadId !== data.threadId) || pending.sessionKey !== key) {
-        await this.deps.sendRendered(conversationId, messageWithTitle("Goal edit expired.", "Open the current goal and try again."));
-        return;
-      }
-      const objective = text.trim();
-      validateGoalObjective(objective);
-      if (!this.deps.agent.setThreadGoal) throw new Error("Agent driver does not support thread goals.");
-      await this.deps.sendRendered(conversationId, formatGoalUpdatedMessage(await this.deps.agent.setThreadGoal(key, { objective })));
+      await this.goals.answerEdit(conversationId, pending, data, text);
       return;
     }
     await this.deps.sendRendered(conversationId, textMessage("Command prompt expired."));
   }
 }
 
-function validateGoalObjective(objective: string): void {
-  if (!objective) throw new Error("Goal objective must not be empty.");
-  if (objective.length > 4_000) throw new Error("Goal objective must not exceed 4,000 characters.");
-}
-
 function capitalize(value: string): string {
   return `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
-}
-
-function attachmentPickerMessage(kind: "skill" | "mention", searchTerm: string, pageIndex: number, totalPages: number): RenderedTelegramText {
-  const target = kind === "skill" ? "skill" : "file or directory";
-  return messageWithTitle(`Select a ${target}.`, `${searchTerm ? `Search: ${searchTerm}\n` : ""}Page ${pageIndex + 1}/${totalPages}`);
-}
-
-function parseAttachmentRecord(value: unknown): AgentInputAttachment | undefined {
-  const record = asPromptRecord(value);
-  if (!record || (record.type !== "skill" && record.type !== "mention") || typeof record.name !== "string" || typeof record.path !== "string") return undefined;
-  return { type: record.type, name: record.name, path: record.path };
-}
-
-function isWorkspaceMentionPath(workspacePath: string, candidatePath: string): boolean {
-  try {
-    return pathContains(realpathSync(workspacePath), realpathSync(resolve(candidatePath)));
-  } catch {
-    return false;
-  }
 }
