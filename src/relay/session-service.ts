@@ -96,12 +96,12 @@ export class RelaySessionService {
     if (!workspace) return {};
     const status = this.deps.agent.getStatus(sessionKey(scope.scopeKey, workspace.name));
     const recentOutput = this.deps.store.latestTranscriptEvent(scope.scopeKey, workspace.name, "agent");
-    const recentError = this.deps.store.latestTranscriptEvent(scope.scopeKey, workspace.name, "system");
+    const latestSystemEvent = this.deps.store.latestTranscriptEvent(scope.scopeKey, workspace.name, "system");
     return statusViewFromParts(
       workspace,
       status,
       recentOutput?.createdAt,
-      recentError?.text,
+      systemErrorText(latestSystemEvent?.text),
       this.deps.store.countTasks(scope.scopeKey, workspace.name, ["waiting"]),
       this.deps.store.countTasks(scope.scopeKey, workspace.name, ["queued"]),
       this.deps.store.countTasks(scope.scopeKey, workspace.name, ["blocked"]),
@@ -114,6 +114,12 @@ export class RelaySessionService {
     return this.deps.store.listTasks(scope.scopeKey, workspaceName, undefined, 1)
       .some((task: RelayTask) => task.createdAt > timestamp);
   }
+}
+
+function systemErrorText(text: string | undefined): string | undefined {
+  const prefix = "Error:";
+  if (!text?.startsWith(prefix)) return undefined;
+  return text.slice(prefix.length).trim() || undefined;
 }
 
 function isMissingCodexThreadError(error: unknown): boolean {

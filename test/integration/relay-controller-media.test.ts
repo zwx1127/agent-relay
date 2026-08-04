@@ -749,6 +749,11 @@ describe("relay controller tasks and media", () => {
     expect(adapter.edited.at(-1)?.text).toContain("Mode Plan · 0s");
     expect(adapter.edited.at(-1)?.options.replyMarkup).toEqual({ inline_keyboard: [] });
     expect(store.latestTranscriptEvent("1", "demo", "system")?.text).toContain("[Activity done:");
+
+    await router.handle(textMessage("/relay"));
+    const home = adapter.sent.at(-1)!;
+    expect(home.text).toContain("Relay Home");
+    expect(home.text).not.toContain("Error:");
   });
 
   test("activity edit failures create one button-free replacement card", async () => {
@@ -926,6 +931,16 @@ describe("relay controller tasks and media", () => {
       if (scenario.error) expect(final.text).toContain(`Error · ${scenario.error}`);
       else expect(final.text).not.toContain("Error ·");
       expect(final.options.replyMarkup).toEqual({ inline_keyboard: [] });
+
+      await router.handle(textMessage("/relay"));
+      const home = adapter.sent.at(-1)!;
+      expect(home.text).toContain("Relay Home");
+      if (scenario.error) {
+        expect(home.text).toContain(`Error: ${scenario.error}`);
+        expect(home.text).not.toContain("Error: Error:");
+      } else {
+        expect(home.text).not.toContain("Error:");
+      }
     });
   }
 
