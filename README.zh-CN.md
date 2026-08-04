@@ -103,7 +103,7 @@ bun run start
 | `/goal <objective>` | 为当前 Codex 线程设置目标。 |
 | `/resume` | 选择最近的 Codex 线程。 |
 | `/side <prompt>` | 发起临时 side conversation。 |
-| `/interrupt` | 中断当前 turn。 |
+| Activity/Goal 卡片按钮 | 中断当前 turn 或管理 Goal；按钮文案保持英文。 |
 | `/ps` | 查看 Codex 后台终端。 |
 | `/stop` | 要求 Codex 清理后台终端。 |
 

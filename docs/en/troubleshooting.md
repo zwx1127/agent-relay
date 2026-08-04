@@ -80,7 +80,7 @@ Check:
 
 Open a fresh Relay Home with `/relay`.
 
-If Codex is waiting on an old question or approval, answer from the newest card or use `/interrupt`.
+If Codex is waiting on an old question or approval, answer from the newest card or use `Interrupt` on the latest activity card.
 
 ## Workspace actions fail
 

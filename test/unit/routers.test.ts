@@ -17,7 +17,7 @@ describe("relay routers", () => {
       rename: async (_conversationId, name) => { calls.push(`rename:${name}`); },
       plan: async (_conversationId, prompt) => { calls.push(`plan:${prompt}`); },
       goal: async (_conversationId, args) => { calls.push(`goal:${args}`); },
-      interrupt: async (_conversationId, args) => { calls.push(`interrupt:${args}`); },
+      retiredInterrupt: async () => { calls.push("interrupt-retired"); },
       ps: async () => { calls.push("ps"); },
       stop: async () => { calls.push("stop"); },
       unknown: async (_conversationId, command) => { calls.push(`unknown:${command}`); },
@@ -41,7 +41,7 @@ describe("relay routers", () => {
     expect(await router.handle({ ...message, text: "/goal ship it" }, "/goal", "/goal ship it")).toBe(true);
     expect(await router.handle({ ...message, text: "/interrupt all" }, "/interrupt", "/interrupt all")).toBe(true);
     expect(await router.handle(message, "/unknown", message.text)).toBe(true);
-    expect(calls).toEqual(["help", "resume:sprint work", "side:quick question", "side:other question", "ps", "goal:ship it", "interrupt:all", "unknown:/unknown"]);
+    expect(calls).toEqual(["help", "resume:sprint work", "side:quick question", "side:other question", "ps", "goal:ship it", "interrupt-retired", "unknown:/unknown"]);
   });
 
   test("callback router dispatches prefixed payloads", async () => {

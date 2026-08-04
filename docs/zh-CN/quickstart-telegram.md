@@ -91,7 +91,7 @@ bun run start
 - `/help`：查看命令。
 - `/review`：审查工作区改动。
 - `/plan <prompt>`：让 Codex 先制定计划。
-- `/interrupt`：中断当前 turn。
+- 最新活动卡上的 `Interrupt`：中断当前 turn。Goal 卡会按状态提供 `Pause`、`Resume`、`Edit`、`Clear`。
 - `/resume`：恢复之前的线程。
 
 如果配置失败，请看 [常见问题排查](troubleshooting.md)。

@@ -80,7 +80,7 @@ Telegram 论坛话题和 Lark/飞书线程会从父群聊中拆成独立 scope�
 
 发送 `/relay` 打开新的 Relay Home。
 
-如果 Codex 正在等待旧的问题或审批，请从最新卡片回答，或使用 `/interrupt` 中断。
+如果 Codex 正在等待旧的问题或审批，请从最新卡片回答，或点击最新活动卡上的 `Interrupt`。
 
 ## 工作区操作失败
 

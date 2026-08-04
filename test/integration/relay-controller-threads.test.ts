@@ -42,7 +42,8 @@ describe("relay controller thread commands", () => {
     expect(agent.builtins).toEqual([]);
     expect(adapter.sent.at(-1)?.text).toContain("Relay commands");
     expect(adapter.sent.at(-1)?.text).toContain("/review commit <sha> [title]");
-    expect(adapter.sent.at(-1)?.text).toContain("/interrupt all");
+    expect(adapter.sent.at(-1)?.text).toContain("buttons on activity and Goal cards");
+    expect(adapter.sent.at(-1)?.text).not.toContain("/interrupt all");
     expect(adapter.sent.at(-1)?.options?.entities?.some((entity) => entity.type === "code")).toBe(true);
     expect(adapter.reactions).toEqual([]);
   });
@@ -140,7 +141,7 @@ describe("relay controller thread commands", () => {
     expect(adapter.edited.at(-1)?.text).toContain("Question expired.");
   });
 
-  test("/goal shows, sets, updates, and clears thread goals", async () => {
+  test("Goal cards pause, resume, and clear through English buttons", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -149,11 +150,17 @@ describe("relay controller thread commands", () => {
 
     await router.handle(textMessage("/goal"));
     await router.handle(textMessage("/goal ship feature"));
-    await router.handle(textMessage("/goal pause"));
-    await router.handle(textMessage("/goal resume"));
-    await router.handle(textMessage("/goal clear"));
+    expect(adapter.sent).toHaveLength(1);
+    await router.handle(textMessage("/goal"));
+    const card = adapter.sent.at(-1)!;
+    expect(card.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Pause", "Edit", "Clear"]);
+    const pause = card.options!.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Pause")!;
+    await router.handle(callbackMessage(pause.callback_data, 7, "cb-goal-pause", card.messageId));
+    const resume = adapter.edited.at(-1)!.options.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Resume")!;
+    await router.handle(callbackMessage(resume.callback_data, 7, "cb-goal-resume", card.messageId));
+    const clear = adapter.edited.at(-1)!.options.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Clear")!;
+    await router.handle(callbackMessage(clear.callback_data, 7, "cb-goal-clear", card.messageId));
 
-    expect(agent.goalGets).toEqual(["codex:1:demo", "codex:1:demo"]);
     expect(agent.goalSets).toEqual([
       { key: "codex:1:demo", goal: { objective: "ship feature", status: "active", tokenBudget: null } },
       { key: "codex:1:demo", goal: { status: "paused" } },
@@ -161,12 +168,48 @@ describe("relay controller thread commands", () => {
     ]);
     expect(agent.goalClears).toEqual(["codex:1:demo"]);
     expect(adapter.sent[0]?.text).toContain("No goal is currently set.");
-    expect(adapter.sent[1]?.text).toContain("Goal updated.");
-    expect(adapter.sent[1]?.options?.replyMarkup).toBeUndefined();
-    expect(adapter.sent.at(-1)?.text).toBe("Goal cleared.");
+    expect(adapter.edited.at(-1)?.text).toBe("Goal cleared.");
+    expect(adapter.answered.map((answer) => answer.text)).toEqual(["Goal paused.", "Goal resumed.", "Goal cleared."]);
   });
 
-  test("/goal refuses implicit replacement and /goal edit uses ForceReply", async () => {
+  test("setting a Goal produces only the activity card and replies to the /goal message", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.capabilities = { threadGoals: true };
+
+    await router.handle(textMessage("/goal ship feature"));
+    expect(adapter.sent).toEqual([]);
+    const status = agent.getStatus("codex:1:demo")!;
+    status.activeTurnId = "goal-turn";
+    await router.handleAgentOutput({ type: "activity", sessionKey: "codex:1:demo", threadId: status.threadId, turnId: "goal-turn", itemId: "goal", activity: { kind: "item", category: "other", label: "Working", status: "inProgress" } });
+    await waitForStreamFlush();
+
+    expect(adapter.sent).toHaveLength(1);
+    expect(adapter.sent[0]?.text).toContain("Mode Goal");
+    expect(adapter.sent[0]?.options?.replyToMessageId).toBe("1");
+  });
+
+  test("removed Goal control subcommands only point to card controls", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    for (const command of ["/goal edit", "/goal pause", "/goal resume", "/goal clear"]) {
+      await router.handle(textMessage(command));
+    }
+
+    expect(agent.goalSets).toEqual([]);
+    expect(agent.goalClears).toEqual([]);
+    expect(adapter.sent).toHaveLength(4);
+    expect(adapter.sent.every((message) => message.text.includes("Use the buttons"))).toBe(true);
+  });
+
+  test("/goal refuses implicit replacement and the Edit button uses ForceReply", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -184,10 +227,13 @@ describe("relay controller thread commands", () => {
     };
 
     await router.handle(textMessage("/goal replacement goal"));
-    expect(adapter.sent.at(-1)?.text).toContain("Use /goal edit");
+    expect(adapter.sent.at(-1)?.text).toContain("use Edit or Clear");
     expect(agent.goalSets).toEqual([]);
 
-    await router.handle(textMessage("/goal edit"));
+    await router.handle(textMessage("/goal"));
+    const goalCard = adapter.sent.at(-1)!;
+    const edit = goalCard.options!.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Edit")!;
+    await router.handle(callbackMessage(edit.callback_data, 7, "cb-goal-edit", goalCard.messageId));
     const editPrompt = adapter.sent.at(-1)!;
     expect(editPrompt.text).toContain("Edit goal");
     expect(editPrompt.options?.forceReply).toBe(true);
@@ -196,7 +242,7 @@ describe("relay controller thread commands", () => {
     expect(agent.goalSets).toEqual([
       { key: "codex:1:demo", goal: { objective: "replacement goal" } },
     ]);
-    expect(adapter.sent.at(-1)?.text).toContain("Goal updated.");
+    expect(adapter.edited.at(-1)?.text).toContain("Objective: replacement goal");
     expect(agent.sent).toEqual([]);
     expect(store.getPendingPrompt("1", editPrompt.messageId!)).toBeUndefined();
   });
@@ -211,14 +257,16 @@ describe("relay controller thread commands", () => {
     const accepted = "a".repeat(4_000);
     await router.handle(textMessage(`/goal ${accepted}`));
     expect(agent.goalSets.at(-1)?.goal.objective).toBe(accepted);
-    await router.handle(textMessage("/goal clear"));
+    agent.goal = null;
+    const status = agent.getStatus("codex:1:demo");
+    if (status) status.threadGoal = null;
     await router.handle(textMessage(`/goal ${"b".repeat(4_001)}`));
 
     expect(agent.goalSets).toHaveLength(1);
     expect(adapter.sent.at(-1)?.text).toContain("must not exceed 4,000 characters");
   });
 
-  test("/goal can run while a Codex turn is active", async () => {
+  test("Goal Clear does not interrupt an active Codex turn", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -226,11 +274,18 @@ describe("relay controller thread commands", () => {
     store.bindConversation(1, "demo");
     const status = await agent.start({ conversationId: 1, workspaceName: "demo", workspacePath: path });
     status.activeTurnId = "turn-active";
+    agent.goal = { threadId: status.threadId!, objective: "Ship", status: "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1 };
+    status.threadGoal = agent.goal;
 
-    await router.handle(textMessage("/goal pause"));
+    await router.handle(textMessage("/goal"));
+    const card = adapter.sent.at(-1)!;
+    expect(card.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Interrupt", "Edit", "Clear"]);
+    const clear = card.options!.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Clear")!;
+    await router.handle(callbackMessage(clear.callback_data, 7, "cb-goal-clear-active", card.messageId));
 
-    expect(agent.goalSets).toEqual([{ key: "codex:1:demo", goal: { status: "paused" } }]);
-    expect(adapter.sent.at(-1)?.text).not.toContain("Codex is busy.");
+    expect(agent.goalClears).toEqual(["codex:1:demo"]);
+    expect(agent.interrupted).toEqual([]);
+    expect(status.activeTurnId).toBe("turn-active");
   });
 
   test("/init starts the AGENTS.md generation prompt", async () => {

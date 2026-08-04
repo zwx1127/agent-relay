@@ -15,8 +15,8 @@ export interface SlashCommandHandlers {
   side(conversationId: ConversationId, prompt: string, userMessageId?: MessageId): Promise<void>;
   rename(conversationId: ConversationId, name: string): Promise<void>;
   plan(conversationId: ConversationId, prompt: string, userMessageId?: MessageId): Promise<void>;
-  goal(conversationId: ConversationId, args: string): Promise<void>;
-  interrupt(conversationId: ConversationId, args: string): Promise<void>;
+  goal(conversationId: ConversationId, args: string, userMessageId?: MessageId): Promise<void>;
+  retiredInterrupt(conversationId: ConversationId): Promise<void>;
   ps(conversationId: ConversationId): Promise<void>;
   stop(conversationId: ConversationId): Promise<void>;
   skills?(conversationId: ConversationId, searchTerm: string): Promise<void>;
@@ -70,10 +70,10 @@ export class SlashCommandRouter {
         await this.handlers.plan(message.conversationId, commandArgs(text), message.messageId);
         return true;
       case "/goal":
-        await this.handlers.goal(message.conversationId, commandArgs(text));
+        await this.handlers.goal(message.conversationId, commandArgs(text), message.messageId);
         return true;
       case "/interrupt":
-        await this.handlers.interrupt(message.conversationId, commandArgs(text));
+        await this.handlers.retiredInterrupt(message.conversationId);
         return true;
       case "/ps":
         await this.handlers.ps(message.conversationId);

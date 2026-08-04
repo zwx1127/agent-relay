@@ -95,7 +95,7 @@ Stopping a session from Relay Home stops only that thread's session and clears t
 - `/help`: show commands.
 - `/review`: review workspace changes.
 - `/plan <prompt>`: ask Codex to plan first.
-- `/interrupt`: stop the active turn.
+- `Interrupt` on the latest activity card: stop the active turn. Goal cards also provide `Pause`, `Resume`, `Edit`, and `Clear` when applicable.
 - `/resume`: continue a previous thread.
 
 If setup fails, see [Troubleshooting](troubleshooting.md).

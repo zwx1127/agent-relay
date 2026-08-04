@@ -330,7 +330,7 @@ describe("relay controller Codex prompts", () => {
     await router.handle(callbackMessage("ar:q:old:0:0"));
 
     expect(adapter.edited.at(-1)?.text).toContain("Question expired.");
-    expect(adapter.edited.at(-1)?.text).toContain("/interrupt");
+    expect(adapter.edited.at(-1)?.text).toContain("Interrupt on the latest activity card");
   });
 
   test("expired codex question callback tells the user how to recover", async () => {
@@ -356,7 +356,7 @@ describe("relay controller Codex prompts", () => {
     expect(agent.responses).toEqual([]);
     expect(store.getPendingPrompt("1", prompt.messageId!)).toBeUndefined();
     expect(adapter.edited.at(-1)?.text).toContain("Question expired.");
-    expect(adapter.edited.at(-1)?.text).toContain("/interrupt");
+    expect(adapter.edited.at(-1)?.text).toContain("Interrupt on the latest activity card");
   });
 
   test("codex free text question uses ForceReply and reply is not forwarded as prompt", async () => {
@@ -398,7 +398,7 @@ describe("relay controller Codex prompts", () => {
 
     expect(agent.sent).toEqual([]);
     expect(adapter.sent.at(-1)?.text).toContain("Codex is waiting for your answer.");
-    expect(adapter.sent.at(-1)?.text).toContain("/interrupt");
+    expect(adapter.sent.at(-1)?.text).toContain("Interrupt on the latest activity card");
   });
 
   test("ordinary text is not forwarded while Codex waits for approval", async () => {
@@ -414,7 +414,7 @@ describe("relay controller Codex prompts", () => {
 
     expect(agent.sent).toEqual([]);
     expect(adapter.sent.at(-1)?.text).toContain("Codex is waiting for approval.");
-    expect(adapter.sent.at(-1)?.text).toContain("/interrupt");
+    expect(adapter.sent.at(-1)?.text).toContain("Interrupt on the latest activity card");
   });
 
   test("codex multi-question request waits for all answers", async () => {
@@ -472,7 +472,7 @@ describe("relay controller Codex prompts", () => {
 
     expect(agent.responses).toEqual([]);
     expect(adapter.sent.at(-1)?.text).toContain("Question expired.");
-    expect(adapter.sent.at(-1)?.text).toContain("/interrupt");
+    expect(adapter.sent.at(-1)?.text).toContain("Interrupt on the latest activity card");
   });
 
   test("codex command approval sends button decision", async () => {

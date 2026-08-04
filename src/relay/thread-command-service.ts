@@ -6,12 +6,12 @@ import type {
   AgentSessionStatus,
   AgentTaskInput,
 } from "../ports/agent.ts";
-import type { InlineKeyboardMarkup, SendMessageOptions, ImAdapter } from "../ports/im.ts";
+import type { EditMessageTextOptions, InlineKeyboardMarkup, SendMessageOptions, ImAdapter } from "../ports/im.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
 import { sessionKey } from "../domain/session.ts";
 import type { Logger } from "../domain/logger.ts";
 import type { RelayStore } from "../storage/store.ts";
-import type { PendingPrompt, TaskStatus, WorkspaceRecord } from "./types.ts";
+import type { PendingPrompt, WorkspaceRecord } from "./types.ts";
 import { CODEX_PROMPT_TTL_MS, LIST_PAGE_SIZE } from "./ui/constants.ts";
 import { shortToken } from "./ui/callback-data.ts";
 import { commandArgs, parseReviewTarget } from "./ui/commands.ts";
@@ -29,6 +29,7 @@ import { BackgroundTerminalService } from "./thread-commands/background-terminal
 import { GoalCommandService } from "./thread-commands/goal.ts";
 import { PlanCommandService } from "./thread-commands/plan.ts";
 import type { CallbackMessage } from "./thread-commands/types.ts";
+import { isActivityControlAction, type ActivityControlAction } from "./activity-controls.ts";
 
 export interface ThreadCommandDeps {
   store: RelayStore;
@@ -40,10 +41,12 @@ export interface ThreadCommandDeps {
   finalizeSessionOutput(sessionKey: string): Promise<void>;
   resetSessionPresentation(sessionKey: string, options?: { deletePages?: boolean }): Promise<void>;
   refreshActivityContext(sessionKey: string): Promise<void>;
+  finalizeActivityInterrupt(sessionKey: string): Promise<void>;
+  setReplyToMessageId(sessionKey: string, messageId: MessageId): void;
   interruptActiveTasks(sessionKey: string): Promise<void>;
-  interruptTasksByStatus(sessionKey: string, statuses: TaskStatus[]): Promise<void>;
   submitTask(conversationId: ConversationId, text: string, userMessageId?: MessageId, preference?: TaskSubmitPreference, input?: AgentTaskInput): Promise<void>;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
+  editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: Omit<EditMessageTextOptions, "entities" | "parseMode">): Promise<void>;
   renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
   renderStrictCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
   expireCallbackPrompt(message: CallbackMessage): Promise<void>;
@@ -83,7 +86,10 @@ export class ThreadCommandService {
       agent: deps.agent,
       commandSession: (conversationId) => this.commandSession(conversationId),
       requireCurrentWorkspace: deps.requireCurrentWorkspace,
+      setReplyToMessageId: deps.setReplyToMessageId,
       sendRendered: deps.sendRendered,
+      editRendered: deps.editRendered,
+      renderStrictCallbackPage: deps.renderStrictCallbackPage,
       refreshActivityContext: deps.refreshActivityContext,
     });
     this.plans = new PlanCommandService({
@@ -310,91 +316,16 @@ export class ThreadCommandService {
     await this.plans.run(conversationId, prompt, userMessageId);
   }
 
-  async goalCommand(conversationId: ConversationId, args: string): Promise<void> {
-    await this.goals.run(conversationId, args);
+  async goalCommand(conversationId: ConversationId, args: string, userMessageId?: MessageId): Promise<void> {
+    await this.goals.run(conversationId, args, userMessageId);
   }
 
   async cleanBackgroundTerminals(conversationId: ConversationId): Promise<void> {
     await this.backgroundTerminals.clean(conversationId);
   }
 
-  async interruptCommand(conversationId: ConversationId, args: string): Promise<void> {
-    const mode = args.trim().toLowerCase();
-    if (mode && mode !== "all") {
-      await this.deps.sendRendered(conversationId, messageWithTitle("Usage: /interrupt [all]"));
-      return;
-    }
-    const workspace = this.deps.requireCurrentWorkspace(conversationId);
-    const key = sessionKey(conversationId, workspace.name);
-    const status = this.deps.agent.getStatus(key);
-    const blockedOnPrompt = Boolean(status?.waitingForApproval || status?.waitingForUserInput);
-    if (!status?.running || (!status.activeTurnId && !blockedOnPrompt)) {
-      await this.deps.sendRendered(conversationId, messageWithTitle("No active Codex turn to interrupt."));
-      return;
-    }
-    if (!this.deps.agent.interrupt) throw new Error("Agent driver cannot interrupt turns.");
-
-    await this.deps.finalizeSessionOutput(key);
-    const result = await this.deps.agent.interrupt(key);
-    if (result.stale) {
-      if (result.turnId && this.deps.store.getCollaborationMode(key) === "plan") {
-        this.plans.markInterruptedTurn(key, result.turnId);
-      }
-      this.deps.clearCodexPromptsForSession(key);
-      if (mode === "all") {
-        await this.deps.interruptTasksByStatus(key, ["waiting", "queued", "running", "blocked"]);
-      } else {
-        await this.deps.interruptActiveTasks(key);
-      }
-      this.deps.logger.info("router.stale_turn_interrupt_recovered", {
-        conversation_id: conversationId,
-        workspace: workspace.name,
-        session_key: key,
-        turn_id: result.turnId,
-        mode: mode || "current",
-      });
-      await this.deps.sendRendered(conversationId, messageWithTitle("No active Codex turn remained.", "Cleared stale Relay state."));
-      return;
-    }
-    if (!result.interrupted && blockedOnPrompt) {
-      this.deps.clearCodexPromptsForSession(key);
-      if (mode === "all") {
-        await this.deps.interruptTasksByStatus(key, ["waiting", "queued", "running", "blocked"]);
-      } else {
-        await this.deps.interruptActiveTasks(key);
-      }
-      this.deps.logger.info("router.blocked_turn_interrupt_recovered", {
-        conversation_id: conversationId,
-        workspace: workspace.name,
-        session_key: key,
-        turn_id: result.turnId,
-        mode: mode || "current",
-      });
-      await this.deps.sendRendered(conversationId, messageWithTitle("No active Codex turn remained.", "Cleared stale Relay state."));
-      return;
-    }
-    if (!result.interrupted) {
-      await this.deps.sendRendered(conversationId, messageWithTitle("No active Codex turn to interrupt."));
-      return;
-    }
-
-    if (result.turnId && this.deps.store.getCollaborationMode(key) === "plan") {
-      this.plans.markInterruptedTurn(key, result.turnId);
-    }
-    this.deps.clearCodexPromptsForSession(key);
-    if (mode === "all") {
-      await this.deps.interruptTasksByStatus(key, ["waiting", "queued", "running", "blocked"]);
-    } else {
-      await this.deps.interruptActiveTasks(key);
-    }
-    this.deps.logger.info("router.turn_interrupted", {
-      conversation_id: conversationId,
-      workspace: workspace.name,
-      session_key: key,
-      turn_id: result.turnId,
-      mode: mode || "current",
-    });
-    await this.deps.sendRendered(conversationId, messageWithTitle(mode === "all" ? "Interrupted current turn and queued tasks." : "Interrupted current turn."));
+  async retiredInterruptCommand(conversationId: ConversationId): Promise<void> {
+    await this.deps.sendRendered(conversationId, messageWithTitle("Interrupt command removed.", "Use Interrupt on the latest activity card."));
   }
 
   async renderBackgroundTerminals(conversationId: ConversationId): Promise<void> {
@@ -464,7 +395,7 @@ export class ThreadCommandService {
     await this.deps.sendRendered(conversationId, messageWithTitle("Codex is busy.", "Wait for the current turn, answer the pending question, or handle the approval request before running this command."));
   }
 
-  async handleCommandCallback(message: CallbackMessage, payload: string): Promise<void> {
+  async handleCommandCallback(message: CallbackMessage, payload: string): Promise<string | void> {
     const parts = payload.split(":");
     const [, command, token, action] = parts;
     const pending = message.messageId ? this.deps.store.getPendingPrompt(message.conversationId, message.messageId) : undefined;
@@ -502,7 +433,102 @@ export class ThreadCommandService {
       await this.plans.handleCallback(message, pending, data, action);
       return;
     }
+    if (command === "activity") {
+      return this.handleActivityControlCallback(message, pending, data, action);
+    }
     throw new Error("Unknown command callback.");
+  }
+
+  private async handleActivityControlCallback(
+    message: CallbackMessage,
+    pending: PendingPrompt,
+    data: Record<string, unknown>,
+    actionValue: string | undefined,
+  ): Promise<string> {
+    if (!isActivityControlAction(actionValue)) return this.expireActivityControl(message, pending);
+    const action: ActivityControlAction = actionValue;
+    const allowed = Array.isArray(data.actions) && data.actions.some((value) => value === action);
+    if (!allowed) return this.expireActivityControl(message, pending);
+
+    const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
+    const key = sessionKey(message.conversationId, workspace.name);
+    const status = this.deps.agent.getStatus(key);
+    if (!status?.running
+      || pending.sessionKey !== key
+      || data.sessionKey !== key
+      || (typeof data.threadId === "string" && status.threadId !== data.threadId)) {
+      return this.expireActivityControl(message, pending);
+    }
+
+    const turnBound = data.phase === "working" || data.phase === "waitingForInput" || data.phase === "waitingForApproval";
+    if (turnBound && typeof data.turnId === "string" && status.activeTurnId !== data.turnId) {
+      return this.expireActivityControl(message, pending);
+    }
+
+    const goal = this.deps.agent.getThreadGoal ? await this.deps.agent.getThreadGoal(key) : null;
+    if (typeof data.goalCreatedAt === "number") {
+      if (!goal || goal.createdAt !== data.goalCreatedAt) return this.expireActivityControl(message, pending);
+      if (action !== "interrupt" && typeof data.goalUpdatedAt === "number" && goal.updatedAt !== data.goalUpdatedAt) {
+        return this.expireActivityControl(message, pending);
+      }
+    } else if (action !== "interrupt") {
+      return this.expireActivityControl(message, pending);
+    }
+
+    if (action === "interrupt") {
+      const interruptResult = await this.interruptCurrentTurn(message.conversationId, workspace.name, key, status);
+      if (!interruptResult) return this.expireActivityControl(message, pending);
+      if (goal?.status === "active" && this.deps.agent.setThreadGoal) {
+        await this.deps.agent.setThreadGoal(key, { status: "paused" });
+        await this.deps.refreshActivityContext(key);
+      }
+      if (interruptResult === "recovered") await this.deps.finalizeActivityInterrupt(key);
+      return goal?.status === "active" ? "Interrupted. Goal paused." : "Interrupted.";
+    }
+
+    return this.goals.handleControl(message, pending, action);
+  }
+
+  private async interruptCurrentTurn(
+    conversationId: ConversationId,
+    workspaceName: string,
+    key: string,
+    status: AgentSessionStatus,
+  ): Promise<"interrupted" | "recovered" | undefined> {
+    const blockedOnPrompt = Boolean(status.waitingForApproval || status.waitingForUserInput);
+    if (!status.activeTurnId && !blockedOnPrompt) return undefined;
+    if (!this.deps.agent.interrupt) throw new Error("Agent driver cannot interrupt turns.");
+
+    await this.deps.finalizeSessionOutput(key);
+    const result = await this.deps.agent.interrupt(key);
+    const handled = result.interrupted || result.stale || blockedOnPrompt;
+    if (!handled) return undefined;
+    if (result.turnId && this.deps.store.getCollaborationMode(key) === "plan") {
+      this.plans.markInterruptedTurn(key, result.turnId);
+    }
+    this.deps.clearCodexPromptsForSession(key);
+    await this.deps.interruptActiveTasks(key);
+    this.deps.logger.info(
+      result.stale ? "router.stale_turn_interrupt_recovered" : blockedOnPrompt && !result.interrupted ? "router.blocked_turn_interrupt_recovered" : "router.turn_interrupted",
+      {
+        conversation_id: conversationId,
+        workspace: workspaceName,
+        session_key: key,
+        turn_id: result.turnId,
+        source: "activity_control",
+      },
+    );
+    return result.interrupted ? "interrupted" : "recovered";
+  }
+
+  private async expireActivityControl(message: CallbackMessage, pending: PendingPrompt): Promise<string> {
+    this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
+    await this.deps.renderStrictCallbackPage(
+      message,
+      messageWithTitle("Control expired.", "Open the latest activity card or /goal."),
+      { inline_keyboard: [] },
+    );
+    return "Control expired.";
   }
 
   private async confirmThreadCommand(

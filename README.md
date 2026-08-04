@@ -104,7 +104,7 @@ Common commands:
 | `/goal <objective>` | Set a goal for the current Codex thread. |
 | `/resume` | Pick a recent Codex thread. |
 | `/side <prompt>` | Ask in a temporary side conversation. |
-| `/interrupt` | Stop the active turn. |
+| Activity/Goal card buttons | Interrupt the active turn or manage the goal. Button labels stay in English. |
 | `/ps` | List Codex background terminals. |
 | `/skills [search]` | Select a Codex skill, then reply with the task. |
 | `/mention [search]` | Select a workspace file or directory, then reply with the task. |

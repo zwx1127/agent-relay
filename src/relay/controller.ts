@@ -19,7 +19,6 @@ import type {
 import type {
   HomeStatusMode,
   PendingPrompt,
-  TaskStatus,
   WorkspaceRecord,
 } from "./types.ts";
 import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
@@ -170,10 +169,17 @@ export class RelayController {
       finalizeSessionOutput: (sessionKeyValue) => this.finalizeSessionOutput(sessionKeyValue),
       resetSessionPresentation: (sessionKeyValue, options) => this.resetSessionPresentation(sessionKeyValue, options),
       refreshActivityContext: (sessionKeyValue) => this.activityStreamer.refreshContext(sessionKeyValue),
+      finalizeActivityInterrupt: (sessionKeyValue) => this.activityStreamer.terminate(
+        sessionKeyValue,
+        "interrupted",
+        undefined,
+        { appendTranscript: false },
+      ),
+      setReplyToMessageId: (sessionKeyValue, messageId) => this.lastUserMessageIds.set(sessionKeyValue, messageId),
       interruptActiveTasks: (sessionKeyValue) => this.interruptActiveTasks(sessionKeyValue),
-      interruptTasksByStatus: (sessionKeyValue, statuses) => this.interruptTasksByStatus(sessionKeyValue, statuses),
       submitTask: (conversationId, text, userMessageId, preference, input) => this.submitTask(conversationId, text, userMessageId, preference, input),
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
+      editRendered: (conversationId, rendered, options) => this.editRendered(conversationId, rendered, options),
       renderCallbackPage: (message, body, replyMarkup) => this.renderCallbackPage(message, body, replyMarkup),
       renderStrictCallbackPage: (message, body, replyMarkup) => this.renderStrictCallbackPage(message, body, replyMarkup),
       expireCallbackPrompt: (message) => this.expireCallbackPrompt(message),
@@ -217,8 +223,8 @@ export class RelayController {
       side: (conversationId, prompt, userMessageId) => this.threadCommands.sideConversationCommand(conversationId, prompt, userMessageId),
       rename: (conversationId, name) => this.threadCommands.renameCommand(conversationId, name),
       plan: (conversationId, prompt, userMessageId) => this.threadCommands.planCommand(conversationId, prompt, userMessageId),
-      goal: (conversationId, args) => this.threadCommands.goalCommand(conversationId, args),
-      interrupt: (conversationId, args) => this.threadCommands.interruptCommand(conversationId, args),
+      goal: (conversationId, args, userMessageId) => this.threadCommands.goalCommand(conversationId, args, userMessageId),
+      retiredInterrupt: (conversationId) => this.threadCommands.retiredInterruptCommand(conversationId),
       ps: (conversationId) => this.threadCommands.renderBackgroundTerminals(conversationId),
       stop: (conversationId) => this.threadCommands.cleanBackgroundTerminals(conversationId),
       skills: (conversationId, searchTerm) => this.threadCommands.renderSkillPicker(conversationId, searchTerm),
@@ -382,20 +388,20 @@ export class RelayController {
         conversationId,
         messageWithTitle(
           "Codex is waiting for approval.",
-          "Use the approval buttons before sending another instruction. Direct messages are not submitted while approval is pending; send /interrupt to stop the blocked turn.",
+          "Use the approval buttons before sending another instruction. Direct messages are not submitted while approval is pending; use Interrupt on the latest activity card to stop the blocked turn.",
         ),
       );
       return;
     }
     if (pending.kind === "codex_mcp_elicitation") {
-      await this.sendRendered(conversationId, messageWithTitle("Codex is waiting for MCP input.", "Open the latest MCP request card or reply to it. Send /interrupt to cancel the blocked turn."));
+      await this.sendRendered(conversationId, messageWithTitle("Codex is waiting for MCP input.", "Open the latest MCP request card or reply to it. Direct messages are not submitted as answers; use Interrupt on the latest activity card to cancel the blocked turn."));
       return;
     }
     await this.sendRendered(
       conversationId,
       messageWithTitle(
         "Codex is waiting for your answer.",
-        "Open the latest question card or reply to it. Direct messages are not submitted as answers; send /interrupt if the question expired.",
+        "Open the latest question card or reply to it. Direct messages are not submitted as answers; use Interrupt on the latest activity card if the question expired.",
       ),
     );
   }
@@ -708,10 +714,6 @@ export class RelayController {
 
   private async interruptActiveTasks(sessionKeyValue: string): Promise<void> {
     await this.taskCoordinator.interruptActive(sessionKeyValue);
-  }
-
-  private async interruptTasksByStatus(sessionKeyValue: string, statuses: TaskStatus[]): Promise<void> {
-    await this.taskCoordinator.interruptByStatus(sessionKeyValue, statuses);
   }
 
   private async failActiveTasks(sessionKeyValue: string): Promise<void> {

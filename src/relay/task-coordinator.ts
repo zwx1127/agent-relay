@@ -308,11 +308,11 @@ export class TaskCoordinator {
 
   async sendWaitingPromptNotice(conversationId: ConversationId, status: AgentSessionStatus): Promise<boolean> {
     if (status.waitingForUserInput) {
-      await this.deps.sendRendered(conversationId, messageWithTitle("Codex is waiting for your answer.", "Open the latest question card or reply to it. Direct messages are not submitted as answers; send /interrupt if the question expired."));
+      await this.deps.sendRendered(conversationId, messageWithTitle("Codex is waiting for your answer.", "Open the latest question card or reply to it. Direct messages are not submitted as answers; use Interrupt on the latest activity card if the question expired."));
       return true;
     }
     if (status.waitingForApproval) {
-      await this.deps.sendRendered(conversationId, messageWithTitle("Codex is waiting for approval.", "Use the approval buttons before sending another instruction. Direct messages are not submitted while approval is pending; send /interrupt to stop the blocked turn."));
+      await this.deps.sendRendered(conversationId, messageWithTitle("Codex is waiting for approval.", "Use the approval buttons before sending another instruction. Direct messages are not submitted while approval is pending; use Interrupt on the latest activity card to stop the blocked turn."));
       return true;
     }
     return false;

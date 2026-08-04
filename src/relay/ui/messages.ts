@@ -26,16 +26,14 @@ export function formatHelpMessage(): RenderedTelegramText {
     "- ", code("/plan <prompt>"), " - Run a prompt in Plan mode.\n",
     "- ", code("/goal"), " - Show the current goal.\n",
     "- ", code("/goal <objective>"), " - Set the current goal.\n",
-    "- ", code("/goal edit"), ", ", code("/goal pause"), ", ", code("/goal resume"), ", ", code("/goal clear"), " - Manage the goal.\n",
-    "- ", code("/interrupt"), " - Interrupt the active Codex turn.\n",
-    "- ", code("/interrupt all"), " - Interrupt the active turn and queued prompts.\n",
+    "- Use the English buttons on activity and Goal cards to interrupt work or manage a goal.\n",
     "- ", code("/ps"), " - List Codex background terminals.\n",
     "- ", code("/skills [search]"), " - Select a skill, then reply with the task.\n",
     "- ", code("/mention [search]"), " - Select a workspace file or directory, then reply with the task.\n",
     "- ", code("/archive"), " - Archive the current chat after confirmation.\n",
     "- ", code("/delete"), " - Permanently delete the current chat after two confirmations.\n",
     "- ", code("/stop"), ", ", code("/clean"), " - Stop all background terminals for this chat.\n\n",
-    "Relay-only commands: ", code("/help"), ", ", code("/relay"), ", ", code("/interrupt [all]"), ".",
+    "Relay-only commands: ", code("/help"), ", ", code("/relay"), ".",
   ]);
 }
 
@@ -83,11 +81,7 @@ export function formatGoalMessage(goal: AgentThreadGoal | null): RenderedTelegra
     parts.push(
       "Usage:\n",
       "- /goal\n",
-      "- /goal <objective>\n",
-      "- /goal edit\n",
-      "- /goal pause\n",
-      "- /goal resume\n",
-      "- /goal clear\n\n",
+      "- /goal <objective>\n\n",
       "No goal is currently set.",
     );
     return renderTelegramText(parts);
@@ -104,24 +98,8 @@ export function formatGoalMessage(goal: AgentThreadGoal | null): RenderedTelegra
   return renderTelegramText(parts);
 }
 
-export function formatGoalUpdatedMessage(goal: AgentThreadGoal): RenderedTelegramText {
-  return renderTelegramText([bold("Goal updated."), "\n\n", ...goalSummaryParts(goal)]);
-}
-
 export function formatGoalClearedMessage(cleared: boolean): RenderedTelegramText {
   return renderTelegramText([bold(cleared ? "Goal cleared." : "No goal to clear.")]);
-}
-
-function goalSummaryParts(goal: AgentThreadGoal): TelegramTextPart[] {
-  const parts: TelegramTextPart[] = [
-    "Status: ",
-    formatGoalStatus(goal.status),
-    "\nObjective: ",
-    goal.objective,
-  ];
-  const summary = goalUsageSummary(goal);
-  if (summary) parts.push("\n", summary);
-  return parts;
 }
 
 function goalUsageSummary(goal: AgentThreadGoal): string {

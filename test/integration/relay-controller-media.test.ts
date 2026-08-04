@@ -204,7 +204,7 @@ describe("relay controller tasks and media", () => {
     ]);
   });
 
-  test("/interrupt marks the active turn task interrupted while keeping the session selected", async () => {
+  test("/interrupt is retired and does not interrupt the active turn", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -214,16 +214,16 @@ describe("relay controller tasks and media", () => {
     await router.handle(textMessage("long task"));
     await router.handle(textMessage("/interrupt"));
 
-    expect(agent.interrupted).toEqual([{ key: "codex:1:demo", turnId: "turn-1" }]);
+    expect(agent.interrupted).toEqual([]);
     expect(agent.getStatus("codex:1:demo")?.running).toBe(true);
-    expect(agent.getStatus("codex:1:demo")?.activeTurnId).toBeUndefined();
+    expect(agent.getStatus("codex:1:demo")?.activeTurnId).toBe("turn-1");
     expect(store.getBinding(1)?.workspaceName).toBe("demo");
-    expect(store.getTask(1)?.status).toBe("interrupted");
-    expect(adapter.reactions.at(-1)).toEqual({ conversationId: "1", messageId: "1", emoji: "🤨" });
-    expect(adapter.sent.at(-1)?.text).toContain("Interrupted current turn.");
+    expect(store.getTask(1)?.status).toBe("running");
+    expect(adapter.reactions.at(-1)).toEqual({ conversationId: "1", messageId: "1", emoji: "✍" });
+    expect(adapter.sent.at(-1)?.text).toContain("Interrupt command removed.");
   });
 
-  test("/interrupt recovers stale Codex active turn without recording a Relay Home error", async () => {
+  test("activity Interrupt recovers stale Codex active turn without recording a Relay Home error", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -231,15 +231,18 @@ describe("relay controller tasks and media", () => {
     store.bindConversation(1, "demo");
 
     await router.handle(textMessage("long task"));
+    await router.handleAgentOutput({ type: "activity", sessionKey: "codex:1:demo", turnId: "turn-1", itemId: "run", activity: { kind: "item", category: "command", label: "Run", status: "inProgress" } });
+    await waitForStreamFlush();
+    const activity = adapter.sent.find((message) => message.text.startsWith("● Codex"))!;
+    const interrupt = activity.options!.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Interrupt")!;
     agent.staleInterrupt = true;
-    await router.handle(textMessage("/interrupt"));
+    await router.handle(callbackMessage(interrupt.callback_data, 7, "cb-stale", activity.messageId));
 
     expect(agent.interrupted).toEqual([{ key: "codex:1:demo", turnId: "turn-1" }]);
     expect(agent.getStatus("codex:1:demo")?.activeTurnId).toBeUndefined();
     expect(store.getTask(1)?.status).toBe("interrupted");
     expect(store.latestTranscriptEvent("1", "demo", "system")).toBeUndefined();
-    expect(adapter.sent.at(-1)?.text).toContain("No active Codex turn remained.");
-    expect(adapter.sent.at(-1)?.text).not.toContain("Error:");
+    expect(adapter.answered.at(-1)?.text).toBe("Interrupted.");
 
     await router.handle(textMessage("/relay"));
 
@@ -247,7 +250,77 @@ describe("relay controller tasks and media", () => {
     expect(adapter.sent.at(-1)?.text).not.toContain("Error:");
   });
 
-  test("/interrupt does not start a session when no turn is active", async () => {
+  test("activity Interrupt stops only the active turn and preserves queued work", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("long task"));
+    await (router as any).submitTask(1, "queued work", 88, "queue");
+    await router.handleAgentOutput({ type: "activity", sessionKey: "codex:1:demo", turnId: "turn-1", itemId: "run", activity: { kind: "item", category: "command", label: "Run", status: "inProgress" } });
+    await waitForStreamFlush();
+    const activity = adapter.sent.find((message) => message.text.startsWith("● Codex"))!;
+    const interrupt = activity.options!.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Interrupt")!;
+    await router.handle(callbackMessage(interrupt.callback_data, 7, "cb-interrupt", activity.messageId));
+
+    expect(agent.interrupted).toEqual([{ key: "codex:1:demo", turnId: "turn-1" }]);
+    expect(store.getTask(1)?.status).toBe("interrupted");
+    expect(store.getTask(2)?.status).toBe("queued");
+    expect(agent.sent).toHaveLength(1);
+    expect(adapter.answered.at(-1)).toEqual({ callbackQueryId: "cb-interrupt", text: "Interrupted." });
+  });
+
+  test("activity controls do not expire by time and reject an old turn identity", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("long task"));
+    await router.handleAgentOutput({ type: "activity", sessionKey: "codex:1:demo", turnId: "turn-1", itemId: "run", activity: { kind: "item", category: "command", label: "Run", status: "inProgress" } });
+    await waitForStreamFlush();
+    const activity = adapter.sent.find((message) => message.text.startsWith("● Codex"))!;
+    const pending = store.getPendingPrompt("1", activity.messageId!)!;
+    expect(pending.expiresAt).toBeUndefined();
+    const interrupt = activity.options!.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Interrupt")!;
+    agent.getStatus("codex:1:demo")!.activeTurnId = "turn-2";
+
+    await router.handle(callbackMessage(interrupt.callback_data, 7, "cb-old-turn", activity.messageId));
+
+    expect(agent.interrupted).toEqual([]);
+    expect(store.getPendingPrompt("1", activity.messageId!)).toBeUndefined();
+    expect(adapter.edited.at(-1)?.text).toContain("Control expired.");
+    expect(adapter.answered.at(-1)?.text).toBe("Control expired.");
+  });
+
+  test("Goal Interrupt pauses the goal while interrupting the active turn", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.capabilities = { threadGoals: true };
+
+    await router.handle(textMessage("work"));
+    agent.goal = { threadId: "thread-1", objective: "Ship safely", status: "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1 };
+    await agent.getThreadGoal("codex:1:demo");
+    await router.handleAgentOutput({ type: "activity", sessionKey: "codex:1:demo", turnId: "turn-1", itemId: "run", activity: { kind: "item", category: "command", label: "Run", status: "inProgress" } });
+    await waitForStreamFlush();
+    const activity = adapter.sent.find((message) => message.text.startsWith("● Codex"))!;
+    expect(activity.options!.replyMarkup!.inline_keyboard.flat().map((button) => button.text)).toEqual(["Interrupt", "Edit", "Clear"]);
+    const interrupt = activity.options!.replyMarkup!.inline_keyboard.flat()[0]!;
+    await router.handle(callbackMessage(interrupt.callback_data, 7, "cb-goal-interrupt", activity.messageId));
+
+    expect(agent.interrupted).toEqual([{ key: "codex:1:demo", turnId: "turn-1" }]);
+    expect(agent.goalSets.at(-1)).toEqual({ key: "codex:1:demo", goal: { status: "paused" } });
+    expect(agent.goal?.status).toBe("paused");
+    expect(adapter.answered.at(-1)?.text).toBe("Interrupted. Goal paused.");
+  });
+
+  test("retired /interrupt does not start a session", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -258,10 +331,10 @@ describe("relay controller tasks and media", () => {
 
     expect(agent.interrupted).toEqual([]);
     expect(agent.getStatus("codex:1:demo")).toBeUndefined();
-    expect(adapter.sent.at(-1)?.text).toContain("No active Codex turn to interrupt.");
+    expect(adapter.sent.at(-1)?.text).toContain("Interrupt command removed.");
   });
 
-  test("/interrupt all marks active and queued tasks interrupted", async () => {
+  test("retired /interrupt all preserves the active turn and queued tasks", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -271,18 +344,17 @@ describe("relay controller tasks and media", () => {
     await router.handle(textMessage("long task"));
     await (router as any).submitTask(1, "queued work", 88, "queue");
     await router.handle(textMessage("/interrupt all"));
-    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
 
-    expect(agent.interrupted).toEqual([{ key: "codex:1:demo", turnId: "turn-1" }]);
+    expect(agent.interrupted).toEqual([]);
     expect(agent.sent).toHaveLength(1);
-    expect(store.getTask(1)?.status).toBe("interrupted");
-    expect(store.getTask(2)?.status).toBe("interrupted");
-    expect(adapter.reactions).toContainEqual({ conversationId: "1", messageId: "1", emoji: "🤨" });
-    expect(adapter.reactions).toContainEqual({ conversationId: "1", messageId: "88", emoji: "🤨" });
-    expect(adapter.sent.at(-1)?.text).toContain("Interrupted current turn and queued tasks.");
+    expect(store.getTask(1)?.status).toBe("running");
+    expect(store.getTask(2)?.status).toBe("queued");
+    expect(adapter.reactions).toContainEqual({ conversationId: "1", messageId: "1", emoji: "✍" });
+    expect(adapter.reactions).toContainEqual({ conversationId: "1", messageId: 88, emoji: "🫡", options: { isBig: true } });
+    expect(adapter.sent.at(-1)?.text).toContain("Interrupt command removed.");
   });
 
-  test("/interrupt suppresses plan ready for the interrupted plan turn", async () => {
+  test("activity Interrupt suppresses plan ready for the interrupted Plan turn", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -290,7 +362,11 @@ describe("relay controller tasks and media", () => {
     store.bindConversation(1, "demo");
 
     await router.handle(textMessage("/plan design this"));
-    await router.handle(textMessage("/interrupt"));
+    await router.handleAgentOutput({ type: "activity", sessionKey: "codex:1:demo", turnId: "turn-1", itemId: "plan", activity: { kind: "item", category: "other", label: "Planning", status: "inProgress" } });
+    await waitForStreamFlush();
+    const activity = adapter.sent.find((message) => message.text.startsWith("● Codex"))!;
+    const interrupt = activity.options!.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Interrupt")!;
+    await router.handle(callbackMessage(interrupt.callback_data, 7, "cb-plan-interrupt", activity.messageId));
     const sentCount = adapter.sent.length;
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
 
@@ -302,7 +378,7 @@ describe("relay controller tasks and media", () => {
     expect(adapter.sent.some((message) => message.text.includes("Plan ready."))).toBe(false);
   });
 
-  test("/interrupt expires pending Codex question callbacks for the interrupted session", async () => {
+  test("activity Interrupt expires pending Codex question callbacks for the interrupted session", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -310,6 +386,10 @@ describe("relay controller tasks and media", () => {
     store.bindConversation(1, "demo");
 
     await router.handle(textMessage("question task"));
+    await router.handleAgentOutput({ type: "activity", sessionKey: "codex:1:demo", turnId: "turn-1", itemId: "ask", activity: { kind: "item", category: "other", label: "Ask", status: "inProgress" } });
+    await waitForStreamFlush();
+    const activity = adapter.sent.find((message) => message.text.startsWith("● Codex"))!;
+    const interrupt = activity.options!.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Interrupt")!;
     await router.handleAgentOutput({
       type: "user_input_request",
       sessionKey: "codex:1:demo",
@@ -321,7 +401,7 @@ describe("relay controller tasks and media", () => {
     const optionButton = questionMessage.options?.replyMarkup?.inline_keyboard.flat()[0];
     expect(store.getPendingPrompt("1", questionMessage.messageId!)).toBeDefined();
 
-    await router.handle(textMessage("/interrupt"));
+    await router.handle(callbackMessage(interrupt.callback_data, 7, "cb-question-interrupt", activity.messageId));
 
     expect(store.getPendingPrompt("1", questionMessage.messageId!)).toBeUndefined();
     await router.handle(callbackMessage(optionButton!.callback_data, 7, "cb-question", questionMessage.messageId));
@@ -330,7 +410,7 @@ describe("relay controller tasks and media", () => {
     expect(adapter.edited.at(-1)?.text).toContain("Question expired.");
   });
 
-  test("/interrupt clears stale waiting approval state without an active turn", async () => {
+  test("retired /interrupt does not clear waiting approval state", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -351,11 +431,11 @@ describe("relay controller tasks and media", () => {
 
     await router.handle(textMessage("/interrupt"));
 
-    expect(agent.interrupted).toEqual([{ key: "codex:1:demo" }]);
-    expect(agent.getStatus("codex:1:demo")?.waitingForApproval).toBe(false);
-    expect(store.getPendingPrompt("1", 101)).toBeUndefined();
-    expect(store.getTask(task.id)?.status).toBe("interrupted");
-    expect(adapter.sent.at(-1)?.text).toContain("Cleared stale Relay state.");
+    expect(agent.interrupted).toEqual([]);
+    expect(agent.getStatus("codex:1:demo")?.waitingForApproval).toBe(true);
+    expect(store.getPendingPrompt("1", 101)).toBeDefined();
+    expect(store.getTask(task.id)?.status).toBe("blocked");
+    expect(adapter.sent.at(-1)?.text).toContain("Interrupt command removed.");
   });
 
   test("queued prompt updates the user message reaction", async () => {
@@ -735,19 +815,16 @@ describe("relay controller tasks and media", () => {
     expect(card.text).not.toContain("model: new");
     expect(card.text).not.toContain("Hidden warning");
     expect(card.text).not.toContain("+changed");
-    expect(card.options?.replyMarkup).toEqual({ inline_keyboard: [] });
+    expect(card.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Interrupt", "Edit", "Clear"]);
     const boldLabels = (card.options?.entities ?? [])
       .filter((entity) => entity.type === "bold")
       .map((entity) => card.text.slice(entity.offset, entity.offset + entity.length));
     expect(boldLabels).toEqual(["● Codex · Working", "Reasoning", "Plan 2/8 · showing 1–5", "Recent activity · 7"]);
 
-    await router.handle(textMessage("/goal pause"));
-    expect(adapter.edited.at(-1)?.text).toContain("Goal Paused · Ship safely");
-
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: key, turnId: "turn-1", status: "completed", durationMs: 20 });
     expect(adapter.edited.at(-1)?.text.startsWith("✓ Codex · Completed")).toBe(true);
     expect(adapter.edited.at(-1)?.text).toContain("Mode Plan · 0s");
-    expect(adapter.edited.at(-1)?.options.replyMarkup).toEqual({ inline_keyboard: [] });
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Pause", "Edit", "Clear"]);
     expect(store.latestTranscriptEvent("1", "demo", "system")?.text).toContain("[Activity done:");
 
     await router.handle(textMessage("/relay"));
@@ -756,7 +833,7 @@ describe("relay controller tasks and media", () => {
     expect(home.text).not.toContain("Error:");
   });
 
-  test("activity edit failures create one button-free replacement card", async () => {
+  test("activity edit failures preserve controls on the replacement card", async () => {
     const { router, store, adapter, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -767,13 +844,13 @@ describe("relay controller tasks and media", () => {
     await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: "command-1", activity: { kind: "item", category: "command", label: "Run tests", status: "completed" } });
     await waitForStreamFlush();
     const first = adapter.sent.find((message) => message.text.startsWith("● Codex"))!;
-    expect(first.options?.replyMarkup).toEqual({ inline_keyboard: [] });
+    expect(first.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Interrupt"]);
     adapter.failEditMessage = new Error("cannot edit");
     await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: "command-1", activity: { kind: "item", category: "command", label: "Run tests", status: "failed", detail: "Exit 1" } });
     const cards = adapter.sent.filter((message) => message.text.startsWith("● Codex"));
     expect(cards).toHaveLength(2);
     expect(cards.at(-1)?.text).toContain("× Run tests · Exit 1");
-    expect(cards.at(-1)?.options?.replyMarkup).toEqual({ inline_keyboard: [] });
+    expect(cards.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Interrupt"]);
 
     await router.handleAgentOutput({ type: "thread_lifecycle", sessionKey: key, threadId: "thread-1", action: "closed" });
     expect(adapter.sent.filter((message) => message.text.startsWith("● Codex"))).toHaveLength(2);
@@ -802,7 +879,7 @@ describe("relay controller tasks and media", () => {
     expect(card.text).not.toContain("Step 0");
     expect(card.text).not.toContain("Step 6");
     expect(card.text).toContain("Recent activity · 12");
-    expect(card.options?.replyMarkup).toEqual({ inline_keyboard: [] });
+    expect(card.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Interrupt"]);
   });
 
   test("activity derives Goal mode, exposes waiting phases, and keeps CJK and emoji content bounded", async () => {

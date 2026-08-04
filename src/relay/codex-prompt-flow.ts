@@ -425,7 +425,7 @@ export class CodexPromptFlow {
     }
     await this.deps.renderStrictCallbackPage(
       message,
-      messageWithTitle("Approval expired.", "Send /interrupt to stop the blocked turn, then resend your instruction."),
+      messageWithTitle("Approval expired.", "Use Interrupt on the latest activity card, then resend your instruction."),
       { inline_keyboard: [] },
     );
   }
@@ -440,5 +440,5 @@ export class CodexPromptFlow {
 }
 
 function expiredQuestionMessage(): RenderedTelegramText {
-  return messageWithTitle("Question expired.", "Send /interrupt to stop the blocked turn, then resend your instruction.");
+  return messageWithTitle("Question expired.", "Use Interrupt on the latest activity card, then resend your instruction.");
 }

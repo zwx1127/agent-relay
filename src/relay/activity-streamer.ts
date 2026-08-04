@@ -12,6 +12,8 @@ import type {
 import type { EditMessageTextOptions, SendMessageOptions } from "../ports/im.ts";
 import { renderTelegramText, type RenderedTelegramText, type TelegramTextPart } from "../presentation/telegram/text.ts";
 import type { RelayStore } from "../storage/store.ts";
+import { activityControlActions, type ActivityControlAction, type ActivityControlPayload } from "./activity-controls.ts";
+import { shortToken } from "./ui/callback-data.ts";
 import {
   ACTIVITY_MAX_CHARS,
   ACTIVITY_MAX_ROWS,
@@ -21,6 +23,7 @@ import {
   ACTIVITY_ROW_COLUMNS,
   STREAM_QUIET_MS,
 } from "./ui/constants.ts";
+import { activityControlKeyboard } from "./ui/keyboards.ts";
 
 export interface ActivitySessionContext {
   threadId?: string;
@@ -50,6 +53,7 @@ interface ActivityState {
   conversationId: ConversationId;
   workspaceName: string;
   generation: number;
+  controlToken: string;
   invalidated: boolean;
   threadId?: string;
   threadName?: string;
@@ -75,12 +79,19 @@ interface ActivityState {
   timer?: Timer;
   flushPromise?: Promise<void>;
   lastRendered?: string;
+  lastControls?: string;
   sentOnce?: boolean;
   transcriptAppended?: boolean;
 }
 
+interface ActivityControlCard {
+  scopeKey: string;
+  messageId: MessageId;
+  rendered: RenderedTelegramText;
+}
+
 export interface ActivityStreamerDeps {
-  store: Pick<RelayStore, "deletePagedOutputsForSession" | "appendTranscript">;
+  store: Pick<RelayStore, "deletePagedOutputsForSession" | "appendTranscript" | "setPendingPrompt" | "deletePendingPrompt">;
   logger: Logger;
   canEdit: boolean;
   getReplyToMessageId(sessionKey: string): MessageId | undefined;
@@ -92,6 +103,7 @@ export interface ActivityStreamerDeps {
 
 export class ActivityStreamer {
   private readonly states = new Map<string, ActivityState>();
+  private readonly controlCards = new Map<string, ActivityControlCard>();
   private readonly quietMs: number;
   private readonly maxMs: number;
   private readonly minEditMs: number;
@@ -130,11 +142,17 @@ export class ActivityStreamer {
     await this.finish(state);
   }
 
-  async terminate(sessionKey: string, phase: "interrupted" | "failed", detail?: string): Promise<void> {
+  async terminate(
+    sessionKey: string,
+    phase: "interrupted" | "failed",
+    detail?: string,
+    options: { appendTranscript?: boolean } = {},
+  ): Promise<void> {
     const state = this.states.get(sessionKey);
     if (!state) return;
     state.phase = phase;
     state.error = detail;
+    if (options.appendTranscript === false) state.transcriptAppended = true;
     this.markDirty(state);
     await this.finish(state);
   }
@@ -176,6 +194,7 @@ export class ActivityStreamer {
         // The originating flush already logged the transport failure.
       }
     }
+    await this.retireControlCard(sessionKey);
     if (deletePages) this.deps.store.deletePagedOutputsForSession(sessionKey);
   }
 
@@ -202,12 +221,14 @@ export class ActivityStreamer {
         return undefined;
       }
       const now = Date.now();
+      await this.retireControlCard(event.sessionKey);
       state = {
         sessionKey: event.sessionKey,
         scopeKey: parsed.scopeKey,
         conversationId: parsed.conversationId,
         workspaceName: parsed.workspaceName,
         generation: this.nextGeneration++,
+        controlToken: shortToken(),
         invalidated: false,
         ...(threadId ? { threadId } : {}),
         ...(context.threadName ? { threadName: context.threadName } : {}),
@@ -363,17 +384,21 @@ export class ActivityStreamer {
     if (context.goal !== undefined) state.goal = context.goal;
     const renderedRevision = state.revision;
     const rendered = renderActivity(state);
-    if (!final && rendered.text === state.lastRendered) {
+    const actions = this.controlsFor(state, context);
+    const controlsKey = actions.join(",");
+    if (!final && rendered.text === state.lastRendered && controlsKey === state.lastControls) {
       this.markFlushed(state, renderedRevision);
       return;
     }
-    const emptyKeyboard = { inline_keyboard: [] };
+    const replyMarkup = activityControlKeyboard(state.controlToken, actions);
     if (state.messageId && this.deps.canEdit) {
       try {
-        await this.deps.editRendered(state.scopeKey, rendered, { messageId: state.messageId, replyMarkup: emptyKeyboard });
+        await this.deps.editRendered(state.scopeKey, rendered, { messageId: state.messageId, replyMarkup });
         if (!this.isCurrent(state)) return;
         state.lastRendered = rendered.text;
+        state.lastControls = controlsKey;
         state.lastFlushAt = Date.now();
+        this.bindControls(state, rendered, actions);
         this.markFlushed(state, renderedRevision);
         return;
       } catch (error) {
@@ -390,17 +415,81 @@ export class ActivityStreamer {
       return;
     }
     if (!this.isCurrent(state)) return;
+    const previousMessageId = state.messageId;
     const result = await this.deps.sendRendered(state.scopeKey, rendered, {
       replyToMessageId: state.sentOnce ? undefined : state.replyToMessageId,
-      replyMarkup: emptyKeyboard,
+      replyMarkup,
       disableWebPagePreview: true,
     });
     if (!this.isCurrent(state)) return;
     state.messageId = result.messageId;
+    if (previousMessageId !== undefined && String(previousMessageId) !== String(result.messageId)) {
+      this.deps.store.deletePendingPrompt(state.scopeKey, previousMessageId);
+    }
     state.sentOnce = true;
     state.lastRendered = rendered.text;
+    state.lastControls = controlsKey;
     state.lastFlushAt = Date.now();
+    this.bindControls(state, rendered, actions);
     this.markFlushed(state, renderedRevision);
+  }
+
+  private controlsFor(state: ActivityState, context: ActivitySessionContext): ActivityControlAction[] {
+    const activePhase = state.phase === "working" || state.phase === "waitingForInput" || state.phase === "waitingForApproval";
+    const cancellableTurn = activePhase && context.activeTurnId === state.turnId;
+    return activityControlActions(state.goal, cancellableTurn);
+  }
+
+  private bindControls(state: ActivityState, rendered: RenderedTelegramText, actions: ActivityControlAction[]): void {
+    if (state.messageId === undefined) return;
+    if (!actions.length) {
+      this.deps.store.deletePendingPrompt(state.scopeKey, state.messageId);
+      const current = this.controlCards.get(state.sessionKey);
+      if (current && String(current.messageId) === String(state.messageId)) this.controlCards.delete(state.sessionKey);
+      return;
+    }
+    const payload: ActivityControlPayload = {
+      command: "activity",
+      token: state.controlToken,
+      actions,
+      sessionKey: state.sessionKey,
+      ...(state.threadId ? { threadId: state.threadId } : {}),
+      ...(state.turnId ? { turnId: state.turnId } : {}),
+      generation: state.generation,
+      phase: state.phase,
+      ...(state.goal ? {
+        goalCreatedAt: state.goal.createdAt,
+        goalUpdatedAt: state.goal.updatedAt,
+        goalStatus: state.goal.status,
+      } : {}),
+    };
+    this.deps.store.setPendingPrompt({
+      conversationId: state.scopeKey,
+      scopeKey: state.scopeKey,
+      promptMessageId: state.messageId,
+      kind: "relay_command",
+      createdAt: Date.now(),
+      sessionKey: state.sessionKey,
+      payloadJson: JSON.stringify(payload),
+    });
+    this.controlCards.set(state.sessionKey, { scopeKey: state.scopeKey, messageId: state.messageId, rendered });
+  }
+
+  private async retireControlCard(sessionKey: string): Promise<void> {
+    const card = this.controlCards.get(sessionKey);
+    if (!card) return;
+    this.controlCards.delete(sessionKey);
+    this.deps.store.deletePendingPrompt(card.scopeKey, card.messageId);
+    if (!this.deps.canEdit) return;
+    try {
+      await this.deps.editRendered(card.scopeKey, card.rendered, { messageId: card.messageId, replyMarkup: { inline_keyboard: [] } });
+    } catch (error) {
+      this.deps.logger.warn("router.activity_control_retire_failed", {
+        session_key: sessionKey,
+        message_id: card.messageId,
+        error: asError(error),
+      });
+    }
   }
 
   private markFlushed(state: ActivityState, renderedRevision: number): void {

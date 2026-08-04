@@ -1,5 +1,6 @@
 import type { AgentThreadSummary, AgentUserInputOption } from "../../ports/agent.ts";
 import type { InlineKeyboardMarkup } from "../../ports/im.ts";
+import type { ActivityControlAction } from "../activity-controls.ts";
 import type { HomeStatusMode, WorkspaceRecord } from "../types.ts";
 import { UI_BUTTON } from "./constants.ts";
 import { deleteWorkspaceCallbackData, workspaceCallbackData, workspaceIntroCallbackData } from "./callback-data.ts";
@@ -38,6 +39,32 @@ export function approvalKeyboard(token: string, choices: Array<{ action: string;
   return {
     inline_keyboard: choices.map((choice) => [{ text: choice.label, callback_data: `ar:a:${token}:${choice.action}` }]),
   };
+}
+
+export function activityControlKeyboard(token: string, actions: ActivityControlAction[]): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: actions.length
+      ? [actions.map((action) => ({
+        text: activityControlLabel(action),
+        callback_data: `ar:cmd:activity:${token}:${action}`,
+      }))]
+      : [],
+  };
+}
+
+function activityControlLabel(action: ActivityControlAction): string {
+  switch (action) {
+    case "interrupt":
+      return "Interrupt";
+    case "pause":
+      return "Pause";
+    case "resume":
+      return "Resume";
+    case "edit":
+      return "Edit";
+    case "clear":
+      return "Clear";
+  }
 }
 
 export function attachmentPickerKeyboard(

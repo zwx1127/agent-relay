@@ -59,7 +59,7 @@ describe("activity streamer lifecycle", () => {
     const firstRelease = new Promise<void>((resolve) => { releaseFirst = resolve; });
     let sendCount = 0;
     const streamer = new ActivityStreamer({
-      store: { deletePagedOutputsForSession: () => undefined, appendTranscript: () => undefined },
+      store: activityStore(),
       logger: noopLogger,
       canEdit: true,
       getReplyToMessageId: () => undefined,
@@ -107,7 +107,7 @@ describe("activity streamer lifecycle", () => {
     const sendStarted = new Promise<void>((resolve) => { started = resolve; });
     const sendRelease = new Promise<void>((resolve) => { release = resolve; });
     const streamer = new ActivityStreamer({
-      store: { deletePagedOutputsForSession: () => undefined, appendTranscript: () => undefined },
+      store: activityStore(),
       logger: noopLogger,
       canEdit: true,
       getReplyToMessageId: () => undefined,
@@ -140,7 +140,7 @@ function activityStreamer(
   timing: { quietMs: number; minEditMs: number; maxMs: number } = { quietMs: 2, minEditMs: 0, maxMs: 10 },
 ): ActivityStreamer {
   return new ActivityStreamer({
-    store: { deletePagedOutputsForSession: () => undefined, appendTranscript: () => undefined },
+    store: activityStore(),
     logger: noopLogger,
     canEdit: true,
     getReplyToMessageId: () => undefined,
@@ -152,4 +152,13 @@ function activityStreamer(
     editRendered: async (_conversationId, rendered) => { edited.push(rendered.text); },
     timing,
   });
+}
+
+function activityStore() {
+  return {
+    deletePagedOutputsForSession: () => undefined,
+    appendTranscript: () => undefined,
+    setPendingPrompt: () => undefined,
+    deletePendingPrompt: () => undefined,
+  };
 }
