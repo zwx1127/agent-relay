@@ -63,6 +63,7 @@ interface ActivityState {
   dirtySince?: number;
   revision: number;
   mode: AgentCollaborationMode;
+  goalTurn: boolean;
   goal: AgentThreadGoal | null | undefined;
   reasoning?: ReasoningState;
   plan?: { explanation?: string; steps: AgentPlanStep[] };
@@ -82,6 +83,8 @@ interface ActivityState {
   lastControls?: string;
   sentOnce?: boolean;
   transcriptAppended?: boolean;
+  controlsSuppressed?: boolean;
+  presentationFrozen?: boolean;
 }
 
 interface ActivityControlCard {
@@ -90,11 +93,18 @@ interface ActivityControlCard {
   rendered: RenderedTelegramText;
 }
 
+interface GoalReplyTarget {
+  messageId: MessageId;
+  excludedTurnId?: string;
+  consumed: boolean;
+}
+
 export interface ActivityStreamerDeps {
   store: Pick<RelayStore, "deletePagedOutputsForSession" | "appendTranscript" | "setPendingPrompt" | "deletePendingPrompt">;
   logger: Logger;
   canEdit: boolean;
   getReplyToMessageId(sessionKey: string): MessageId | undefined;
+  onReplyTargetClaimed?(sessionKey: string, messageId: MessageId): void;
   getSessionContext(sessionKey: string): ActivitySessionContext;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
   editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: Omit<EditMessageTextOptions, "entities" | "parseMode">): Promise<void>;
@@ -104,6 +114,8 @@ export interface ActivityStreamerDeps {
 export class ActivityStreamer {
   private readonly states = new Map<string, ActivityState>();
   private readonly controlCards = new Map<string, ActivityControlCard>();
+  private readonly pendingUserReplies = new Map<string, MessageId>();
+  private readonly goalReplyTargets = new Map<string, GoalReplyTarget>();
   private readonly quietMs: number;
   private readonly maxMs: number;
   private readonly minEditMs: number;
@@ -113,6 +125,92 @@ export class ActivityStreamer {
     this.quietMs = deps.timing?.quietMs ?? STREAM_QUIET_MS;
     this.maxMs = deps.timing?.maxMs ?? ACTIVITY_MAX_STALE_MS;
     this.minEditMs = deps.timing?.minEditMs ?? (deps.timing?.quietMs === undefined ? ACTIVITY_ROUTINE_MIN_MS : 0);
+  }
+
+  registerUserReplyTarget(sessionKey: string, messageId: MessageId, activeTurnId?: string): void {
+    if (activeTurnId) return;
+    this.pendingUserReplies.set(sessionKey, messageId);
+  }
+
+  registerGoalReplyTarget(sessionKey: string, messageId: MessageId, activeTurnId?: string): void {
+    this.goalReplyTargets.set(sessionKey, {
+      messageId,
+      ...(activeTurnId ? { excludedTurnId: activeTurnId } : {}),
+      consumed: false,
+    });
+  }
+
+  clearGoalReplyTarget(sessionKey: string): void {
+    this.goalReplyTargets.delete(sessionKey);
+  }
+
+  clearReplyTargets(sessionKey: string): void {
+    this.pendingUserReplies.delete(sessionKey);
+    this.goalReplyTargets.delete(sessionKey);
+  }
+
+  isCurrentControlCard(sessionKey: string, messageId: MessageId): boolean {
+    const current = this.controlCards.get(sessionKey);
+    return Boolean(current && String(current.messageId) === String(messageId));
+  }
+
+  async activateControlCard(sessionKey: string, scopeKey: string, messageId: MessageId, rendered: RenderedTelegramText): Promise<void> {
+    const current = this.controlCards.get(sessionKey);
+    if (current && String(current.messageId) !== String(messageId)) await this.retireControlCard(sessionKey, current.messageId);
+    this.controlCards.set(sessionKey, { scopeKey, messageId, rendered });
+  }
+
+  async retireControlCard(sessionKey: string, expectedMessageId?: MessageId): Promise<boolean> {
+    const card = this.controlCards.get(sessionKey);
+    if (!card || (expectedMessageId !== undefined && String(card.messageId) !== String(expectedMessageId))) return false;
+    this.controlCards.delete(sessionKey);
+    this.deps.store.deletePendingPrompt(card.scopeKey, card.messageId);
+    const state = this.states.get(sessionKey);
+    if (state?.messageId !== undefined && String(state.messageId) === String(card.messageId)) {
+      state.controlsSuppressed = true;
+      state.presentationFrozen = true;
+      state.lastControls = undefined;
+    }
+    if (!this.deps.canEdit) return true;
+    try {
+      await this.deps.editRendered(card.scopeKey, card.rendered, { messageId: card.messageId, replyMarkup: { inline_keyboard: [] } });
+    } catch (error) {
+      this.deps.logger.warn("router.activity_control_retire_failed", {
+        session_key: sessionKey,
+        message_id: card.messageId,
+        error: asError(error),
+      });
+    }
+    return true;
+  }
+
+  releaseControlCard(sessionKey: string, messageId: MessageId): boolean {
+    const card = this.controlCards.get(sessionKey);
+    if (!card || String(card.messageId) !== String(messageId)) return false;
+    this.controlCards.delete(sessionKey);
+    this.deps.store.deletePendingPrompt(card.scopeKey, card.messageId);
+    const state = this.states.get(sessionKey);
+    if (state?.messageId !== undefined && String(state.messageId) === String(messageId)) {
+      state.controlsSuppressed = true;
+      state.presentationFrozen = true;
+      state.lastControls = undefined;
+    }
+    return true;
+  }
+
+  async resumeActivityControls(sessionKey: string, messageId?: MessageId): Promise<boolean> {
+    const state = this.states.get(sessionKey);
+    if (!state || state.messageId === undefined || (messageId !== undefined && String(state.messageId) !== String(messageId))) return false;
+    if (this.controlCards.has(sessionKey)) return false;
+    const context = this.deps.getSessionContext(sessionKey);
+    if (context.activeTurnId !== state.turnId) return false;
+    if (state.phase !== "working" && state.phase !== "waitingForInput" && state.phase !== "waitingForApproval") return false;
+    state.controlsSuppressed = false;
+    state.presentationFrozen = false;
+    state.lastControls = undefined;
+    this.markDirty(state);
+    await this.schedule(state, true);
+    return true;
   }
 
   async handle(event: AgentActivityEvent): Promise<void> {
@@ -221,7 +319,7 @@ export class ActivityStreamer {
         return undefined;
       }
       const now = Date.now();
-      await this.retireControlCard(event.sessionKey);
+      const replyTarget = this.claimReplyTarget(event.sessionKey, turnId, context);
       state = {
         sessionKey: event.sessionKey,
         scopeKey: parsed.scopeKey,
@@ -237,17 +335,41 @@ export class ActivityStreamer {
         lastFlushAt: now,
         revision: 0,
         mode: context.collaborationMode,
+        goalTurn: replyTarget.goalTurn,
         goal: context.goal,
         items: [],
         itemTotal: 0,
         filePaths: new Set(),
         fileCount: 0,
         phase: "working",
-        replyToMessageId: this.deps.getReplyToMessageId(event.sessionKey),
+        controlsSuppressed: false,
+        presentationFrozen: false,
+        replyToMessageId: replyTarget.messageId,
       };
       this.states.set(event.sessionKey, state);
     }
     return state;
+  }
+
+  private claimReplyTarget(sessionKey: string, turnId: string, context: ActivitySessionContext): { messageId?: MessageId; goalTurn: boolean } {
+    const userReply = this.pendingUserReplies.get(sessionKey);
+    if (userReply !== undefined) {
+      this.pendingUserReplies.delete(sessionKey);
+      return { messageId: userReply, goalTurn: false };
+    }
+
+    const goalTarget = this.goalReplyTargets.get(sessionKey);
+    const goalTurn = Boolean(context.goal) && goalTarget?.excludedTurnId !== turnId;
+    if (goalTurn) {
+      if (goalTarget && !goalTarget.consumed) {
+        goalTarget.consumed = true;
+        this.deps.onReplyTargetClaimed?.(sessionKey, goalTarget.messageId);
+        return { messageId: goalTarget.messageId, goalTurn: true };
+      }
+      return { goalTurn: true };
+    }
+    const fallback = this.deps.getReplyToMessageId(sessionKey);
+    return fallback === undefined ? { goalTurn: false } : { messageId: fallback, goalTurn: false };
   }
 
   private apply(state: ActivityState, activity: AgentActivity, itemId?: string): void {
@@ -316,6 +438,7 @@ export class ActivityStreamer {
     if (!this.isCurrent(state)) return;
     if (state.timer) clearTimeout(state.timer);
     state.timer = undefined;
+    if (state.presentationFrozen) return;
     if (immediate) {
       await this.flush(state, false);
       return;
@@ -338,6 +461,15 @@ export class ActivityStreamer {
     if (!this.isCurrent(state)) return;
     if (state.timer) clearTimeout(state.timer);
     state.timer = undefined;
+    if (state.presentationFrozen) {
+      state.messageId = undefined;
+      state.sentOnce = false;
+      state.lastRendered = undefined;
+      state.lastControls = undefined;
+      state.controlsSuppressed = false;
+      state.presentationFrozen = false;
+      state.replyToMessageId = undefined;
+    }
     await this.flush(state, true);
     if (!this.isCurrent(state)) return;
     if (state.dirtySince !== undefined) await this.flush(state, true);
@@ -398,7 +530,7 @@ export class ActivityStreamer {
         state.lastRendered = rendered.text;
         state.lastControls = controlsKey;
         state.lastFlushAt = Date.now();
-        this.bindControls(state, rendered, actions);
+        await this.bindControls(state, rendered, actions);
         this.markFlushed(state, renderedRevision);
         return;
       } catch (error) {
@@ -430,17 +562,18 @@ export class ActivityStreamer {
     state.lastRendered = rendered.text;
     state.lastControls = controlsKey;
     state.lastFlushAt = Date.now();
-    this.bindControls(state, rendered, actions);
+    await this.bindControls(state, rendered, actions);
     this.markFlushed(state, renderedRevision);
   }
 
   private controlsFor(state: ActivityState, context: ActivitySessionContext): ActivityControlAction[] {
+    if (state.controlsSuppressed) return [];
     const activePhase = state.phase === "working" || state.phase === "waitingForInput" || state.phase === "waitingForApproval";
     const cancellableTurn = activePhase && context.activeTurnId === state.turnId;
     return activityControlActions(state.goal, cancellableTurn);
   }
 
-  private bindControls(state: ActivityState, rendered: RenderedTelegramText, actions: ActivityControlAction[]): void {
+  private async bindControls(state: ActivityState, rendered: RenderedTelegramText, actions: ActivityControlAction[]): Promise<void> {
     if (state.messageId === undefined) return;
     if (!actions.length) {
       this.deps.store.deletePendingPrompt(state.scopeKey, state.messageId);
@@ -448,6 +581,8 @@ export class ActivityStreamer {
       if (current && String(current.messageId) === String(state.messageId)) this.controlCards.delete(state.sessionKey);
       return;
     }
+    await this.activateControlCard(state.sessionKey, state.scopeKey, state.messageId, rendered);
+    if (!this.isCurrent(state) || !this.isCurrentControlCard(state.sessionKey, state.messageId)) return;
     const payload: ActivityControlPayload = {
       command: "activity",
       token: state.controlToken,
@@ -472,24 +607,6 @@ export class ActivityStreamer {
       sessionKey: state.sessionKey,
       payloadJson: JSON.stringify(payload),
     });
-    this.controlCards.set(state.sessionKey, { scopeKey: state.scopeKey, messageId: state.messageId, rendered });
-  }
-
-  private async retireControlCard(sessionKey: string): Promise<void> {
-    const card = this.controlCards.get(sessionKey);
-    if (!card) return;
-    this.controlCards.delete(sessionKey);
-    this.deps.store.deletePendingPrompt(card.scopeKey, card.messageId);
-    if (!this.deps.canEdit) return;
-    try {
-      await this.deps.editRendered(card.scopeKey, card.rendered, { messageId: card.messageId, replyMarkup: { inline_keyboard: [] } });
-    } catch (error) {
-      this.deps.logger.warn("router.activity_control_retire_failed", {
-        session_key: sessionKey,
-        message_id: card.messageId,
-        error: asError(error),
-      });
-    }
   }
 
   private markFlushed(state: ActivityState, renderedRevision: number): void {
@@ -621,7 +738,7 @@ function header(state: ActivityState): string {
 }
 
 function contextLine(state: ActivityState): string {
-  const mode = modeLabel(state.mode, state.goal);
+  const mode = modeLabel(state.mode, state.goalTurn);
   const duration = formatDuration(state.durationMs ?? Date.now() - state.startedAt);
   const suffix = ` · Mode ${mode} · ${duration}`;
   const labelBudget = Math.max(4, ACTIVITY_ROW_COLUMNS - displayWidth("Chat ") - displayWidth(suffix));
@@ -635,9 +752,9 @@ function threadLabel(state: ActivityState): string {
   return "new";
 }
 
-function modeLabel(mode: AgentCollaborationMode, goal: AgentThreadGoal | null | undefined): string {
+function modeLabel(mode: AgentCollaborationMode, goalTurn: boolean): string {
   if (mode === "plan") return "Plan";
-  return goal ? "Goal" : "Default";
+  return goalTurn ? "Goal" : "Default";
 }
 
 function goalLine(goal: AgentThreadGoal | null | undefined): string {

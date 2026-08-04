@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { noopLogger } from "../../src/domain/logger.ts";
+import { renderTelegramText } from "../../src/presentation/telegram/text.ts";
 import { ActivityStreamer, type ActivitySessionContext } from "../../src/relay/activity-streamer.ts";
 import { sleep } from "../support/fakes.ts";
 
@@ -130,6 +131,40 @@ describe("activity streamer lifecycle", () => {
 
     expect(sent[0]).toContain("Old");
     expect(edited.at(-1)).toContain("New");
+  });
+
+  test("retiring a Goal-converted activity card preserves its synchronized body", async () => {
+    let context: ActivitySessionContext = {
+      threadId: "thread-a",
+      collaborationMode: "default",
+      goal: { threadId: "thread-a", objective: "Old objective", status: "complete", tokenBudget: null, tokensUsed: 1, timeUsedSeconds: 2, createdAt: 1, updatedAt: 1 },
+      activeTurnId: "turn-a",
+    };
+    const edits: Array<{ text: string; messageId: string | number; buttons: unknown[] }> = [];
+    let nextMessageId = 1;
+    const streamer = new ActivityStreamer({
+      store: activityStore(),
+      logger: noopLogger,
+      canEdit: true,
+      getReplyToMessageId: () => undefined,
+      getSessionContext: () => context,
+      sendRendered: async () => ({ messageId: nextMessageId++ }),
+      editRendered: async (_conversationId, rendered, options) => {
+        edits.push({ text: rendered.text, messageId: options.messageId, buttons: options.replyMarkup?.inline_keyboard ?? [] });
+      },
+      timing: { quietMs: 1, minEditMs: 0, maxMs: 10 },
+    });
+
+    await streamer.handle({ type: "activity", sessionKey: "codex:1:demo", threadId: "thread-a", turnId: "turn-a", activity: { kind: "plan", steps: [{ step: "Old work", status: "inProgress" }] } });
+    await streamer.finalize("codex:1:demo", "turn-a", "completed");
+    await streamer.activateControlCard("codex:1:demo", "1", 1, renderTelegramText(["Goal current"]));
+
+    context = { ...context, activeTurnId: "turn-b" };
+    await streamer.handle({ type: "activity", sessionKey: "codex:1:demo", threadId: "thread-a", turnId: "turn-b", activity: { kind: "plan", steps: [{ step: "New work", status: "inProgress" }] } });
+
+    const retired = edits.filter((edit) => String(edit.messageId) === "1").at(-1)!;
+    expect(retired.text).toBe("Goal current");
+    expect(retired.buttons).toEqual([]);
   });
 });
 

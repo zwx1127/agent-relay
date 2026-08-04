@@ -7,7 +7,7 @@ import { TelegramAdapter } from "../../src/providers/im/telegram/adapter.ts";
 import { RelayController } from "../../src/relay/controller.ts";
 import { SQLiteStore } from "../../src/storage/sqlite-store.ts";
 import { FakeAgent } from "../support/fakes.ts";
-import { relayTestConfig, textMessage } from "../support/relay-fixture.ts";
+import { callbackMessage, relayTestConfig, textMessage } from "../support/relay-fixture.ts";
 
 interface TelegramRequest {
   method: string;
@@ -65,7 +65,74 @@ describe("relay controller Telegram reactions", () => {
     expect(logLines.join("\n")).toContain("router.task_reaction_failed");
     expect(logLines.join("\n")).toContain("did not confirm success");
   });
+
+  test("keeps only the latest Telegram Activity or Goal card interactive", async () => {
+    const { router, agent, requests } = productionFixture(true);
+    await router.handle({ ...textMessage("restart service"), id: "10", messageId: "10" });
+    const key = "codex:1:demo";
+    const status = agent.getStatus(key)!;
+    agent.goal = { threadId: status.threadId!, objective: "Old objective", status: "complete", tokenBudget: null, tokensUsed: 1, timeUsedSeconds: 2, createdAt: 1, updatedAt: 1 };
+    status.threadGoal = agent.goal;
+    await router.handleAgentOutput({
+      type: "activity",
+      sessionKey: key,
+      threadId: status.threadId,
+      turnId: "turn-1",
+      activity: { kind: "plan", steps: [{ step: "Restart service", status: "inProgress" }] },
+    });
+    status.activeTurnId = undefined;
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: key, turnId: "turn-1" });
+
+    const activitySend = requests.find((request) => request.method === "sendMessage" && String(request.body.text).includes("Restart service"))!;
+    const sourceMessageId = 500;
+    const activityEdit = requests.filter((request) => request.method === "editMessageText" && request.body.message_id === sourceMessageId).at(-1)!;
+    const editData = callbackData(activityEdit.body, "Edit");
+    await router.handle(callbackMessage(editData, 7, "cb-production-edit", sourceMessageId));
+    const editPrompt = requests.filter((request) => request.method === "sendMessage" && hasForceReply(request.body)).at(-1)!;
+    const retiredSourceIndex = requests.findLastIndex((request) => request.method === "editMessageText" && request.body.message_id === sourceMessageId);
+    const retiredSource = requests[retiredSourceIndex]!;
+    expect(activitySend.body.reply_parameters).toEqual({ message_id: 10, allow_sending_without_reply: true });
+    expect(editPrompt.body.reply_markup).toMatchObject({ force_reply: true });
+    expect(String(retiredSource.body.text)).toBe(String(activityEdit.body.text));
+    expect(retiredSource.body.reply_markup).toEqual({ inline_keyboard: [] });
+
+    await router.handle(textMessage("Replacement objective", 7, 501));
+    expect(requests.some((request) => request.method === "deleteMessage" && request.body.message_id === 501)).toBe(true);
+    expect(requests.slice(retiredSourceIndex + 1).filter((request) => request.method === "editMessageText" && request.body.message_id === sourceMessageId)).toEqual([]);
+
+    status.activeTurnId = "turn-2";
+    await router.handleAgentOutput({
+      type: "activity",
+      sessionKey: key,
+      threadId: status.threadId,
+      turnId: "turn-2",
+      activity: { kind: "plan", steps: [{ step: "New work", status: "inProgress" }] },
+    });
+    const newest = requests.filter((request) => request.method === "sendMessage" && String(request.body.text).includes("New work")).at(-1)!;
+    expect(String(newest.body.text)).toContain("Goal Active");
+    const newestMessageId = 502;
+    const clearData = callbackData(newest.body, "Clear");
+    await router.handle(callbackMessage(clearData, 7, "cb-production-clear", newestMessageId));
+    const cleared = requests.filter((request) => request.method === "sendMessage" && String(request.body.text).includes("Goal cleared.")).at(-1)!;
+    expect(cleared.body.reply_markup).toMatchObject({ inline_keyboard: [[{ text: "Interrupt" }]] });
+    const retiredNewest = requests.filter((request) => request.method === "editMessageText" && request.body.message_id === newestMessageId).at(-1)!;
+    expect(String(retiredNewest.body.text)).toBe(String(newest.body.text));
+    expect(retiredNewest.body.reply_markup).toEqual({ inline_keyboard: [] });
+    const laterSourceEdits = requests.slice(retiredSourceIndex + 1).filter((request) => request.method === "editMessageText" && request.body.message_id === sourceMessageId);
+    expect(laterSourceEdits).toEqual([]);
+  });
 });
+
+function callbackData(body: Record<string, unknown>, label: string): string {
+  const markup = body.reply_markup as { inline_keyboard?: Array<Array<{ text?: string; callback_data?: string }>> } | undefined;
+  const button = markup?.inline_keyboard?.flat().find((candidate) => candidate.text === label);
+  if (!button?.callback_data) throw new Error(`Missing ${label} callback data.`);
+  return button.callback_data;
+}
+
+function hasForceReply(body: Record<string, unknown>): boolean {
+  return Boolean((body.reply_markup as { force_reply?: boolean } | undefined)?.force_reply);
+}
 
 function productionFixture(reactionResult: boolean): {
   router: RelayController;
@@ -87,11 +154,17 @@ function productionFixture(reactionResult: boolean): {
   const logLines: string[] = [];
   const logger = new TextLogger("info", (line) => logLines.push(line), () => new Date("2026-08-03T04:00:00.000Z"));
   const agent = new FakeAgent();
+  let nextMessageId = 500;
   const adapter = new TelegramAdapter("token", async (url, init) => {
     const method = String(url).split("/").at(-1) ?? "";
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     requests.push({ method, body, activeSessionCount: agent.statuses.size });
-    return Response.json({ ok: true, result: method === "setMessageReaction" ? reactionResult : true });
+    const result = method === "setMessageReaction"
+      ? reactionResult
+      : method === "sendMessage"
+        ? { message_id: nextMessageId++ }
+        : true;
+    return Response.json({ ok: true, result });
   }, logger, { requestRetryMaxAttempts: 1 });
   const router = new RelayController({
     config: relayTestConfig(root),
@@ -99,6 +172,7 @@ function productionFixture(reactionResult: boolean): {
     adapter,
     agent,
     logger,
+    streamTiming: { quietMs: 1 },
   });
   return { router, store, agent, requests, logLines };
 }

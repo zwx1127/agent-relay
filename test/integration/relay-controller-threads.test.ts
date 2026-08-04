@@ -240,11 +240,237 @@ describe("relay controller thread commands", () => {
     await router.handle(textMessage("replacement goal", 7, Number(editPrompt.messageId)));
 
     expect(agent.goalSets).toEqual([
-      { key: "codex:1:demo", goal: { objective: "replacement goal" } },
+      { key: "codex:1:demo", goal: { objective: "replacement goal", status: "active", tokenBudget: null } },
     ]);
-    expect(adapter.edited.at(-1)?.text).toContain("Objective: replacement goal");
+    const retiredGoalCard = adapter.edited.filter((message) => String(message.options.messageId) === String(goalCard.messageId)).at(-1)!;
+    expect(retiredGoalCard.text).toBe(goalCard.text);
+    expect(retiredGoalCard.options.replyMarkup?.inline_keyboard).toEqual([]);
+    expect(adapter.deleted).toContainEqual({ conversationId: "1", messageId: String(editPrompt.messageId!) });
     expect(agent.sent).toEqual([]);
     expect(store.getPendingPrompt("1", editPrompt.messageId!)).toBeUndefined();
+  });
+
+  test("/goal during an active turn keeps that turn in Default mode and assigns the next Goal turn", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    const taskMessage = { ...textMessage("current task"), id: "10", messageId: "10" };
+    const goalMessage = { ...textMessage("/goal ship after this"), id: "20", messageId: "20" };
+
+    await router.handle(taskMessage);
+    const status = agent.getStatus("codex:1:demo")!;
+    expect(status.activeTurnId).toBe("turn-1");
+    await router.handle(goalMessage);
+    expect(status.activeTurnId).toBe("turn-1");
+    expect(agent.interrupted).toEqual([]);
+
+    await router.handleAgentOutput({
+      type: "activity",
+      sessionKey: "codex:1:demo",
+      threadId: status.threadId,
+      turnId: "turn-1",
+      activity: { kind: "plan", steps: [{ step: "Finish current task", status: "inProgress" }] },
+    });
+    const currentCard = adapter.sent.find((message) => message.text.includes("Finish current task"))!;
+    expect(currentCard.text).toContain("Mode Default");
+    expect(currentCard.text).toContain("Goal Active");
+    expect(currentCard.options?.replyToMessageId).toBe("10");
+
+    status.activeTurnId = undefined;
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    status.activeTurnId = "goal-turn";
+    await router.handleAgentOutput({
+      type: "activity",
+      sessionKey: "codex:1:demo",
+      threadId: status.threadId,
+      turnId: "goal-turn",
+      activity: { kind: "plan", steps: [{ step: "Continue goal", status: "inProgress" }] },
+    });
+    const goalCard = adapter.sent.find((message) => message.text.includes("Continue goal"))!;
+    expect(goalCard.text).toContain("Mode Goal");
+    expect(goalCard.options?.replyToMessageId).toBe("20");
+  });
+
+  test("Goal Edit follows the Codex TUI status and token budget rules", async () => {
+    const scenarios = [
+      { source: "active", expected: "active" },
+      { source: "paused", expected: "paused" },
+      { source: "blocked", expected: "blocked" },
+      { source: "usageLimited", expected: "usageLimited" },
+      { source: "budgetLimited", expected: "active" },
+      { source: "complete", expected: "active" },
+    ] as const;
+
+    for (const [index, scenario] of scenarios.entries()) {
+      const { router, store, adapter, agent, root } = fixture();
+      const path = join(root, `demo-${index}`);
+      mkdirSync(path);
+      store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+      store.bindConversation(1, "demo");
+      agent.goal = {
+        threadId: "thread-1",
+        objective: "Existing goal",
+        status: scenario.source,
+        tokenBudget: 50_000,
+        tokensUsed: 10,
+        timeUsedSeconds: 20,
+        createdAt: index + 1,
+        updatedAt: index + 1,
+      };
+
+      await router.handle(textMessage("/goal"));
+      const card = adapter.sent.at(-1)!;
+      const edit = card.options!.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Edit")!;
+      await router.handle(callbackMessage(edit.callback_data, 7, `cb-edit-${index}`, card.messageId));
+      const prompt = adapter.sent.at(-1)!;
+      await router.handle(textMessage(`replacement ${index}`, 7, Number(prompt.messageId)));
+
+      expect(agent.goalSets.at(-1)).toEqual({
+        key: "codex:1:demo",
+        goal: { objective: `replacement ${index}`, status: scenario.expected, tokenBudget: 50_000 },
+      });
+      if (scenario.expected === "active") {
+        expect(adapter.deleted).toContainEqual({ conversationId: "1", messageId: String(prompt.messageId!) });
+        expect(adapter.edited.some((message) => String(message.options.messageId) === String(prompt.messageId) && message.text.includes(`replacement ${index}`))).toBe(false);
+      } else {
+        expect(adapter.deleted.some((message) => String(message.messageId) === String(prompt.messageId))).toBe(false);
+        expect(adapter.edited.find((message) => String(message.options.messageId) === String(prompt.messageId))?.text).toContain(`replacement ${index}`);
+      }
+    }
+  });
+
+  test("Goal Edit expires when the source Goal was replaced", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.goal = { threadId: "thread-1", objective: "Old", status: "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1 };
+
+    await router.handle(textMessage("/goal"));
+    const card = adapter.sent.at(-1)!;
+    const edit = card.options!.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Edit")!;
+    await router.handle(callbackMessage(edit.callback_data, 7, "cb-edit-old", card.messageId));
+    const prompt = adapter.sent.at(-1)!;
+    agent.goal = { ...agent.goal, objective: "New identity", createdAt: 2, updatedAt: 2 };
+    await router.handle(textMessage("must not apply", 7, Number(prompt.messageId)));
+
+    expect(agent.goalSets).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Goal edit expired.");
+  });
+
+  test("a completed Activity card stays immutable while Goal Edit and Clear move to newer cards", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle({ ...textMessage("restart service"), id: "10", messageId: "10" });
+    const key = "codex:1:demo";
+    const status = agent.getStatus(key)!;
+    agent.goal = { threadId: status.threadId!, objective: "Old objective", status: "complete", tokenBudget: null, tokensUsed: 1, timeUsedSeconds: 2, createdAt: 1, updatedAt: 1 };
+    status.threadGoal = agent.goal;
+    await router.handleAgentOutput({
+      type: "activity",
+      sessionKey: key,
+      threadId: status.threadId,
+      turnId: "turn-1",
+      itemId: "restart",
+      activity: { kind: "item", category: "command", label: "Restart service", status: "completed" },
+    });
+    await waitForStreamFlush();
+    status.activeTurnId = undefined;
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: key, turnId: "turn-1", status: "completed" });
+    const source = adapter.sent.find((message) => message.text.includes("Restart service"))!;
+    const terminal = adapter.edited.filter((message) => String(message.options.messageId) === String(source.messageId)).at(-1)!;
+    const edit = terminal.options.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Edit")!;
+
+    await router.handle(callbackMessage(edit.callback_data, 7, "cb-terminal-edit", source.messageId));
+    const prompt = adapter.sent.at(-1)!;
+    const retiredSource = adapter.edited.filter((message) => String(message.options.messageId) === String(source.messageId)).at(-1)!;
+    expect(retiredSource.text).toBe(terminal.text);
+    expect(retiredSource.options.replyMarkup?.inline_keyboard).toEqual([]);
+    await router.handle(textMessage("Replacement objective", 7, Number(prompt.messageId)));
+    expect(adapter.deleted).toContainEqual({ conversationId: "1", messageId: String(prompt.messageId!) });
+    expect(adapter.edited.filter((message) => String(message.options.messageId) === String(source.messageId)).at(-1)?.text).toBe(terminal.text);
+
+    status.activeTurnId = "turn-2";
+    await router.handleAgentOutput({
+      type: "activity",
+      sessionKey: key,
+      threadId: status.threadId,
+      turnId: "turn-2",
+      activity: { kind: "plan", steps: [{ step: "New work", status: "inProgress" }] },
+    });
+    const newest = adapter.sent.find((message) => message.text.includes("New work"))!;
+    const clear = newest.options!.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Clear")!;
+    await router.handle(callbackMessage(clear.callback_data, 7, "cb-new-clear", newest.messageId));
+
+    const cleared = adapter.sent.at(-1)!;
+    expect(cleared.text).toBe("Goal cleared.");
+    expect(cleared.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Interrupt"]);
+    const retiredNewest = adapter.edited.filter((message) => String(message.options.messageId) === String(newest.messageId)).at(-1)!;
+    expect(retiredNewest.text).toBe(newest.text);
+    expect(retiredNewest.options.replyMarkup?.inline_keyboard).toEqual([]);
+    const sourceEdits = adapter.edited.filter((message) => String(message.options.messageId) === String(source.messageId));
+    expect(sourceEdits.at(-1)?.text).toBe(terminal.text);
+    expect(sourceEdits.every((message) => message.text.includes("Restart service"))).toBe(true);
+  });
+
+  test("a delayed Goal Edit reply leaves controls only on the newest activity card", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle({ ...textMessage("first task"), id: "10", messageId: "10" });
+    const key = "codex:1:demo";
+    const status = agent.getStatus(key)!;
+    agent.goal = { threadId: status.threadId!, objective: "Old objective", status: "complete", tokenBudget: null, tokensUsed: 1, timeUsedSeconds: 2, createdAt: 1, updatedAt: 1 };
+    status.threadGoal = agent.goal;
+    await router.handleAgentOutput({
+      type: "activity",
+      sessionKey: key,
+      threadId: status.threadId,
+      turnId: "turn-1",
+      activity: { kind: "plan", steps: [{ step: "First work", status: "inProgress" }] },
+    });
+    status.activeTurnId = undefined;
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: key, turnId: "turn-1" });
+    const source = adapter.sent.find((message) => message.text.includes("First work"))!;
+    const sourceTerminal = adapter.edited.filter((message) => String(message.options.messageId) === String(source.messageId)).at(-1)!;
+    const edit = sourceTerminal.options.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Edit")!;
+    await router.handle(callbackMessage(edit.callback_data, 7, "cb-delayed-edit", source.messageId));
+    const prompt = adapter.sent.at(-1)!;
+
+    await router.handle({ ...textMessage("second task"), id: "30", messageId: "30" });
+    await router.handleAgentOutput({
+      type: "activity",
+      sessionKey: key,
+      threadId: status.threadId,
+      turnId: "turn-2",
+      activity: { kind: "plan", steps: [{ step: "Second work", status: "inProgress" }] },
+    });
+    const newest = adapter.sent.find((message) => message.text.includes("Second work"))!;
+    expect(newest.text).toContain("Mode Default");
+    expect(newest.text).toContain("Goal Complete");
+    expect(newest.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Interrupt", "Edit", "Clear"]);
+    const sourceEditCount = adapter.edited.filter((message) => String(message.options.messageId) === String(source.messageId)).length;
+    await router.handle(callbackMessage(edit.callback_data, 7, "cb-stale-terminal-edit", source.messageId));
+    expect(adapter.answered.at(-1)?.text).toBe("Control expired.");
+    expect(adapter.edited.filter((message) => String(message.options.messageId) === String(source.messageId))).toHaveLength(sourceEditCount);
+    await router.handle(textMessage("Replacement objective", 7, Number(prompt.messageId)));
+
+    const sourceLatest = adapter.edited.filter((message) => String(message.options.messageId) === String(source.messageId)).at(-1)!;
+    expect(sourceLatest.text).toBe(sourceTerminal.text);
+    expect(sourceLatest.options.replyMarkup?.inline_keyboard).toEqual([]);
+    expect(store.getPendingPrompt("1", source.messageId!)).toBeUndefined();
+    const newestLatest = adapter.edited.filter((message) => String(message.options.messageId) === String(newest.messageId)).at(-1)!;
+    expect(newestLatest.text).toContain("Goal Active");
+    expect(newestLatest.text).toContain("Replacement objective");
+    expect(newestLatest.options.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Interrupt", "Edit", "Clear"]);
   });
 
   test("/goal validates the 4,000 character objective boundary", async () => {

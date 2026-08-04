@@ -1,7 +1,9 @@
 import type { ConversationId, MessageId } from "../../domain/ids.ts";
+import type { Logger } from "../../domain/logger.ts";
+import { parseChatScopeKey } from "../../domain/scope.ts";
 import { sessionKey } from "../../domain/session.ts";
-import type { AgentDriver, AgentSessionStatus, AgentThreadGoal } from "../../ports/agent.ts";
-import type { EditMessageTextOptions, SendMessageOptions } from "../../ports/im.ts";
+import type { AgentDriver, AgentSessionStatus, AgentThreadGoal, AgentThreadGoalStatus } from "../../ports/agent.ts";
+import type { EditMessageTextOptions, ImAdapter, SendMessageOptions } from "../../ports/im.ts";
 import type { RenderedTelegramText } from "../../presentation/telegram/text.ts";
 import type { RelayStore } from "../../storage/store.ts";
 import { activityControlActions, type ActivityControlAction, type ActivityControlPayload } from "../activity-controls.ts";
@@ -16,12 +18,19 @@ import type { CallbackMessage } from "./types.ts";
 export interface GoalCommandDeps {
   store: RelayStore;
   agent: AgentDriver;
+  adapter: Pick<ImAdapter, "deleteMessage">;
+  logger: Logger;
   commandSession(conversationId: ConversationId): Promise<{ workspace: WorkspaceRecord; status: AgentSessionStatus; key: string }>;
   requireCurrentWorkspace(conversationId: ConversationId): WorkspaceRecord;
-  setReplyToMessageId(sessionKey: string, messageId: MessageId): void;
+  registerGoalReplyTarget(sessionKey: string, messageId: MessageId, activeTurnId?: string): void;
+  clearGoalReplyTarget(sessionKey: string): void;
+  isCurrentControlCard(sessionKey: string, messageId: MessageId): boolean;
+  activateControlCard(sessionKey: string, scopeKey: string, messageId: MessageId, rendered: RenderedTelegramText): Promise<void>;
+  retireControlCard(sessionKey: string, messageId?: MessageId): Promise<boolean>;
+  releaseControlCard(sessionKey: string, messageId: MessageId): boolean;
+  resumeActivityControls(sessionKey: string, messageId?: MessageId): Promise<boolean>;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
   editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: Omit<EditMessageTextOptions, "entities" | "parseMode">): Promise<void>;
-  renderStrictCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: ReturnType<typeof activityControlKeyboard>): Promise<unknown>;
   refreshActivityContext(sessionKey: string): Promise<void>;
 }
 
@@ -35,11 +44,7 @@ export class GoalCommandService {
 
     if (!normalized) {
       const goal = await this.deps.agent.getThreadGoal!(key);
-      const controls = this.keyboardFor(goal, Boolean(status.activeTurnId));
-      const result = await this.deps.sendRendered(conversationId, formatGoalMessage(goal), {
-        replyMarkup: controls.keyboard,
-      });
-      if (result.messageId !== undefined) this.bindGoalControls(conversationId, result.messageId, key, status, goal, controls.token, controls.actions);
+      await this.sendGoalCard(conversationId, key, status, goal, formatGoalMessage(goal));
       return;
     }
 
@@ -54,8 +59,13 @@ export class GoalCommandService {
       await this.deps.sendRendered(conversationId, messageWithTitle("A goal is already set.", "Open /goal and use Edit or Clear on the Goal card."));
       return;
     }
-    if (userMessageId !== undefined) this.deps.setReplyToMessageId(key, userMessageId);
-    await this.deps.agent.setThreadGoal!(key, { objective: normalized, status: "active", tokenBudget: null });
+    if (userMessageId !== undefined) this.deps.registerGoalReplyTarget(key, userMessageId, status.activeTurnId);
+    try {
+      await this.deps.agent.setThreadGoal!(key, { objective: normalized, status: "active", tokenBudget: null });
+    } catch (error) {
+      if (userMessageId !== undefined) this.deps.clearGoalReplyTarget(key);
+      throw error;
+    }
     await this.deps.refreshActivityContext(key);
   }
 
@@ -63,6 +73,7 @@ export class GoalCommandService {
     message: CallbackMessage,
     pending: PendingPrompt,
     action: Exclude<ActivityControlAction, "interrupt">,
+    sourcePhase: unknown,
   ): Promise<string> {
     const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
     const key = sessionKey(message.conversationId, workspace.name);
@@ -78,22 +89,29 @@ export class GoalCommandService {
 
     if (action === "clear") {
       const cleared = await this.deps.agent.clearThreadGoal!(key);
-      const controls = this.keyboardFor(null, Boolean(status.activeTurnId));
-      await this.deps.renderStrictCallbackPage(message, formatGoalClearedMessage(cleared), controls.keyboard);
-      if (message.messageId !== undefined) {
-        this.bindGoalControls(message.conversationId, message.messageId, key, status, null, controls.token, controls.actions);
-      }
-      await this.deps.refreshActivityContext(key);
+      this.deps.clearGoalReplyTarget(key);
+      const editSource = sourcePhase === "goal";
+      if (editSource) await this.deps.refreshActivityContext(key);
+      await this.renderGoalMutation(message, key, status, null, formatGoalClearedMessage(cleared), editSource);
+      if (!editSource) await this.deps.refreshActivityContext(key);
       return cleared ? "Goal cleared." : "No goal to clear.";
     }
 
     const goal = await this.deps.agent.setThreadGoal!(key, { status: action === "resume" ? "active" : "paused" });
-    await this.deps.refreshActivityContext(key);
-    await this.renderGoalCallback(message, key, status, goal);
+    const editSource = sourcePhase === "goal";
+    if (editSource) await this.deps.refreshActivityContext(key);
+    await this.renderGoalMutation(message, key, status, goal, formatGoalMessage(goal), editSource);
+    if (!editSource) await this.deps.refreshActivityContext(key);
     return action === "resume" ? "Goal resumed." : "Goal paused.";
   }
 
-  async answerEdit(conversationId: ConversationId, pending: PendingPrompt, data: Record<string, unknown>, text: string): Promise<void> {
+  async answerEdit(
+    conversationId: ConversationId,
+    pending: PendingPrompt,
+    data: Record<string, unknown>,
+    text: string,
+    userMessageId?: MessageId,
+  ): Promise<void> {
     const workspace = this.deps.requireCurrentWorkspace(conversationId);
     const key = sessionKey(conversationId, workspace.name);
     const status = this.deps.agent.getStatus(key);
@@ -104,12 +122,33 @@ export class GoalCommandService {
     const objective = text.trim();
     validateGoalObjective(objective);
     this.requireGoalSupport();
-    const goal = await this.deps.agent.setThreadGoal!(key, { objective });
+    const current = await this.deps.agent.getThreadGoal!(key);
+    if (!current || typeof data.goalCreatedAt !== "number" || current.createdAt !== data.goalCreatedAt) {
+      await this.deps.sendRendered(conversationId, messageWithTitle("Goal edit expired.", "Open /goal and use Edit on the current Goal card."));
+      return;
+    }
+    const goal = await this.deps.agent.setThreadGoal!(key, {
+      objective,
+      status: editedGoalStatus(current.status),
+      tokenBudget: current.tokenBudget,
+    });
     const sourceMessageId = typeof data.sourceMessageId === "string" || typeof data.sourceMessageId === "number"
       ? data.sourceMessageId
       : undefined;
-    if (sourceMessageId !== undefined) await this.editGoalCard(conversationId, sourceMessageId, key, status, goal);
+
     await this.deps.refreshActivityContext(key);
+    if (goal.status === "active") {
+      const replyTarget = userMessageId ?? pending.promptMessageId;
+      this.deps.registerGoalReplyTarget(key, replyTarget, status.activeTurnId);
+      await this.tryDeleteMessage(conversationId, pending.promptMessageId);
+      await this.deps.resumeActivityControls(key, sourceMessageId);
+      return;
+    }
+
+    const rendered = formatGoalMessage(goal);
+    const controls = this.keyboardFor(goal, Boolean(status.activeTurnId));
+    await this.deps.editRendered(conversationId, rendered, { messageId: pending.promptMessageId, replyMarkup: controls.keyboard });
+    await this.bindGoalControls(conversationId, pending.promptMessageId, key, status, goal, controls.token, controls.actions, rendered);
   }
 
   private async promptEdit(
@@ -131,32 +170,51 @@ export class GoalCommandService {
       kind: "relay_command",
       createdAt: Date.now(),
       sessionKey: key,
-      payloadJson: JSON.stringify({ command: "goal_edit", threadId, ...(sourceMessageId !== undefined ? { sourceMessageId } : {}) }),
+      payloadJson: JSON.stringify({
+        command: "goal_edit",
+        threadId,
+        goalCreatedAt: goal.createdAt,
+        ...(sourceMessageId !== undefined ? { sourceMessageId } : {}),
+      }),
       expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
     });
+    if (sourceMessageId !== undefined) await this.deps.retireControlCard(key, sourceMessageId);
   }
 
-  private async renderGoalCallback(message: CallbackMessage, key: string, status: AgentSessionStatus, goal: AgentThreadGoal): Promise<void> {
-    const controls = this.keyboardFor(goal, Boolean(status.activeTurnId));
-    await this.deps.renderStrictCallbackPage(message, formatGoalMessage(goal), controls.keyboard);
-    if (message.messageId !== undefined) {
-      this.bindGoalControls(message.conversationId, message.messageId, key, status, goal, controls.token, controls.actions);
-    }
-  }
-
-  private async editGoalCard(
-    conversationId: ConversationId,
-    messageId: MessageId,
+  private async renderGoalMutation(
+    message: CallbackMessage,
     key: string,
     status: AgentSessionStatus,
-    goal: AgentThreadGoal,
+    goal: AgentThreadGoal | null,
+    rendered: RenderedTelegramText,
+    editSource: boolean,
   ): Promise<void> {
     const controls = this.keyboardFor(goal, Boolean(status.activeTurnId));
-    await this.deps.editRendered(conversationId, formatGoalMessage(goal), { messageId, replyMarkup: controls.keyboard });
-    this.bindGoalControls(conversationId, messageId, key, status, goal, controls.token, controls.actions);
+    if (editSource && message.messageId !== undefined && this.deps.isCurrentControlCard(key, message.messageId)) {
+      await this.deps.editRendered(message.conversationId, rendered, { messageId: message.messageId, replyMarkup: controls.keyboard });
+      await this.bindGoalControls(message.conversationId, message.messageId, key, status, goal, controls.token, controls.actions, rendered);
+      return;
+    }
+    await this.sendGoalCard(message.conversationId, key, status, goal, rendered);
   }
 
-  private bindGoalControls(
+  private async sendGoalCard(
+    conversationId: ConversationId,
+    key: string,
+    status: AgentSessionStatus,
+    goal: AgentThreadGoal | null,
+    rendered: RenderedTelegramText,
+  ): Promise<void> {
+    const controls = this.keyboardFor(goal, Boolean(status.activeTurnId));
+    const result = await this.deps.sendRendered(conversationId, rendered, { replyMarkup: controls.keyboard });
+    if (result.messageId === undefined) {
+      await this.deps.retireControlCard(key);
+      return;
+    }
+    await this.bindGoalControls(conversationId, result.messageId, key, status, goal, controls.token, controls.actions, rendered);
+  }
+
+  private async bindGoalControls(
     conversationId: ConversationId,
     messageId: MessageId,
     key: string,
@@ -164,18 +222,23 @@ export class GoalCommandService {
     goal: AgentThreadGoal | null,
     token: string,
     actions: ActivityControlAction[],
-  ): void {
+    rendered: RenderedTelegramText,
+  ): Promise<void> {
     if (!actions.length) {
       this.deps.store.deletePendingPrompt(conversationId, messageId);
+      if (!this.deps.releaseControlCard(key, messageId)) await this.deps.retireControlCard(key);
       return;
     }
+    await this.deps.activateControlCard(key, String(conversationId), messageId, rendered);
+    if (!this.deps.isCurrentControlCard(key, messageId)) return;
     const payload: ActivityControlPayload = {
       command: "activity",
       token,
       actions,
       sessionKey: key,
       ...(status.threadId ? { threadId: status.threadId } : {}),
-      ...(status.activeTurnId ? { turnId: status.activeTurnId, phase: "working" } : { phase: "goal" }),
+      ...(status.activeTurnId ? { turnId: status.activeTurnId } : {}),
+      phase: "goal",
       ...(goal ? {
         goalCreatedAt: goal.createdAt,
         goalUpdatedAt: goal.updatedAt,
@@ -202,11 +265,30 @@ export class GoalCommandService {
     return { token, actions, keyboard: activityControlKeyboard(token, actions) };
   }
 
+  private async tryDeleteMessage(conversationId: ConversationId, messageId: MessageId): Promise<void> {
+    if (!this.deps.adapter.deleteMessage) return;
+    const scope = parseChatScopeKey(String(conversationId));
+    try {
+      await this.deps.adapter.deleteMessage(scope.conversationId, messageId);
+    } catch (error) {
+      this.deps.logger.warn("router.goal_edit_prompt_delete_failed", {
+        conversation_id: scope.conversationId,
+        scope_key: String(conversationId),
+        message_id: messageId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
+  }
+
   private requireGoalSupport(): void {
     if (!this.deps.agent.getThreadGoal || !this.deps.agent.setThreadGoal || !this.deps.agent.clearThreadGoal) {
       throw new Error("Agent driver does not support thread goals.");
     }
   }
+}
+
+function editedGoalStatus(status: AgentThreadGoalStatus): AgentThreadGoalStatus {
+  return status === "complete" || status === "budgetLimited" ? "active" : status;
 }
 
 function isRemovedGoalControl(value: string): boolean {

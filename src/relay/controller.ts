@@ -87,6 +87,7 @@ export class RelayController {
       logger: this.logger,
       canEdit: deps.adapter.capabilities.editMessage,
       getReplyToMessageId: (sessionKeyValue) => this.lastUserMessageIds.get(sessionKeyValue),
+      onReplyTargetClaimed: (sessionKeyValue, messageId) => this.lastUserMessageIds.set(sessionKeyValue, messageId),
       getSessionContext: (sessionKeyValue) => {
         const status = deps.agent.getStatus(sessionKeyValue);
         const stored = deps.store.getSession(sessionKeyValue);
@@ -111,7 +112,14 @@ export class RelayController {
       renderConsole: (conversationId) => this.renderConsole(conversationId),
       ensureAgentStarted: (conversationId, workspace, threadId) => this.ensureAgentStarted(conversationId, workspace, threadId),
       finalizeSessionOutput: (sessionKeyValue) => this.finalizeSessionOutput(sessionKeyValue),
-      setReplyToMessageId: (sessionKeyValue, messageId) => this.lastUserMessageIds.set(sessionKeyValue, messageId),
+      setReplyToMessageId: (sessionKeyValue, messageId) => {
+        this.lastUserMessageIds.set(sessionKeyValue, messageId);
+        this.activityStreamer.registerUserReplyTarget(
+          sessionKeyValue,
+          messageId,
+          deps.agent.getStatus(sessionKeyValue)?.activeTurnId,
+        );
+      },
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
     });
     this.workspaceFlow = new WorkspaceFlow({
@@ -175,7 +183,13 @@ export class RelayController {
         undefined,
         { appendTranscript: false },
       ),
-      setReplyToMessageId: (sessionKeyValue, messageId) => this.lastUserMessageIds.set(sessionKeyValue, messageId),
+      registerGoalReplyTarget: (sessionKeyValue, messageId, activeTurnId) => this.activityStreamer.registerGoalReplyTarget(sessionKeyValue, messageId, activeTurnId),
+      clearGoalReplyTarget: (sessionKeyValue) => this.activityStreamer.clearGoalReplyTarget(sessionKeyValue),
+      isCurrentControlCard: (sessionKeyValue, messageId) => this.activityStreamer.isCurrentControlCard(sessionKeyValue, messageId),
+      activateControlCard: (sessionKeyValue, scopeKey, messageId, rendered) => this.activityStreamer.activateControlCard(sessionKeyValue, scopeKey, messageId, rendered),
+      retireControlCard: (sessionKeyValue, messageId) => this.activityStreamer.retireControlCard(sessionKeyValue, messageId),
+      releaseControlCard: (sessionKeyValue, messageId) => this.activityStreamer.releaseControlCard(sessionKeyValue, messageId),
+      resumeActivityControls: (sessionKeyValue, messageId) => this.activityStreamer.resumeActivityControls(sessionKeyValue, messageId),
       interruptActiveTasks: (sessionKeyValue) => this.interruptActiveTasks(sessionKeyValue),
       submitTask: (conversationId, text, userMessageId, preference, input) => this.submitTask(conversationId, text, userMessageId, preference, input),
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
@@ -347,7 +361,7 @@ export class RelayController {
         } else if (pending?.kind === "media_action") {
           await this.mediaRelay.answerMediaActionPrompt(message.conversationId, pending.promptMessageId, text);
         } else if (pending?.kind === "relay_command") {
-          await this.threadCommands.answerRelayCommandPrompt(message.conversationId, pending.promptMessageId, text);
+          await this.threadCommands.answerRelayCommandPrompt(message.conversationId, pending.promptMessageId, text, message.messageId);
         } else {
           // While Codex is blocked on an explicit question or approval, new
           // direct prompts are held back so they do not bypass the requested gate.
@@ -730,6 +744,7 @@ export class RelayController {
     this.clearCodexPromptsForSession(sessionKeyValue);
     this.deps.store.deletePendingPromptsForSession(sessionKeyValue);
     this.lastUserMessageIds.delete(sessionKeyValue);
+    this.activityStreamer.clearReplyTargets(sessionKeyValue);
     this.threadCommands?.clearSessionState(sessionKeyValue);
   }
 

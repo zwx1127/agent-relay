@@ -21,17 +21,20 @@ export function activityControlActions(
   cancellableTurn: boolean,
 ): ActivityControlAction[] {
   if (!goal) return cancellableTurn ? ["interrupt"] : [];
-  switch (goal.status) {
-    case "active":
-      return cancellableTurn ? ["interrupt", "edit", "clear"] : ["pause", "edit", "clear"];
-    case "paused":
-    case "blocked":
-    case "usageLimited":
-      return ["resume", "edit", "clear"];
-    case "budgetLimited":
-    case "complete":
-      return ["edit", "clear"];
-  }
+  const goalActions: ActivityControlAction[] = (() => {
+    switch (goal.status) {
+      case "active":
+        return cancellableTurn ? ["edit", "clear"] : ["pause", "edit", "clear"];
+      case "paused":
+      case "blocked":
+      case "usageLimited":
+        return ["resume", "edit", "clear"];
+      case "budgetLimited":
+      case "complete":
+        return ["edit", "clear"];
+    }
+  })();
+  return cancellableTurn ? ["interrupt", ...goalActions] : goalActions;
 }
 
 export function isActivityControlAction(value: unknown): value is ActivityControlAction {

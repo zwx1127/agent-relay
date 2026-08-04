@@ -287,12 +287,13 @@ describe("relay controller tasks and media", () => {
     expect(pending.expiresAt).toBeUndefined();
     const interrupt = activity.options!.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Interrupt")!;
     agent.getStatus("codex:1:demo")!.activeTurnId = "turn-2";
+    const editsBeforeCallback = adapter.edited.length;
 
     await router.handle(callbackMessage(interrupt.callback_data, 7, "cb-old-turn", activity.messageId));
 
     expect(agent.interrupted).toEqual([]);
     expect(store.getPendingPrompt("1", activity.messageId!)).toBeUndefined();
-    expect(adapter.edited.at(-1)?.text).toContain("Control expired.");
+    expect(adapter.edited).toHaveLength(editsBeforeCallback);
     expect(adapter.answered.at(-1)?.text).toBe("Control expired.");
   });
 
@@ -845,12 +846,16 @@ describe("relay controller tasks and media", () => {
     await waitForStreamFlush();
     const first = adapter.sent.find((message) => message.text.startsWith("● Codex"))!;
     expect(first.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Interrupt"]);
+    const staleInterrupt = first.options!.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Interrupt")!;
     adapter.failEditMessage = new Error("cannot edit");
     await router.handleAgentOutput({ type: "activity", sessionKey: key, turnId: "turn-1", itemId: "command-1", activity: { kind: "item", category: "command", label: "Run tests", status: "failed", detail: "Exit 1" } });
     const cards = adapter.sent.filter((message) => message.text.startsWith("● Codex"));
     expect(cards).toHaveLength(2);
     expect(cards.at(-1)?.text).toContain("× Run tests · Exit 1");
     expect(cards.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Interrupt"]);
+
+    await router.handle(callbackMessage(staleInterrupt.callback_data, 7, "cb-visible-but-retired", first.messageId));
+    expect(adapter.answered.at(-1)?.text).toBe("Control expired.");
 
     await router.handleAgentOutput({ type: "thread_lifecycle", sessionKey: key, threadId: "thread-1", action: "closed" });
     expect(adapter.sent.filter((message) => message.text.startsWith("● Codex"))).toHaveLength(2);
@@ -882,7 +887,7 @@ describe("relay controller tasks and media", () => {
     expect(card.options?.replyMarkup?.inline_keyboard.flat().map((button) => button.text)).toEqual(["Interrupt"]);
   });
 
-  test("activity derives Goal mode, exposes waiting phases, and keeps CJK and emoji content bounded", async () => {
+  test("activity keeps an explicit user turn in Default mode while exposing Goal state and bounded CJK content", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -918,7 +923,8 @@ describe("relay controller tasks and media", () => {
 
     let activityCard = adapter.edited.filter((message) => message.text.includes("Codex ·")).at(-1)!;
     expect(activityCard.text).toContain("Codex · Waiting for input");
-    expect(activityCard.text).toContain("Mode Goal");
+    expect(activityCard.text).toContain("Mode Default");
+    expect(activityCard.text).toContain("Goal Active");
     expect(activityCard.text).toContain("Reasoning");
     expect(activityCard.text).toContain("Plan 15/31");
     expect(activityCard.text.length).toBeLessThanOrEqual(3000);

@@ -42,7 +42,13 @@ export interface ThreadCommandDeps {
   resetSessionPresentation(sessionKey: string, options?: { deletePages?: boolean }): Promise<void>;
   refreshActivityContext(sessionKey: string): Promise<void>;
   finalizeActivityInterrupt(sessionKey: string): Promise<void>;
-  setReplyToMessageId(sessionKey: string, messageId: MessageId): void;
+  registerGoalReplyTarget(sessionKey: string, messageId: MessageId, activeTurnId?: string): void;
+  clearGoalReplyTarget(sessionKey: string): void;
+  isCurrentControlCard(sessionKey: string, messageId: MessageId): boolean;
+  activateControlCard(sessionKey: string, scopeKey: string, messageId: MessageId, rendered: RenderedTelegramText): Promise<void>;
+  retireControlCard(sessionKey: string, messageId?: MessageId): Promise<boolean>;
+  releaseControlCard(sessionKey: string, messageId: MessageId): boolean;
+  resumeActivityControls(sessionKey: string, messageId?: MessageId): Promise<boolean>;
   interruptActiveTasks(sessionKey: string): Promise<void>;
   submitTask(conversationId: ConversationId, text: string, userMessageId?: MessageId, preference?: TaskSubmitPreference, input?: AgentTaskInput): Promise<void>;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
@@ -84,12 +90,19 @@ export class ThreadCommandService {
     this.goals = new GoalCommandService({
       store: deps.store,
       agent: deps.agent,
+      adapter: deps.adapter,
+      logger: deps.logger,
       commandSession: (conversationId) => this.commandSession(conversationId),
       requireCurrentWorkspace: deps.requireCurrentWorkspace,
-      setReplyToMessageId: deps.setReplyToMessageId,
+      registerGoalReplyTarget: deps.registerGoalReplyTarget,
+      clearGoalReplyTarget: deps.clearGoalReplyTarget,
+      isCurrentControlCard: deps.isCurrentControlCard,
+      activateControlCard: deps.activateControlCard,
+      retireControlCard: deps.retireControlCard,
+      releaseControlCard: deps.releaseControlCard,
+      resumeActivityControls: deps.resumeActivityControls,
       sendRendered: deps.sendRendered,
       editRendered: deps.editRendered,
-      renderStrictCallbackPage: deps.renderStrictCallbackPage,
       refreshActivityContext: deps.refreshActivityContext,
     });
     this.plans = new PlanCommandService({
@@ -406,6 +419,7 @@ export class ThreadCommandService {
         await this.renderBackgroundTerminals(message.conversationId);
         return;
       }
+      if (command === "activity") return "Control expired.";
       await this.deps.expireCallbackPrompt(message);
       return;
     }
@@ -459,9 +473,13 @@ export class ThreadCommandService {
       || (typeof data.threadId === "string" && status.threadId !== data.threadId)) {
       return this.expireActivityControl(message, pending);
     }
+    if (message.messageId === undefined || !this.deps.isCurrentControlCard(key, message.messageId)) {
+      return this.expireActivityControl(message, pending);
+    }
 
     const turnBound = data.phase === "working" || data.phase === "waitingForInput" || data.phase === "waitingForApproval";
-    if (turnBound && typeof data.turnId === "string" && status.activeTurnId !== data.turnId) {
+    const interruptTurnMismatch = action === "interrupt" && typeof data.turnId === "string" && status.activeTurnId !== data.turnId;
+    if ((turnBound || interruptTurnMismatch) && typeof data.turnId === "string" && status.activeTurnId !== data.turnId) {
       return this.expireActivityControl(message, pending);
     }
 
@@ -486,7 +504,7 @@ export class ThreadCommandService {
       return goal?.status === "active" ? "Interrupted. Goal paused." : "Interrupted.";
     }
 
-    return this.goals.handleControl(message, pending, action);
+    return this.goals.handleControl(message, pending, action, data.phase);
   }
 
   private async interruptCurrentTurn(
@@ -523,11 +541,6 @@ export class ThreadCommandService {
 
   private async expireActivityControl(message: CallbackMessage, pending: PendingPrompt): Promise<string> {
     this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-    await this.deps.renderStrictCallbackPage(
-      message,
-      messageWithTitle("Control expired.", "Open the latest activity card or /goal."),
-      { inline_keyboard: [] },
-    );
     return "Control expired.";
   }
 
@@ -682,7 +695,7 @@ export class ThreadCommandService {
       || this.deps.store.countTasks(conversationId, workspaceName, ["waiting", "queued", "running", "blocked"]) > 0;
   }
 
-  async answerRelayCommandPrompt(conversationId: ConversationId, promptMessageId: MessageId, text: string): Promise<void> {
+  async answerRelayCommandPrompt(conversationId: ConversationId, promptMessageId: MessageId, text: string, userMessageId?: MessageId): Promise<void> {
     const pending = this.deps.store.getPendingPrompt(conversationId, promptMessageId);
     const data = parsePromptPayload(pending?.payloadJson);
     if (!pending || pending.kind !== "relay_command" || !data || isExpired(pending)) {
@@ -721,7 +734,7 @@ export class ThreadCommandService {
       return;
     }
     if (data.command === "goal_edit") {
-      await this.goals.answerEdit(conversationId, pending, data, text);
+      await this.goals.answerEdit(conversationId, pending, data, text, userMessageId);
       return;
     }
     await this.deps.sendRendered(conversationId, textMessage("Command prompt expired."));

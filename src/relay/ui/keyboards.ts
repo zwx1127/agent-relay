@@ -42,13 +42,14 @@ export function approvalKeyboard(token: string, choices: Array<{ action: string;
 }
 
 export function activityControlKeyboard(token: string, actions: ActivityControlAction[]): InlineKeyboardMarkup {
+  const button = (action: ActivityControlAction) => ({
+    text: activityControlLabel(action),
+    callback_data: `ar:cmd:activity:${token}:${action}`,
+  });
+  const execution = actions.filter((action) => action === "interrupt");
+  const goal = actions.filter((action) => action !== "interrupt");
   return {
-    inline_keyboard: actions.length
-      ? [actions.map((action) => ({
-        text: activityControlLabel(action),
-        callback_data: `ar:cmd:activity:${token}:${action}`,
-      }))]
-      : [],
+    inline_keyboard: [execution, goal].filter((row) => row.length > 0).map((row) => row.map(button)),
   };
 }
 
