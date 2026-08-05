@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { noopLogger, TextLogger } from "../../src/domain/logger.ts";
+import { MessageDeliveryUnknownError } from "../../src/ports/im.ts";
 import { TelegramAdapter } from "../../src/providers/im/telegram/adapter.ts";
 
 describe("telegram adapter", () => {
@@ -440,6 +441,60 @@ describe("telegram adapter", () => {
     await expect(adapter.sendMessage(1, "hi")).resolves.toEqual({ messageId: "9" });
     expect(calls).toBe(2);
     expect(delays).toEqual([25]);
+  });
+
+  test("does not retry an at-most-once send when transport delivery is unknown", async () => {
+    const delays: number[] = [];
+    let calls = 0;
+    const adapter = new TelegramAdapter("token", async () => {
+      calls += 1;
+      throw new Error("The socket connection was closed unexpectedly");
+    }, noopLogger, {
+      requestRetryMaxAttempts: 3,
+      retryInitialDelayMs: 25,
+      delay: async (ms) => {
+        delays.push(ms);
+      },
+    });
+
+    await expect(adapter.sendMessage(1, "Working", { deliveryMode: "at-most-once" }))
+      .rejects.toBeInstanceOf(MessageDeliveryUnknownError);
+    expect(calls).toBe(1);
+    expect(delays).toEqual([]);
+  });
+
+  test("does not retry an at-most-once send after an ambiguous server failure", async () => {
+    let calls = 0;
+    const adapter = new TelegramAdapter("token", async () => {
+      calls += 1;
+      return Response.json({ ok: false, description: "Bad Gateway" }, { status: 502 });
+    }, noopLogger, { requestRetryMaxAttempts: 3, delay: async () => undefined });
+
+    await expect(adapter.sendMessage(1, "Working", { deliveryMode: "at-most-once" }))
+      .rejects.toBeInstanceOf(MessageDeliveryUnknownError);
+    expect(calls).toBe(1);
+  });
+
+  test("attaches at-most-once inline controls only after Telegram returns a message id", async () => {
+    const requests: Array<{ method: string; body: Record<string, unknown> }> = [];
+    const adapter = new TelegramAdapter("token", async (input, init) => {
+      const method = String(input).split("/").at(-1)!;
+      requests.push({ method, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+      return method === "sendMessage"
+        ? Response.json({ ok: true, result: { message_id: 9 } })
+        : Response.json({ ok: true, result: true });
+    });
+    const replyMarkup = { inline_keyboard: [[{ text: "Interrupt", callback_data: "ar:cmd:activity:t:interrupt" }]] };
+
+    await expect(adapter.sendMessage(1, "Working", {
+      deliveryMode: "at-most-once",
+      replyMarkup,
+    })).resolves.toEqual({ messageId: "9" });
+
+    expect(requests).toEqual([
+      { method: "sendMessage", body: { chat_id: 1, text: "Working", disable_web_page_preview: true } },
+      { method: "editMessageReplyMarkup", body: { chat_id: 1, message_id: 9, reply_markup: replyMarkup } },
+    ]);
   });
 
   test("does not retry non-rate-limit client errors", async () => {

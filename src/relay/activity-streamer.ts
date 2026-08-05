@@ -9,7 +9,7 @@ import type {
   AgentThreadGoal,
   AgentTurnStatus,
 } from "../ports/agent.ts";
-import type { EditMessageTextOptions, SendMessageOptions } from "../ports/im.ts";
+import { MessageDeliveryUnknownError, type EditMessageTextOptions, type SendMessageOptions } from "../ports/im.ts";
 import { renderTelegramText, type RenderedTelegramText, type TelegramTextPart } from "../presentation/telegram/text.ts";
 import type { RelayStore } from "../storage/store.ts";
 import { activityControlActions, type ActivityControlAction, type ActivityControlPayload } from "./activity-controls.ts";
@@ -85,6 +85,7 @@ interface ActivityState {
   transcriptAppended?: boolean;
   controlsSuppressed?: boolean;
   presentationFrozen?: boolean;
+  deliveryUnknown?: boolean;
 }
 
 interface ActivityControlCard {
@@ -438,7 +439,7 @@ export class ActivityStreamer {
     if (!this.isCurrent(state)) return;
     if (state.timer) clearTimeout(state.timer);
     state.timer = undefined;
-    if (state.presentationFrozen) return;
+    if (state.presentationFrozen || state.deliveryUnknown) return;
     if (immediate) {
       await this.flush(state, false);
       return;
@@ -461,6 +462,10 @@ export class ActivityStreamer {
     if (!this.isCurrent(state)) return;
     if (state.timer) clearTimeout(state.timer);
     state.timer = undefined;
+    if (state.deliveryUnknown) {
+      this.completeState(state);
+      return;
+    }
     if (state.presentationFrozen) {
       state.messageId = undefined;
       state.sentOnce = false;
@@ -474,19 +479,7 @@ export class ActivityStreamer {
     if (!this.isCurrent(state)) return;
     if (state.dirtySince !== undefined) await this.flush(state, true);
     if (!this.isCurrent(state)) return;
-    if (!state.transcriptAppended) {
-      this.deps.store.appendTranscript({
-        conversationId: state.conversationId,
-        scopeKey: state.scopeKey,
-        workspaceName: state.workspaceName,
-        role: "system",
-        text: finalTranscriptSummary(state),
-        createdAt: Date.now(),
-      });
-      state.transcriptAppended = true;
-    }
-    state.invalidated = true;
-    this.states.delete(state.sessionKey);
+    this.completeState(state);
   }
 
   private async flush(state: ActivityState, final: boolean): Promise<void> {
@@ -548,11 +541,30 @@ export class ActivityStreamer {
     }
     if (!this.isCurrent(state)) return;
     const previousMessageId = state.messageId;
-    const result = await this.deps.sendRendered(state.scopeKey, rendered, {
-      replyToMessageId: state.sentOnce ? undefined : state.replyToMessageId,
-      replyMarkup,
-      disableWebPagePreview: true,
-    });
+    let result: { messageId?: MessageId };
+    try {
+      result = await this.deps.sendRendered(state.scopeKey, rendered, {
+        replyToMessageId: state.sentOnce ? undefined : state.replyToMessageId,
+        replyMarkup,
+        disableWebPagePreview: true,
+        deliveryMode: "at-most-once",
+      });
+    } catch (error) {
+      if (!(error instanceof MessageDeliveryUnknownError)) throw error;
+      if (!this.isCurrent(state)) return;
+      state.deliveryUnknown = true;
+      state.controlsSuppressed = true;
+      state.lastControls = undefined;
+      state.lastFlushAt = Date.now();
+      this.markFlushed(state, renderedRevision);
+      this.deps.logger.warn("router.activity_delivery_unknown", {
+        session_key: state.sessionKey,
+        generation: state.generation,
+        turn_id: state.turnId,
+        error,
+      });
+      return;
+    }
     if (!this.isCurrent(state)) return;
     state.messageId = result.messageId;
     if (previousMessageId !== undefined && String(previousMessageId) !== String(result.messageId)) {
@@ -564,6 +576,22 @@ export class ActivityStreamer {
     state.lastFlushAt = Date.now();
     await this.bindControls(state, rendered, actions);
     this.markFlushed(state, renderedRevision);
+  }
+
+  private completeState(state: ActivityState): void {
+    if (!state.transcriptAppended) {
+      this.deps.store.appendTranscript({
+        conversationId: state.conversationId,
+        scopeKey: state.scopeKey,
+        workspaceName: state.workspaceName,
+        role: "system",
+        text: finalTranscriptSummary(state),
+        createdAt: Date.now(),
+      });
+      state.transcriptAppended = true;
+    }
+    state.invalidated = true;
+    this.states.delete(state.sessionKey);
   }
 
   private controlsFor(state: ActivityState, context: ActivitySessionContext): ActivityControlAction[] {

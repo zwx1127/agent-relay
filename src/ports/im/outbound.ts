@@ -1,4 +1,4 @@
-import type { MessageId } from "../../domain/ids.ts";
+import type { MessageId, ProviderId } from "../../domain/ids.ts";
 import type { ImTopicContext } from "../../domain/scope.ts";
 
 export type TextParseMode = "HTML";
@@ -41,6 +41,22 @@ export interface SendMessageOptions {
   disableWebPagePreview?: boolean;
   replyToMessageId?: MessageId;
   topic?: ImTopicContext;
+  /** Prevent providers from retrying writes whose delivery outcome is unknown. */
+  deliveryMode?: "retry" | "at-most-once";
+}
+
+export class MessageDeliveryUnknownError extends Error {
+  override readonly cause: unknown;
+
+  constructor(
+    readonly providerId: ProviderId,
+    readonly operation: "sendMessage",
+    cause: unknown,
+  ) {
+    super(`${providerId} ${operation} delivery outcome is unknown`);
+    this.name = "MessageDeliveryUnknownError";
+    this.cause = cause;
+  }
 }
 
 export interface EditMessageTextOptions extends SendMessageOptions {

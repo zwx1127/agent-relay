@@ -1,5 +1,5 @@
 import type { ConversationId, MessageId } from "../../../domain/ids.ts";
-import type { DownloadedFile, EditMessageTextOptions, InboundMessage, ImAdapter, MessageReactionOptions, SendFileOptions, SendMessageOptions, SendPhotoOptions } from "../../../ports/im.ts";
+import { MessageDeliveryUnknownError, type DownloadedFile, type EditMessageTextOptions, type InboundMessage, type ImAdapter, type MessageReactionOptions, type SendFileOptions, type SendMessageOptions, type SendPhotoOptions } from "../../../ports/im.ts";
 import { splitForTelegram, splitHtmlForTelegram, splitRenderedForTelegram } from "../../../presentation/telegram/text.ts";
 import { noopLogger, type Logger } from "../../../domain/logger.ts";
 import { normalizeBotUsername, toTelegramInboundMessage, type TelegramUpdate } from "./inbound.ts";
@@ -52,6 +52,7 @@ const RETRYABLE_HTTP_STATUSES = new Set([429]);
 interface RequestOptions {
   quietMessageNotModified?: boolean;
   retryForever?: boolean;
+  retryAmbiguousErrors?: boolean;
 }
 
 export class TelegramAdapter implements ImAdapter {
@@ -190,6 +191,9 @@ export class TelegramAdapter implements ImAdapter {
     this.logger.debug("telegram.send_message_started", { conversation_id: conversationId, text_len: text.length, chunks: chunks.length });
     let lastMessageId: string | undefined;
     for (const [index, chunk] of chunks.entries()) {
+      const isLastChunk = index === chunks.length - 1;
+      const atMostOnce = options.deliveryMode === "at-most-once";
+      const deferInlineKeyboard = atMostOnce && isLastChunk && !options.forceReply && options.replyMarkup !== undefined;
       try {
         const result = await this.request<{ message_id?: number }>("sendMessage", {
           chat_id: conversationId,
@@ -199,17 +203,32 @@ export class TelegramAdapter implements ImAdapter {
           ...(chunk.entities.length > 0 ? { entities: chunk.entities } : {}),
           ...(replyParametersForOptions(options, index === 0)),
           ...(telegramThreadForOptions(options)),
-          ...(replyMarkupForOptions(options, index === chunks.length - 1)),
-        });
+          ...(replyMarkupForOptions(options, isLastChunk && !deferInlineKeyboard)),
+        }, atMostOnce ? { retryAmbiguousErrors: false } : {});
+        if (atMostOnce && result?.message_id === undefined) {
+          throw new MessageDeliveryUnknownError(
+            this.providerId,
+            "sendMessage",
+            new Error("Telegram sendMessage did not return a message id"),
+          );
+        }
         lastMessageId = result?.message_id !== undefined ? String(result.message_id) : lastMessageId;
+        if (deferInlineKeyboard && result?.message_id !== undefined) {
+          await this.attachInlineKeyboard(conversationId, result.message_id, options.replyMarkup!);
+        }
       } catch (error) {
+        const surfacedError = error instanceof MessageDeliveryUnknownError
+          ? error
+          : atMostOnce && isAmbiguousTelegramDelivery(error)
+          ? new MessageDeliveryUnknownError(this.providerId, "sendMessage", error)
+          : error;
         this.logger.error("telegram.send_message_failed", {
           conversation_id: conversationId,
           text_len: text.length,
           chunks: chunks.length,
-          error: error instanceof Error ? error : new Error(String(error)),
+          error: surfacedError instanceof Error ? surfacedError : new Error(String(surfacedError)),
         });
-        throw error;
+        throw surfacedError;
       }
     }
     this.logger.debug("telegram.send_message_completed", { conversation_id: conversationId, text_len: text.length, chunks: chunks.length });
@@ -306,6 +325,27 @@ export class TelegramAdapter implements ImAdapter {
     if (applied !== true) throw new Error("Telegram setMessageReaction did not confirm success");
   }
 
+  private async attachInlineKeyboard(
+    conversationId: ConversationId,
+    messageId: number,
+    replyMarkup: NonNullable<SendMessageOptions["replyMarkup"]>,
+  ): Promise<void> {
+    try {
+      await this.request("editMessageReplyMarkup", {
+        chat_id: conversationId,
+        message_id: messageId,
+        reply_markup: replyMarkup,
+      }, { quietMessageNotModified: true });
+    } catch (error) {
+      if (isMessageNotModifiedError(error)) return;
+      this.logger.warn("telegram.send_message_reply_markup_attach_failed", {
+        conversation_id: conversationId,
+        message_id: messageId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
+  }
+
   async downloadFile(fileId: string): Promise<DownloadedFile> {
     const file = await this.request<{ file_path?: string; file_size?: number }>("getFile", { file_id: fileId });
     if (!file?.file_path) throw new Error("Telegram getFile did not return a file path.");
@@ -338,7 +378,7 @@ export class TelegramAdapter implements ImAdapter {
         return result;
       } catch (error) {
         lastError = error;
-        const retryable = isRetryableTelegramError(error);
+        const retryable = isRetryableTelegramError(error, options);
         if (!retryable || attempt >= maxAttempts || (this.stopped && options.retryForever)) {
           this.logFinalRequestError(method, error, options);
           throw error;
@@ -421,7 +461,8 @@ function isMessageNotModifiedDescription(description: string | undefined): boole
   return Boolean(description?.toLowerCase().includes("message is not modified"));
 }
 
-function isRetryableTelegramError(error: unknown): boolean {
+function isRetryableTelegramError(error: unknown, options: RequestOptions = {}): boolean {
+  if (options.retryAmbiguousErrors === false && isAmbiguousTelegramDelivery(error)) return false;
   if (!(error instanceof TelegramApiError)) return error instanceof Error;
   if (error.retryAfterSeconds && error.retryAfterSeconds > 0) return true;
   if (error.status >= 500) return true;
@@ -495,4 +536,9 @@ function appendTelegramThread(form: FormData, options: Pick<SendPhotoOptions | S
   if (options.topic?.provider !== "telegram") return;
   const id = Number(options.topic.id);
   if (Number.isFinite(id)) form.append("message_thread_id", String(id));
+}
+
+function isAmbiguousTelegramDelivery(error: unknown): boolean {
+  if (!(error instanceof TelegramApiError)) return error instanceof Error;
+  return error.status === 408 || error.status >= 500;
 }

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { noopLogger } from "../../src/domain/logger.ts";
+import { MessageDeliveryUnknownError, type SendMessageOptions } from "../../src/ports/im.ts";
 import { renderTelegramText } from "../../src/presentation/telegram/text.ts";
 import { ActivityStreamer, type ActivitySessionContext } from "../../src/relay/activity-streamer.ts";
 import { sleep } from "../support/fakes.ts";
@@ -165,6 +166,44 @@ describe("activity streamer lifecycle", () => {
     const retired = edits.filter((edit) => String(edit.messageId) === "1").at(-1)!;
     expect(retired.text).toBe("Goal current");
     expect(retired.buttons).toEqual([]);
+  });
+
+  test("does not resend a card after an at-most-once delivery becomes unknown", async () => {
+    const context: ActivitySessionContext = {
+      threadId: "thread-a",
+      collaborationMode: "default",
+      goal: null,
+      activeTurnId: "turn-a",
+    };
+    const sendOptions: SendMessageOptions[] = [];
+    let sendAttempts = 0;
+    let transcriptCount = 0;
+    const streamer = new ActivityStreamer({
+      store: {
+        ...activityStore(),
+        appendTranscript: () => { transcriptCount += 1; },
+      },
+      logger: noopLogger,
+      canEdit: true,
+      getReplyToMessageId: () => undefined,
+      getSessionContext: () => context,
+      sendRendered: async (_conversationId, _rendered, options) => {
+        sendAttempts += 1;
+        sendOptions.push(options ?? {});
+        throw new MessageDeliveryUnknownError("telegram", "sendMessage", new Error("socket closed"));
+      },
+      editRendered: async () => undefined,
+      timing: { quietMs: 1, minEditMs: 0, maxMs: 10 },
+    });
+
+    await streamer.handle({ type: "activity", sessionKey: "codex:1:demo", threadId: "thread-a", turnId: "turn-a", activity: { kind: "plan", steps: [{ step: "Start", status: "inProgress" }] } });
+    await streamer.handle({ type: "activity", sessionKey: "codex:1:demo", threadId: "thread-a", turnId: "turn-a", activity: { kind: "item", category: "command", label: "Continue", status: "completed" } });
+    await sleep(15);
+    await streamer.finalize("codex:1:demo", "turn-a", "completed");
+
+    expect(sendAttempts).toBe(1);
+    expect(sendOptions[0]?.deliveryMode).toBe("at-most-once");
+    expect(transcriptCount).toBe(1);
   });
 });
 

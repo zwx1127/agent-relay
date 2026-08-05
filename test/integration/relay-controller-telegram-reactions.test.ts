@@ -85,6 +85,7 @@ describe("relay controller Telegram reactions", () => {
 
     const activitySend = requests.find((request) => request.method === "sendMessage" && String(request.body.text).includes("Restart service"))!;
     const sourceMessageId = 500;
+    const activityControls = requests.find((request) => request.method === "editMessageReplyMarkup" && request.body.message_id === sourceMessageId)!;
     const activityEdit = requests.filter((request) => request.method === "editMessageText" && request.body.message_id === sourceMessageId).at(-1)!;
     const editData = callbackData(activityEdit.body, "Edit");
     await router.handle(callbackMessage(editData, 7, "cb-production-edit", sourceMessageId));
@@ -92,6 +93,8 @@ describe("relay controller Telegram reactions", () => {
     const retiredSourceIndex = requests.findLastIndex((request) => request.method === "editMessageText" && request.body.message_id === sourceMessageId);
     const retiredSource = requests[retiredSourceIndex]!;
     expect(activitySend.body.reply_parameters).toEqual({ message_id: 10, allow_sending_without_reply: true });
+    expect(activitySend.body.reply_markup).toBeUndefined();
+    expect(callbackData(activityControls.body, "Interrupt")).toContain("ar:cmd:activity:");
     expect(editPrompt.body.reply_markup).toMatchObject({ force_reply: true });
     expect(String(retiredSource.body.text)).toBe(String(activityEdit.body.text));
     expect(retiredSource.body.reply_markup).toEqual({ inline_keyboard: [] });
@@ -111,7 +114,9 @@ describe("relay controller Telegram reactions", () => {
     const newest = requests.filter((request) => request.method === "sendMessage" && String(request.body.text).includes("New work")).at(-1)!;
     expect(String(newest.body.text)).toContain("Goal Active");
     const newestMessageId = 502;
-    const clearData = callbackData(newest.body, "Clear");
+    const newestControls = requests.filter((request) => request.method === "editMessageReplyMarkup" && request.body.message_id === newestMessageId).at(-1)!;
+    expect(newest.body.reply_markup).toBeUndefined();
+    const clearData = callbackData(newestControls.body, "Clear");
     await router.handle(callbackMessage(clearData, 7, "cb-production-clear", newestMessageId));
     const cleared = requests.filter((request) => request.method === "sendMessage" && String(request.body.text).includes("Goal cleared.")).at(-1)!;
     expect(cleared.body.reply_markup).toMatchObject({ inline_keyboard: [[{ text: "Interrupt" }]] });
