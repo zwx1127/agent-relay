@@ -143,12 +143,12 @@ function Show-Usage {
   Write-Line "usage: $name <start|stop|restart|status|clean-data|clean|gateway-start|gateway-stop|gateway-status|gateway-install|gateway-uninstall|clients-enable|clients-disable|desktop-enable|desktop-disable>"
 }
 
-function Test-ExperimentalSeamlessWorkEnabled {
-  $value = [Environment]::GetEnvironmentVariable("EXPERIMENTAL_SEAMLESS_WORK_ENABLED")
+function Test-ExperimentalRelayWorkEnabled {
+  $value = [Environment]::GetEnvironmentVariable("EXPERIMENTAL_RELAY_WORK_ENABLED")
   if ([string]::IsNullOrWhiteSpace($value)) {
     $envFile = Join-Path $RootDir ".env"
     if (Test-Path -LiteralPath $envFile) {
-      $line = Get-Content -LiteralPath $envFile | Where-Object { $_ -match '^\s*EXPERIMENTAL_SEAMLESS_WORK_ENABLED\s*=' } | Select-Object -Last 1
+      $line = Get-Content -LiteralPath $envFile | Where-Object { $_ -match '^\s*EXPERIMENTAL_RELAY_WORK_ENABLED\s*=' } | Select-Object -Last 1
       if ($line) { $value = ($line -split '=', 2)[1].Trim().Trim('"').Trim("'") }
     }
   }
@@ -485,15 +485,15 @@ function Invoke-RestartWorker {
 
 function Invoke-RestartSequence {
   Stop-Relay
-  if (-not (Test-ExperimentalSeamlessWorkEnabled)) {
+  if (-not (Test-ExperimentalRelayWorkEnabled)) {
     Clear-RelayData
   } else {
-    Write-Line "experimental seamless work enabled; preserving Relay data and the independent Gateway"
+    Write-Line "experimental relay work enabled; preserving Relay data and the independent Gateway"
   }
   Start-Relay
 }
 
-function Invoke-SeamlessCommand {
+function Invoke-RelayWorkCommand {
   param([string]$Subcommand)
   $bunPath = Ensure-Bun
   & $bunPath (Join-Path $RootDir "src\gateway\manage.ts") $Subcommand
@@ -557,15 +557,15 @@ switch ($Command) {
   "status" {
     Show-RelayStatus
   }
-  "gateway-start" { Invoke-SeamlessCommand "start" }
-  "gateway-stop" { Invoke-SeamlessCommand "stop" }
-  "gateway-status" { Invoke-SeamlessCommand "status" }
-  "gateway-install" { Invoke-SeamlessCommand "gateway-install" }
-  "gateway-uninstall" { Invoke-SeamlessCommand "gateway-uninstall" }
-  "desktop-enable" { Invoke-SeamlessCommand "desktop-enable" }
-  "desktop-disable" { Invoke-SeamlessCommand "desktop-disable" }
-  "clients-enable" { Invoke-SeamlessCommand "clients-enable" }
-  "clients-disable" { Invoke-SeamlessCommand "clients-disable" }
+  "gateway-start" { Invoke-RelayWorkCommand "start" }
+  "gateway-stop" { Invoke-RelayWorkCommand "stop" }
+  "gateway-status" { Invoke-RelayWorkCommand "status" }
+  "gateway-install" { Invoke-RelayWorkCommand "gateway-install" }
+  "gateway-uninstall" { Invoke-RelayWorkCommand "gateway-uninstall" }
+  "desktop-enable" { Invoke-RelayWorkCommand "desktop-enable" }
+  "desktop-disable" { Invoke-RelayWorkCommand "desktop-disable" }
+  "clients-enable" { Invoke-RelayWorkCommand "clients-enable" }
+  "clients-disable" { Invoke-RelayWorkCommand "clients-disable" }
   { $_ -eq "clean-data" -or $_ -eq "clean" } {
     Clear-RelayData
   }

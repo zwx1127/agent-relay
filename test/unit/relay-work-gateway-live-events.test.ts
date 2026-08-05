@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { GatewayLiveEventSequencer } from "../../src/gateway/live-events.ts";
 
-describe("experimental seamless Gateway live events", () => {
+describe("experimental relay work Gateway live events", () => {
   test("assigns connection-lifetime per-thread sequences without retaining replay payloads", () => {
     const events = new GatewayLiveEventSequencer();
     const first = events.sequence("desktop", { method: "item/started", params: { threadId: "t1", itemId: "1" } }, 1);

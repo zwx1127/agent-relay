@@ -141,7 +141,7 @@ export class RelayController {
       agent: deps.agent,
       logger: this.logger,
       currentWorkspace: (conversationId) => this.workspaceFlow.currentWorkspace(conversationId),
-      experimentalSeamlessWorkEnabled: deps.config.experimentalSeamlessWorkEnabled,
+      experimentalRelayWorkEnabled: deps.config.experimentalRelayWorkEnabled,
     });
     this.mediaRelay = new MediaRelayService({
       config: deps.config,
@@ -227,14 +227,14 @@ export class RelayController {
     });
     this.slashCommands = new SlashCommandRouter({
       help: async (conversationId) => {
-        await this.sendRendered(conversationId, formatHelpMessage(deps.config.experimentalSeamlessWorkEnabled));
+        await this.sendRendered(conversationId, formatHelpMessage(deps.config.experimentalRelayWorkEnabled));
       },
       review: (conversationId, text) => this.threadCommands.runReviewCommand(conversationId, text),
       compact: (conversationId) => this.threadCommands.requestCompactConfirmation(conversationId),
       init: (conversationId, userMessageId) => this.threadCommands.runInitCommand(conversationId, userMessageId),
       newThread: (conversationId, name, clearDisplay) => this.threadCommands.startFreshThread(conversationId, name, clearDisplay),
       resume: (conversationId, searchTerm) => this.threadCommands.renderResumePicker(conversationId, searchTerm),
-      ...(deps.config.experimentalSeamlessWorkEnabled ? {
+      ...(deps.config.experimentalRelayWorkEnabled ? {
         threads: (conversationId: ConversationId, searchTerm: string) => this.threadCommands.renderResumePicker(conversationId, searchTerm),
         attach: (conversationId: ConversationId, threadId: string) => this.threadCommands.attachThread(conversationId, threadId),
         detach: (conversationId: ConversationId) => this.threadCommands.detachThread(conversationId),

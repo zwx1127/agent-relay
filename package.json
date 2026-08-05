@@ -31,7 +31,7 @@
     "test:integration": "bun test test/integration",
     "test:codex-contract": "bun scripts/codex-appserver-contract.ts",
     "test:smoke": "bun test test/integration/pty-smoke.test.ts test/integration/relay-script.test.ts",
-    "seamless": "bun src/gateway/manage.ts",
+    "relay-work": "bun src/gateway/manage.ts",
     "codex:gateway": "bun src/gateway/codex-launcher.ts",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test"

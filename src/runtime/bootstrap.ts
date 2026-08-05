@@ -14,7 +14,7 @@ import { startControlServer, type RunningControlServer } from "../relay/control/
 import { resolveRelayHelperPath } from "../relay/control/helper.ts";
 import { createImAdapter } from "../providers/im/factory.ts";
 import { createAgentDriver } from "../providers/agents/factory.ts";
-import { ensureSeamlessGateway } from "../gateway/state.ts";
+import { ensureRelayGateway } from "../gateway/state.ts";
 
 export async function main(): Promise<void> {
   const config = loadConfig();
@@ -23,8 +23,8 @@ export async function main(): Promise<void> {
   const imAdapter = createImAdapter(config, logger);
   let router: RelayController;
   let control: RunningControlServer | undefined;
-  const gateway = config.experimentalSeamlessWorkEnabled
-    ? await ensureSeamlessGateway(config, logger)
+  const gateway = config.experimentalRelayWorkEnabled
+    ? await ensureRelayGateway(config, logger)
     : undefined;
   const helperPath = resolveRelayHelperPath(dirname(fileURLToPath(import.meta.url)));
   const controlToken = randomBytes(32).toString("hex");
@@ -112,8 +112,8 @@ export async function main(): Promise<void> {
     media_max_bytes: config.mediaMaxBytes,
     relay_control_enabled: config.relayControlEnabled,
     relay_control_port: config.relayControlPort,
-    experimental_seamless_work_enabled: config.experimentalSeamlessWorkEnabled,
-    experimental_seamless_gateway_url: gateway?.url,
+    experimental_relay_work_enabled: config.experimentalRelayWorkEnabled,
+    experimental_relay_gateway_url: gateway?.url,
     relay_agent_name: config.relayAgentName,
     relay_peer_agent_count: config.relayPeerAgents.length,
     allowed_user_count: config.allowedUserIds.size,
@@ -125,9 +125,9 @@ export async function main(): Promise<void> {
   if (config.relayControlEnabled) {
     logger.warn("app.config_risky", { setting: "RELAY_CONTROL_ENABLED", value: String(config.relayControlEnabled) });
   }
-  if (config.experimentalSeamlessWorkEnabled) {
+  if (config.experimentalRelayWorkEnabled) {
     logger.warn("app.experimental_feature_enabled", {
-      feature: "seamless_work",
+      feature: "relay_work",
       gateway_url: gateway?.url,
       stability: "experimental",
     });

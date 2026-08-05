@@ -8,7 +8,7 @@ import {
   type PendingServerRequest,
 } from "../../src/gateway/main.ts";
 
-describe("experimental seamless Gateway approval arbitration", () => {
+describe("experimental relay work Gateway approval arbitration", () => {
   test("routes the first response to the originating app-server and drops later responses", () => {
     const backendMessages: string[] = [];
     const peerMessages: string[] = [];

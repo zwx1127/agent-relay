@@ -718,7 +718,7 @@ export class CodexDriver implements AgentDriver {
       const socket = new WebSocket(url);
       const timer = setTimeout(() => {
         socket.close();
-        reject(new Error(`Timed out connecting to experimental seamless Gateway at ${url}.`));
+        reject(new Error(`Timed out connecting to experimental relay Gateway at ${url}.`));
       }, 10_000);
       socket.addEventListener("open", () => {
         clearTimeout(timer);
@@ -732,10 +732,10 @@ export class CodexDriver implements AgentDriver {
       socket.addEventListener("error", () => {
         clearTimeout(timer);
         if (this.socket !== socket) {
-          reject(new Error(`Failed to connect to experimental seamless Gateway at ${url}.`));
+          reject(new Error(`Failed to connect to experimental relay Gateway at ${url}.`));
           return;
         }
-        this.handleServerError(new Error(`Experimental seamless Gateway connection failed: ${url}`));
+        this.handleServerError(new Error(`Experimental relay Gateway connection failed: ${url}`));
         this.handleServerExit(null, null);
       });
       socket.addEventListener("close", () => {
@@ -1261,7 +1261,7 @@ export class CodexDriver implements AgentDriver {
   private handleServerError(error: Error): void {
     if (this.stopping) return;
     const wrapped = this.options.gatewayUrl
-      ? new Error(`Experimental seamless Gateway unavailable at ${this.options.gatewayUrl}. ${error.message}`)
+      ? new Error(`Experimental relay Gateway unavailable at ${this.options.gatewayUrl}. ${error.message}`)
       : formatCodexSpawnError(error, this.options.codexBin);
     this.logger.error("codex.app_server_spawn_failed", {
       codex_bin: this.options.codexBin,

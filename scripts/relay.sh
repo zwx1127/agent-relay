@@ -17,10 +17,10 @@ usage: $(basename "$0") <start|stop|restart|status|clean-data|clean|gateway-star
 USAGE
 }
 
-experimental_seamless_enabled() {
-  local value="${EXPERIMENTAL_SEAMLESS_WORK_ENABLED:-}"
+experimental_relay_work_enabled() {
+  local value="${EXPERIMENTAL_RELAY_WORK_ENABLED:-}"
   if [[ -z "$value" && -f "$ROOT_DIR/.env" ]]; then
-    value="$(sed -nE 's/^[[:space:]]*EXPERIMENTAL_SEAMLESS_WORK_ENABLED[[:space:]]*=[[:space:]]*([^#[:space:]]+).*$/\1/p' "$ROOT_DIR/.env" | tail -n 1 | tr -d "\"'")"
+    value="$(sed -nE 's/^[[:space:]]*EXPERIMENTAL_RELAY_WORK_ENABLED[[:space:]]*=[[:space:]]*([^#[:space:]]+).*$/\1/p' "$ROOT_DIR/.env" | tail -n 1 | tr -d "\"'")"
   fi
   value="${value,,}"
   [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
@@ -247,15 +247,15 @@ restart_worker() {
 
 restart_sequence() {
   stop
-  if experimental_seamless_enabled; then
-    echo "experimental seamless work enabled; preserving Relay data and the independent Gateway"
+  if experimental_relay_work_enabled; then
+    echo "experimental relay work enabled; preserving Relay data and the independent Gateway"
   else
     clean_data
   fi
   start
 }
 
-seamless_command() {
+relay_work_command() {
   ensure_bun
   (cd "$ROOT_DIR" && bun src/gateway/manage.ts "$1")
 }
@@ -317,31 +317,31 @@ case "$command" in
     status
     ;;
   gateway-start)
-    seamless_command start
+    relay_work_command start
     ;;
   gateway-stop)
-    seamless_command stop
+    relay_work_command stop
     ;;
   gateway-status)
-    seamless_command status
+    relay_work_command status
     ;;
   gateway-install)
-    seamless_command gateway-install
+    relay_work_command gateway-install
     ;;
   gateway-uninstall)
-    seamless_command gateway-uninstall
+    relay_work_command gateway-uninstall
     ;;
   desktop-enable)
-    seamless_command desktop-enable
+    relay_work_command desktop-enable
     ;;
   desktop-disable)
-    seamless_command desktop-disable
+    relay_work_command desktop-disable
     ;;
   clients-enable)
-    seamless_command clients-enable
+    relay_work_command clients-enable
     ;;
   clients-disable)
-    seamless_command clients-disable
+    relay_work_command clients-disable
     ;;
   clean-data | clean)
     clean_data

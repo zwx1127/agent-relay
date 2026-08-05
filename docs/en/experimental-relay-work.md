@@ -1,18 +1,18 @@
-# Experimental seamless work
+# Experimental relay work
 
 > **Experimental and disabled by default.** This feature may change incompatibly. Normal Relay, Codex CLI, and Codex Desktop behavior is unchanged until you opt in and explicitly configure each client.
 
-Experimental seamless work keeps an independent per-user Codex Gateway running as the local data-plane proxy. The Gateway owns one Codex app-server child process. Relay, native Codex CLI processes, and the Windows or macOS Codex desktop app connect through it and continue the same Codex threads.
+Experimental relay work keeps an independent per-user Codex Gateway running as the local data-plane proxy. The Gateway owns one Codex app-server child process. Relay, native Codex CLI processes, and the Windows or macOS Codex desktop app connect through it and continue the same Codex threads.
 
 ## Enable
 
 1. Add the master opt-in to `.env`:
 
    ```dotenv
-   EXPERIMENTAL_SEAMLESS_WORK_ENABLED=true
+   EXPERIMENTAL_RELAY_WORK_ENABLED=true
    # Optional; defaults are shown below.
-   EXPERIMENTAL_SEAMLESS_GATEWAY_PORT=18765
-   EXPERIMENTAL_SEAMLESS_GATEWAY_STATE_PATH=.data/agent-relay-gateway.json
+   EXPERIMENTAL_RELAY_GATEWAY_PORT=18765
+   EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH=.data/agent-relay-gateway.json
    ```
 
 2. Install user-login startup for the independent Gateway and start it now:
@@ -75,13 +75,13 @@ An approval or user-input request can be presented to multiple clients associate
 Run the following while the feature is still enabled:
 
 ```bash
-bun run seamless disable
+bun run relay-work disable
 ```
 
 This removes the experimental proxy from the user `Path`, restores the previous desktop `CODEX_CLI_PATH`, removes Gateway user-login startup, and requests Gateway shutdown. Then set:
 
 ```dotenv
-EXPERIMENTAL_SEAMLESS_WORK_ENABLED=false
+EXPERIMENTAL_RELAY_WORK_ENABLED=false
 ```
 
 After Relay restarts it uses the original local stdio `CodexDriver` path. It does not read Gateway state, register shared-thread commands, or modify the desktop environment.

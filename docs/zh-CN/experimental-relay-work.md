@@ -1,18 +1,18 @@
-# 实验性无缝工作
+# 实验性接力工作
 
 > **本功能仍处于实验阶段，并且默认关闭。** 在正式稳定前，接口和启用方式可能发生不兼容变化。只有手动开启后，它才会影响 Relay、Codex CLI 或 Codex 桌面版。
 
-实验性无缝工作会为当前操作系统用户长期运行一个独立的 Codex Gateway。Gateway 是本机数据面代理，并拥有唯一的 Codex app-server 子进程；Relay、原生 Codex CLI 进程，以及 Windows/macOS Codex 桌面版都通过它继续处理同一批 Codex thread。
+实验性接力工作会为当前操作系统用户长期运行一个独立的 Codex Gateway。Gateway 是本机数据面代理，并拥有唯一的 Codex app-server 子进程；Relay、原生 Codex CLI 进程，以及 Windows/macOS Codex 桌面版都通过它继续处理同一批 Codex thread。
 
 ## 开启
 
 先在 `.env` 中显式加入：
 
 ```dotenv
-EXPERIMENTAL_SEAMLESS_WORK_ENABLED=true
+EXPERIMENTAL_RELAY_WORK_ENABLED=true
 # 以下为可选配置及其默认值。
-EXPERIMENTAL_SEAMLESS_GATEWAY_PORT=18765
-EXPERIMENTAL_SEAMLESS_GATEWAY_STATE_PATH=.data/agent-relay-gateway.json
+EXPERIMENTAL_RELAY_GATEWAY_PORT=18765
+EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH=.data/agent-relay-gateway.json
 ```
 
 安装当前用户登录时的 Gateway 启动项，并立即启动：
@@ -77,13 +77,13 @@ Gateway 只同步实时事件：Codex、Gateway、Relay 都已启动，并且客
 保持实验开关开启时先运行：
 
 ```bash
-bun run seamless disable
+bun run relay-work disable
 ```
 
 该命令会从用户 `Path` 移除实验代理、恢复之前的桌面 `CODEX_CLI_PATH`、删除 Gateway 登录启动项，并请求关闭 Gateway。然后将配置改回：
 
 ```dotenv
-EXPERIMENTAL_SEAMLESS_WORK_ENABLED=false
+EXPERIMENTAL_RELAY_WORK_ENABLED=false
 ```
 
 Relay 重启后会恢复原有本地 stdio `CodexDriver` 路径：不读取 Gateway 状态、不注册共享 thread 命令，也不修改桌面环境。

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { prependPathEntry, removePathEntry } from "../../src/gateway/manage.ts";
 
-describe("experimental seamless client environment", () => {
+describe("experimental relay work client environment", () => {
   test("prepends the Windows proxy directory once and removes it case-insensitively", () => {
     expect(prependPathEntry("C:\\Tools;D:\\Bin", "c:\\tools", "win32")).toBe("c:\\tools;D:\\Bin");
     expect(removePathEntry("C:\\Tools;D:\\Bin", "c:\\tools", "win32")).toBe("D:\\Bin");

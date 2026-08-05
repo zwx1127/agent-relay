@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { loadConfig } from "../runtime/config.ts";
 import { loadDotEnvFile } from "../runtime/env.ts";
 import { TextLogger } from "../domain/logger.ts";
-import { ensureSeamlessGateway, isGatewayReady, isProcessAlive, readGatewayState, resolveGatewayStatePath } from "./state.ts";
+import { ensureRelayGateway, isGatewayReady, isProcessAlive, readGatewayState, resolveGatewayStatePath } from "./state.ts";
 
 interface DesktopInstallState {
   experimental: true;
@@ -22,9 +22,9 @@ async function main(): Promise<void> {
   const command = process.argv[2] || "status";
   if (command === "start") {
     const config = loadConfig();
-    requireEnabled(config.experimentalSeamlessWorkEnabled);
-    const state = await ensureSeamlessGateway(config, new TextLogger(config.logLevel));
-    print(`experimental seamless Gateway is running (pid ${state.pid}, app-server ${state.appServerPid}, ${state.url})`);
+    requireEnabled(config.experimentalRelayWorkEnabled);
+    const state = await ensureRelayGateway(config, new TextLogger(config.logLevel));
+    print(`experimental relay Gateway is running (pid ${state.pid}, app-server ${state.appServerPid}, ${state.url})`);
     return;
   }
   if (command === "stop") {
@@ -37,16 +37,16 @@ async function main(): Promise<void> {
   }
   if (command === "desktop-enable" || command === "clients-enable") {
     const config = loadConfig();
-    requireEnabled(config.experimentalSeamlessWorkEnabled);
-    await ensureSeamlessGateway(config, new TextLogger(config.logLevel));
-    enableDesktop(config.codexBin, resolveGatewayStatePath(config.experimentalSeamlessGatewayStatePath));
+    requireEnabled(config.experimentalRelayWorkEnabled);
+    await ensureRelayGateway(config, new TextLogger(config.logLevel));
+    enableDesktop(config.codexBin, resolveGatewayStatePath(config.experimentalRelayGatewayStatePath));
     return;
   }
   if (command === "gateway-install") {
     const config = loadConfig();
-    requireEnabled(config.experimentalSeamlessWorkEnabled);
-    installGatewayAutostart(config.codexBin, config.experimentalSeamlessGatewayPort, resolveGatewayStatePath(config.experimentalSeamlessGatewayStatePath));
-    await ensureSeamlessGateway(config, new TextLogger(config.logLevel));
+    requireEnabled(config.experimentalRelayWorkEnabled);
+    installGatewayAutostart(config.codexBin, config.experimentalRelayGatewayPort, resolveGatewayStatePath(config.experimentalRelayGatewayStatePath));
+    await ensureRelayGateway(config, new TextLogger(config.logLevel));
     return;
   }
   if (command === "gateway-uninstall") {
@@ -61,26 +61,26 @@ async function main(): Promise<void> {
     disableDesktop();
     uninstallGatewayAutostart();
     await stopGateway();
-    print("experimental seamless work is stopped; set EXPERIMENTAL_SEAMLESS_WORK_ENABLED=false to keep it disabled");
+    print("experimental relay work is stopped; set EXPERIMENTAL_RELAY_WORK_ENABLED=false to keep it disabled");
     return;
   }
-  throw new Error("usage: bun run seamless <start|stop|status|gateway-install|gateway-uninstall|clients-enable|clients-disable|desktop-enable|desktop-disable|disable>");
+  throw new Error("usage: bun run relay-work <start|stop|status|gateway-install|gateway-uninstall|clients-enable|clients-disable|desktop-enable|desktop-disable|disable>");
 }
 
 function requireEnabled(enabled: boolean): void {
-  if (!enabled) throw new Error("Set EXPERIMENTAL_SEAMLESS_WORK_ENABLED=true manually before using this experimental feature.");
+  if (!enabled) throw new Error("Set EXPERIMENTAL_RELAY_WORK_ENABLED=true manually before using this experimental feature.");
 }
 
 function statePathFromEnvironment(): string {
   const env = { ...loadDotEnvFile(), ...process.env };
-  return resolveGatewayStatePath(env.EXPERIMENTAL_SEAMLESS_GATEWAY_STATE_PATH?.trim() || ".data/agent-relay-gateway.json");
+  return resolveGatewayStatePath(env.EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH?.trim() || ".data/agent-relay-gateway.json");
 }
 
 async function stopGateway(): Promise<void> {
   const path = statePathFromEnvironment();
   const state = readGatewayState(path);
   if (!state) {
-    print("experimental seamless Gateway is stopped");
+    print("experimental relay Gateway is stopped");
     return;
   }
   if (!isProcessAlive(state.pid)) {
@@ -90,7 +90,7 @@ async function stopGateway(): Promise<void> {
       while (Date.now() < orphanDeadline && isProcessAlive(state.appServerPid)) await Bun.sleep(100);
     }
     if (!isProcessAlive(state.appServerPid)) removeStoppedGatewayState(path, state.pid);
-    print("experimental seamless Gateway is stopped");
+    print("experimental relay Gateway is stopped");
     return;
   }
   process.kill(state.pid, "SIGTERM");
@@ -104,7 +104,7 @@ async function stopGateway(): Promise<void> {
     await Bun.sleep(100);
   }
   if (!isProcessAlive(state.pid) && !isProcessAlive(state.appServerPid)) removeStoppedGatewayState(path, state.pid);
-  print(`experimental seamless Gateway stop requested (pid ${state.pid})`);
+  print(`experimental relay Gateway stop requested (pid ${state.pid})`);
 }
 
 function removeStoppedGatewayState(path: string, expectedPid: number): void {
@@ -124,9 +124,9 @@ async function showStatus(): Promise<void> {
   const state = readGatewayState(path);
   if (state && isProcessAlive(state.pid) && isProcessAlive(state.appServerPid)) {
     const health = await isGatewayReady(state) ? "ready" : "unhealthy";
-    print(`experimental seamless Gateway is ${health} (pid ${state.pid}, app-server ${state.appServerPid}, ${state.url})`);
+    print(`experimental relay Gateway is ${health} (pid ${state.pid}, app-server ${state.appServerPid}, ${state.url})`);
   } else {
-    print("experimental seamless Gateway is stopped");
+    print("experimental relay Gateway is stopped");
   }
   const desktop = readDesktopInstallState();
   print(`Codex CLI/Desktop proxy: ${desktop ? `enabled (${desktop.proxyPath})` : "disabled"}`);
@@ -141,7 +141,7 @@ function enableDesktop(realCodexBin: string, gatewayStatePath: string): void {
   const launcherEntry = fileURLToPath(new URL("./codex-launcher.ts", import.meta.url));
   const result = spawnSync(process.execPath, ["build", launcherEntry, "--compile", `--outfile=${proxyPath}`], { stdio: "inherit" });
   if (result.status !== 0) throw new Error("Failed to compile the experimental Codex desktop proxy.");
-  const launcherConfigPath = join(installDir, "seamless-launcher.json");
+  const launcherConfigPath = join(installDir, "relay-work-launcher.json");
   writeFileSync(launcherConfigPath, `${JSON.stringify({
     experimental: true,
     enabled: true,
@@ -241,9 +241,9 @@ function installGatewayAutostart(realCodexBin: string, port: number, gatewayStat
     const lines = [
       "@echo off",
       `cd /d "${process.cwd().replace(/"/g, '""')}"`,
-      "set \"EXPERIMENTAL_SEAMLESS_WORK_ENABLED=true\"",
-      `set "EXPERIMENTAL_SEAMLESS_GATEWAY_PORT=${port}"`,
-      `set "EXPERIMENTAL_SEAMLESS_GATEWAY_STATE_PATH=${gatewayStatePath.replace(/"/g, '""')}"`,
+      "set \"EXPERIMENTAL_RELAY_WORK_ENABLED=true\"",
+      `set "EXPERIMENTAL_RELAY_GATEWAY_PORT=${port}"`,
+      `set "EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH=${gatewayStatePath.replace(/"/g, '""')}"`,
       `set "CODEX_BIN=${realCodexBin.replace(/"/g, '""')}"`,
       `"${process.execPath}" "${gatewayMain}"`,
       "",
@@ -254,7 +254,7 @@ function installGatewayAutostart(realCodexBin: string, port: number, gatewayStat
       "add",
       "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
       "/v",
-      "AgentRelayExperimentalSeamlessGateway",
+      "AgentRelayExperimentalRelayGateway",
       "/t",
       "REG_SZ",
       "/d",
@@ -266,7 +266,7 @@ function installGatewayAutostart(realCodexBin: string, port: number, gatewayStat
     return;
   }
   if (process.platform === "darwin") {
-    const label = "com.agent-relay.experimental-seamless-gateway";
+    const label = "com.agent-relay.experimental-relay-gateway";
     const path = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
     mkdirSync(dirname(path), { recursive: true });
     const plist = `<?xml version="1.0" encoding="UTF-8"?>
@@ -276,9 +276,9 @@ function installGatewayAutostart(realCodexBin: string, port: number, gatewayStat
 <key>ProgramArguments</key><array><string>${xml(process.execPath)}</string><string>${xml(gatewayMain)}</string></array>
 <key>WorkingDirectory</key><string>${xml(process.cwd())}</string>
 <key>EnvironmentVariables</key><dict>
-<key>EXPERIMENTAL_SEAMLESS_WORK_ENABLED</key><string>true</string>
-<key>EXPERIMENTAL_SEAMLESS_GATEWAY_PORT</key><string>${port}</string>
-<key>EXPERIMENTAL_SEAMLESS_GATEWAY_STATE_PATH</key><string>${xml(gatewayStatePath)}</string>
+<key>EXPERIMENTAL_RELAY_WORK_ENABLED</key><string>true</string>
+<key>EXPERIMENTAL_RELAY_GATEWAY_PORT</key><string>${port}</string>
+<key>EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH</key><string>${xml(gatewayStatePath)}</string>
 <key>CODEX_BIN</key><string>${xml(realCodexBin)}</string>
 </dict>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
@@ -297,14 +297,14 @@ function installGatewayAutostart(realCodexBin: string, port: number, gatewayStat
 
 function uninstallGatewayAutostart(): void {
   if (process.platform === "win32") {
-    spawnSync("reg", ["delete", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "/v", "AgentRelayExperimentalSeamlessGateway", "/f"], { stdio: "ignore" });
+    spawnSync("reg", ["delete", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "/v", "AgentRelayExperimentalRelayGateway", "/f"], { stdio: "ignore" });
     rmSync(join(desktopInstallDir(), "gateway-start.cmd"), { force: true });
     rmSync(join(desktopInstallDir(), "gateway-start.vbs"), { force: true });
     print("Windows user-level Gateway startup removed");
     return;
   }
   if (process.platform === "darwin") {
-    const path = join(homedir(), "Library", "LaunchAgents", "com.agent-relay.experimental-seamless-gateway.plist");
+    const path = join(homedir(), "Library", "LaunchAgents", "com.agent-relay.experimental-relay-gateway.plist");
     const uid = typeof process.getuid === "function" ? process.getuid() : 0;
     if (existsSync(path)) spawnSync("launchctl", ["bootout", `gui/${uid}`, path], { stdio: "ignore" });
     rmSync(path, { force: true });
@@ -319,11 +319,11 @@ function xml(value: string): string {
 }
 
 function desktopInstallDir(): string {
-  return join(homedir(), ".agent-relay", "experimental-seamless-work");
+  return join(homedir(), ".agent-relay", "experimental-relay-work");
 }
 
 function desktopInstallStatePath(): string {
-  return join(homedir(), ".agent-relay", "experimental-seamless-desktop.json");
+  return join(homedir(), ".agent-relay", "experimental-relay-work-desktop.json");
 }
 
 function readDesktopInstallState(): DesktopInstallState | undefined {
@@ -374,7 +374,7 @@ function setPersistentUserPath(value: string | undefined): void {
     return;
   }
   if (process.platform === "darwin") {
-    const label = "com.agent-relay.experimental-seamless-cli-env";
+    const label = "com.agent-relay.experimental-relay-work-cli-env";
     const path = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
     const uid = typeof process.getuid === "function" ? process.getuid() : 0;
     if (existsSync(path)) spawnSync("launchctl", ["bootout", `gui/${uid}`, path], { stdio: "ignore" });
@@ -409,7 +409,7 @@ function setPersistentCodexCliPath(value: string | undefined): void {
     return;
   }
   if (process.platform === "darwin") {
-    const label = "com.agent-relay.experimental-seamless-desktop-env";
+    const label = "com.agent-relay.experimental-relay-work-desktop-env";
     const path = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
     const uid = typeof process.getuid === "function" ? process.getuid() : 0;
     if (existsSync(path)) spawnSync("launchctl", ["bootout", `gui/${uid}`, path], { stdio: "ignore" });
@@ -436,12 +436,12 @@ function setPersistentCodexCliPath(value: string | undefined): void {
 }
 
 function print(message: string): void {
-  process.stdout.write(`[experimental seamless work] ${message}\n`);
+  process.stdout.write(`[experimental relay work] ${message}\n`);
 }
 
 if (import.meta.main) {
   void main().catch((error) => {
-    process.stderr.write(`[experimental seamless work] ${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`[experimental relay work] ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   });
 }

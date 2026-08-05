@@ -28,9 +28,9 @@ export interface AppConfig {
   relayControlEnabled: boolean;
   relayControlPort: number;
   /** Opt-in gate for the experimental shared Codex Gateway. */
-  experimentalSeamlessWorkEnabled: boolean;
-  experimentalSeamlessGatewayPort: number;
-  experimentalSeamlessGatewayStatePath: string;
+  experimentalRelayWorkEnabled: boolean;
+  experimentalRelayGatewayPort: number;
+  experimentalRelayGatewayStatePath: string;
   logLevel: LogLevel;
 }
 

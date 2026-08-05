@@ -7,7 +7,7 @@ import {
   rewriteCodexRemoteArgs,
 } from "../../src/gateway/codex-launcher.ts";
 
-describe("experimental seamless Codex launcher", () => {
+describe("experimental relay work Codex launcher", () => {
   test("proxies only the desktop app-server server invocation", () => {
     expect(isCodexAppServerProxyInvocation(["app-server", "--analytics-default-enabled"])).toBe(true);
     expect(isCodexAppServerProxyInvocation(["-c", "model=\"gpt-test\"", "app-server", "--listen", "stdio://"])).toBe(true);

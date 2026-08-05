@@ -69,14 +69,14 @@ if (process.platform === "win32") {
       expect(existsSync(sentinel)).toBe(true);
     }, 15_000);
 
-    test("experimental seamless restart preserves Relay data for Gateway continuity", async () => {
+    test("experimental relay work restart preserves Relay data for Gateway continuity", async () => {
       const root = createFixture();
       expectSuccess(runRelay(root, "start"));
       const firstPid = readPid(root);
-      const sentinel = join(root, ".data", "seamless-binding");
+      const sentinel = join(root, ".data", "relay-work-binding");
       writeFileSync(sentinel, "keep");
 
-      const restart = runRelay(root, "restart", { EXPERIMENTAL_SEAMLESS_WORK_ENABLED: "true" });
+      const restart = runRelay(root, "restart", { EXPERIMENTAL_RELAY_WORK_ENABLED: "true" });
       expectSuccess(restart);
       await waitFor(() => {
         if (!existsSync(join(root, ".data", "agent-relay.pid"))) return false;

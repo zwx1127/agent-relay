@@ -7,7 +7,7 @@ import type { ServerWebSocket } from "bun";
 import { loadDotEnvFile, parseBooleanEnv, parsePositiveIntegerEnv } from "../runtime/env.ts";
 import { codexAppServerWebSocketSpawnCommand } from "../providers/agents/codex/spawn.ts";
 import { GatewayLiveEventSequencer, messageThreadId, type GatewayLiveEvent } from "./live-events.ts";
-import { gatewayLogPath, isProcessAlive, readGatewayState, resolveGatewayStatePath, SEAMLESS_GATEWAY_PROTOCOL_VERSION, type SeamlessGatewayState } from "./state.ts";
+import { gatewayLogPath, isProcessAlive, readGatewayState, resolveGatewayStatePath, RELAY_GATEWAY_PROTOCOL_VERSION, type RelayGatewayState } from "./state.ts";
 
 interface GatewayRuntimeConfig {
   codexBin: string;
@@ -43,12 +43,12 @@ export interface PendingServerRequest {
 
 async function main(): Promise<void> {
   const env = { ...loadDotEnvFile(), ...process.env };
-  if (!parseBooleanEnv(env, "EXPERIMENTAL_SEAMLESS_WORK_ENABLED", false)) {
-    throw new Error("Experimental seamless work is disabled. Set EXPERIMENTAL_SEAMLESS_WORK_ENABLED=true explicitly.");
+  if (!parseBooleanEnv(env, "EXPERIMENTAL_RELAY_WORK_ENABLED", false)) {
+    throw new Error("Experimental relay work is disabled. Set EXPERIMENTAL_RELAY_WORK_ENABLED=true explicitly.");
   }
-  const statePath = resolveGatewayStatePath(env.EXPERIMENTAL_SEAMLESS_GATEWAY_STATE_PATH?.trim() || ".data/agent-relay-gateway.json");
-  const port = parsePositiveIntegerEnv(env, "EXPERIMENTAL_SEAMLESS_GATEWAY_PORT", 18765);
-  if (port > 65534) throw new Error("EXPERIMENTAL_SEAMLESS_GATEWAY_PORT must be at most 65534.");
+  const statePath = resolveGatewayStatePath(env.EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH?.trim() || ".data/agent-relay-gateway.json");
+  const port = parsePositiveIntegerEnv(env, "EXPERIMENTAL_RELAY_GATEWAY_PORT", 18765);
+  if (port > 65534) throw new Error("EXPERIMENTAL_RELAY_GATEWAY_PORT must be at most 65534.");
   const config: GatewayRuntimeConfig = {
     codexBin: env.CODEX_BIN?.trim() || "codex",
     port,
@@ -205,16 +205,16 @@ async function main(): Promise<void> {
   });
 
   const url = `ws://127.0.0.1:${config.port}`;
-  const state: SeamlessGatewayState = {
+  const state: RelayGatewayState = {
     experimental: true,
-    protocolVersion: SEAMLESS_GATEWAY_PROTOCOL_VERSION,
+    protocolVersion: RELAY_GATEWAY_PROTOCOL_VERSION,
     pid: process.pid,
     appServerPid: child.pid,
     url,
     startedAt,
   };
   writeJsonAtomic(config.statePath, state);
-  log(config.logPath, "experimental seamless Gateway ready", state);
+  log(config.logPath, "experimental relay Gateway ready", state);
   await new Promise<void>(() => undefined);
 }
 
@@ -355,7 +355,7 @@ function acquireLock(lockPath: string): void {
   } catch {
     const existingPid = readLockPid(lockPath);
     if (existingPid && isProcessAlive(existingPid)) {
-      throw new Error(`Experimental seamless Gateway is already starting (pid ${existingPid}).`);
+      throw new Error(`Experimental relay Gateway is already starting (pid ${existingPid}).`);
     }
     if (existsSync(lockPath)) unlinkSync(lockPath);
     const fd = openSync(lockPath, "wx");
@@ -418,7 +418,7 @@ function logRaw(path: string, source: string, value: string): void {
 
 if (import.meta.main) {
   void main().catch((error) => {
-    const statePath = resolveGatewayStatePath(process.env.EXPERIMENTAL_SEAMLESS_GATEWAY_STATE_PATH?.trim() || ".data/agent-relay-gateway.json");
+    const statePath = resolveGatewayStatePath(process.env.EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH?.trim() || ".data/agent-relay-gateway.json");
     const logPath = gatewayLogPath(statePath);
     mkdirSync(dirname(resolve(logPath)), { recursive: true });
     log(logPath, "gateway failed", { error: error instanceof Error ? error.message : String(error) });

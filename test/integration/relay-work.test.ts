@@ -7,7 +7,7 @@ import { cleanupRelayFixtures, relayFixture, textMessage } from "../support/rela
 afterEach(cleanupRelayFixtures);
 
 function experimentalFixture() {
-  const result = relayFixture("info", { experimentalSeamlessWorkEnabled: true });
+  const result = relayFixture("info", { experimentalRelayWorkEnabled: true });
   const path = join(result.root, "demo");
   mkdirSync(path);
   result.store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
@@ -15,7 +15,7 @@ function experimentalFixture() {
   return { ...result, path };
 }
 
-describe("experimental seamless work Relay behavior", () => {
+describe("experimental relay work behavior", () => {
   test("keeps commands and help hidden when the master gate is disabled", async () => {
     const { router, store, adapter, root } = relayFixture();
     const path = join(root, "demo");

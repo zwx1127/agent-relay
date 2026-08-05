@@ -57,13 +57,13 @@ Scan the Telegram QR code below to join the project community group.
 - Put multiple agent-relay bots in one group and let agents mention configured peers for related work.
 - Extend the relay to support more IM providers or agent backends.
 
-## Experimental: seamless work
+## Experimental: relay work
 
 > **Experimental, disabled by default, and opt-in only.** This feature may change incompatibly before it is stable. It does not start a Gateway, install a client proxy, or change existing Relay, Codex CLI, or Codex Desktop behavior unless you enable it manually.
 
-Experimental seamless work lets you begin in the native Codex CLI or the Windows/macOS Codex Desktop app, leave the computer, and continue the same Codex thread through Telegram or Lark/Feishu. Relay, interactive Codex CLI processes, and Codex Desktop all connect to one independent local Gateway and its single authoritative app-server; users do not choose separate remote endpoints.
+Experimental relay work lets you begin in the native Codex CLI or the Windows/macOS Codex Desktop app, leave the computer, and continue the same Codex thread through Telegram or Lark/Feishu. Relay, interactive Codex CLI processes, and Codex Desktop all connect to one independent local Gateway and its single authoritative app-server; users do not choose separate remote endpoints.
 
-Only new live progress produced while Codex, Gateway, and Relay are running is synchronized. Output produced while a process is stopped or not yet connected is not stored, replayed, or caught up later. See [Experimental seamless work](docs/en/experimental-seamless-work.md) for opt-in setup, supported commands, multi-process/thread behavior, limitations, and complete disable/restore instructions.
+Only new live progress produced while Codex, Gateway, and Relay are running is synchronized. Output produced while a process is stopped or not yet connected is not stored, replayed, or caught up later. See [Experimental relay work](docs/en/experimental-relay-work.md) for opt-in setup, supported commands, multi-process/thread behavior, limitations, and complete disable/restore instructions.
 
 ## Quick start
 
@@ -88,7 +88,7 @@ Send `/relay` to the bot, select or create a workspace, then send a normal messa
 - [Lark/Feishu quickstart](docs/en/quickstart-lark.md)
 - [Troubleshooting](docs/en/troubleshooting.md)
 - [Extending agent-relay](docs/en/extending-agent-relay.md)
-- [Experimental seamless work](docs/en/experimental-seamless-work.md) (disabled by default)
+- [Experimental relay work](docs/en/experimental-relay-work.md) (disabled by default)
 
 ## Minimum requirements
 

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { noopLogger } from "../../src/domain/logger.ts";
-import { ensureSeamlessGateway, readGatewayState, SEAMLESS_GATEWAY_PROTOCOL_VERSION } from "../../src/gateway/state.ts";
+import { ensureRelayGateway, readGatewayState, RELAY_GATEWAY_PROTOCOL_VERSION } from "../../src/gateway/state.ts";
 import { relayTestConfig } from "../support/relay-fixture.ts";
 
 const roots: string[] = [];
@@ -11,14 +11,14 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe("experimental seamless Gateway state", () => {
+describe("experimental relay work Gateway state", () => {
   test("accepts only the versioned loopback state shape", () => {
     const root = mkdtempSync(join(tmpdir(), "agent-relay-gateway-state-"));
     roots.push(root);
     const path = join(root, "gateway.json");
     writeFileSync(path, JSON.stringify({
       experimental: true,
-      protocolVersion: SEAMLESS_GATEWAY_PROTOCOL_VERSION,
+      protocolVersion: RELAY_GATEWAY_PROTOCOL_VERSION,
       pid: process.pid,
       appServerPid: process.pid,
       url: "ws://127.0.0.1:18765",
@@ -34,10 +34,10 @@ describe("experimental seamless Gateway state", () => {
     roots.push(root);
     const path = join(root, "gateway.json");
     const config = relayTestConfig(root, "info", {
-      experimentalSeamlessWorkEnabled: false,
-      experimentalSeamlessGatewayStatePath: path,
+      experimentalRelayWorkEnabled: false,
+      experimentalRelayGatewayStatePath: path,
     });
-    await expect(ensureSeamlessGateway(config, noopLogger)).rejects.toThrow("disabled");
+    await expect(ensureRelayGateway(config, noopLogger)).rejects.toThrow("disabled");
     expect(existsSync(path)).toBe(false);
   });
 });

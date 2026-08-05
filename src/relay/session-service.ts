@@ -14,7 +14,7 @@ export interface RelaySessionServiceDeps {
   agent: AgentDriver;
   logger: Logger;
   currentWorkspace(scopeKey: ConversationId): WorkspaceRecord | undefined;
-  experimentalSeamlessWorkEnabled?: boolean;
+  experimentalRelayWorkEnabled?: boolean;
 }
 
 export class MultipleActiveCodexThreadsError extends Error {
@@ -45,13 +45,13 @@ export class RelaySessionService {
     const resumePrevious = options.resumePrevious ?? true;
     const previous = threadId || !resumePrevious ? undefined : this.deps.store.getSession(key);
     let resumeThreadId = threadId ?? previous?.thread_id ?? undefined;
-    if (this.deps.experimentalSeamlessWorkEnabled && !resumeThreadId && this.deps.agent.listThreads) {
+    if (this.deps.experimentalRelayWorkEnabled && !resumeThreadId && this.deps.agent.listThreads) {
       const threads = await this.deps.agent.listThreads({ workspacePath: workspace.path, limit: 50 });
       const activeThreads = threads.filter((candidate) => candidate.status === "active");
       if (activeThreads.length === 1) resumeThreadId = activeThreads[0]!.id;
       else if (activeThreads.length > 1) throw new MultipleActiveCodexThreadsError(activeThreads.length);
     }
-    if (this.deps.experimentalSeamlessWorkEnabled && resumeThreadId) {
+    if (this.deps.experimentalRelayWorkEnabled && resumeThreadId) {
       const bound = this.deps.store.findSessionByThreadId(resumeThreadId, key);
       const boundScope = bound?.scope_key ?? bound?.conversation_id;
       if (bound && bound.session_key !== key && boundScope !== scope.scopeKey) {

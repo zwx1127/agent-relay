@@ -79,14 +79,14 @@ describe("relay lifecycle script", () => {
     expect(existsSync(sentinel)).toBe(true);
   });
 
-  unixOnlyTest("experimental seamless restart preserves Relay data", async () => {
+  unixOnlyTest("experimental relay work restart preserves Relay data", async () => {
     const root = createFixture();
     expectSuccess(runRelay(root, "start"));
     const firstPid = readPid(root);
-    const sentinel = join(root, ".data", "seamless-binding");
+    const sentinel = join(root, ".data", "relay-work-binding");
     writeFileSync(sentinel, "keep");
 
-    const restart = runRelay(root, "restart", { EXPERIMENTAL_SEAMLESS_WORK_ENABLED: "true" });
+    const restart = runRelay(root, "restart", { EXPERIMENTAL_RELAY_WORK_ENABLED: "true" });
     expectSuccess(restart);
     expect(restart.stdout).toContain("preserving Relay data");
     expect(readPid(root)).not.toBe(firstPid);

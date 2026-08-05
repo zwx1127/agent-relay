@@ -5,9 +5,9 @@ import { spawn } from "node:child_process";
 import type { Logger } from "../domain/logger.ts";
 import type { AppConfig } from "../runtime/config.ts";
 
-export const SEAMLESS_GATEWAY_PROTOCOL_VERSION = 1;
+export const RELAY_GATEWAY_PROTOCOL_VERSION = 1;
 
-export interface SeamlessGatewayState {
+export interface RelayGatewayState {
   experimental: true;
   protocolVersion: number;
   pid: number;
@@ -24,20 +24,20 @@ export function gatewayLogPath(statePath: string): string {
   return statePath.toLowerCase().endsWith(".json") ? statePath.slice(0, -5) + ".log" : `${statePath}.log`;
 }
 
-export function readGatewayState(path: string): SeamlessGatewayState | undefined {
+export function readGatewayState(path: string): RelayGatewayState | undefined {
   if (!existsSync(path)) return undefined;
   try {
-    const value = JSON.parse(readFileSync(path, "utf8")) as Partial<SeamlessGatewayState>;
+    const value = JSON.parse(readFileSync(path, "utf8")) as Partial<RelayGatewayState>;
     if (
       value.experimental !== true
-      || value.protocolVersion !== SEAMLESS_GATEWAY_PROTOCOL_VERSION
+      || value.protocolVersion !== RELAY_GATEWAY_PROTOCOL_VERSION
       || !Number.isInteger(value.pid)
       || !Number.isInteger(value.appServerPid)
       || typeof value.url !== "string"
       || !value.url.startsWith("ws://127.0.0.1:")
       || typeof value.startedAt !== "number"
     ) return undefined;
-    return value as SeamlessGatewayState;
+    return value as RelayGatewayState;
   } catch {
     return undefined;
   }
@@ -53,7 +53,7 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-export async function isGatewayReady(state: SeamlessGatewayState): Promise<boolean> {
+export async function isGatewayReady(state: RelayGatewayState): Promise<boolean> {
   const healthUrl = state.url.replace(/^ws:/, "http:").replace(/\/$/, "") + "/readyz";
   try {
     const response = await fetch(healthUrl, { signal: AbortSignal.timeout(1_500) });
@@ -63,19 +63,19 @@ export async function isGatewayReady(state: SeamlessGatewayState): Promise<boole
   }
 }
 
-export async function ensureSeamlessGateway(
+export async function ensureRelayGateway(
   config: AppConfig,
   logger: Logger,
   options: { timeoutMs?: number } = {},
-): Promise<SeamlessGatewayState> {
-  if (!config.experimentalSeamlessWorkEnabled) {
-    throw new Error("Experimental seamless work is disabled.");
+): Promise<RelayGatewayState> {
+  if (!config.experimentalRelayWorkEnabled) {
+    throw new Error("Experimental relay work is disabled.");
   }
-  const statePath = resolveGatewayStatePath(config.experimentalSeamlessGatewayStatePath);
+  const statePath = resolveGatewayStatePath(config.experimentalRelayGatewayStatePath);
   const existing = readGatewayState(statePath);
   if (existing && isProcessAlive(existing.pid) && isProcessAlive(existing.appServerPid)) {
     if (await isGatewayReady(existing)) return existing;
-    throw new Error(`Experimental seamless Gateway is running but unhealthy at ${existing.url}; refusing to start a second app-server.`);
+    throw new Error(`Experimental relay Gateway is running but unhealthy at ${existing.url}; refusing to start a second app-server.`);
   }
   if (existsSync(statePath)) unlinkSync(statePath);
   mkdirSync(dirname(statePath), { recursive: true });
@@ -85,9 +85,9 @@ export async function ensureSeamlessGateway(
     cwd: process.cwd(),
     env: {
       ...process.env,
-      EXPERIMENTAL_SEAMLESS_WORK_ENABLED: "true",
-      EXPERIMENTAL_SEAMLESS_GATEWAY_PORT: String(config.experimentalSeamlessGatewayPort),
-      EXPERIMENTAL_SEAMLESS_GATEWAY_STATE_PATH: statePath,
+      EXPERIMENTAL_RELAY_WORK_ENABLED: "true",
+      EXPERIMENTAL_RELAY_GATEWAY_PORT: String(config.experimentalRelayGatewayPort),
+      EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH: statePath,
       CODEX_BIN: config.codexBin,
     },
     detached: true,
@@ -95,7 +95,7 @@ export async function ensureSeamlessGateway(
     windowsHide: true,
   });
   child.unref();
-  logger.warn("seamless.gateway_starting", {
+  logger.warn("relay_work.gateway_starting", {
     experimental: true,
     gateway_pid: child.pid,
     state_path: statePath,
@@ -107,5 +107,5 @@ export async function ensureSeamlessGateway(
     if (state && isProcessAlive(state.pid) && isProcessAlive(state.appServerPid) && await isGatewayReady(state)) return state;
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
-  throw new Error(`Experimental seamless Gateway failed to start. Check ${gatewayLogPath(statePath)}.`);
+  throw new Error(`Experimental relay Gateway failed to start. Check ${gatewayLogPath(statePath)}.`);
 }
