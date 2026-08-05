@@ -41,7 +41,7 @@ import { ThreadCommandService } from "./thread-command-service.ts";
 import { WorkspaceFlow } from "./workspace-flow.ts";
 import { ConversationQueue } from "./conversation-queue.ts";
 import { RelayMessageRenderer } from "./rendering.ts";
-import { MultipleActiveCodexThreadsError, RelaySessionService } from "./session-service.ts";
+import { RelaySessionService } from "./session-service.ts";
 import { RelayAgentEventRouter } from "./agent-event-router.ts";
 import { RelayCapabilityService } from "./capability-service.ts";
 
@@ -163,7 +163,9 @@ export class RelayController {
       store: deps.store,
       agent: deps.agent,
       adapter: deps.adapter,
+      logger: this.logger,
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
+      editRendered: (conversationId, rendered, options) => this.editRendered(conversationId, rendered, options),
       renderCallbackPage: (message, body, replyMarkup) => this.renderCallbackPage(message, body, replyMarkup),
       renderStrictCallbackPage: (message, body, replyMarkup) => this.renderStrictCallbackPage(message, body, replyMarkup),
       markActiveTask: (sessionKeyValue, status, turnId) => this.markActiveTask(sessionKeyValue, status, turnId),
@@ -175,6 +177,7 @@ export class RelayController {
       logger: this.logger,
       requireCurrentWorkspace: (conversationId) => this.workspaceFlow.requireCurrentWorkspace(conversationId),
       ensureAgentStarted: (conversationId, workspace, threadId, options) => this.ensureAgentStarted(conversationId, workspace, threadId, options),
+      bootstrapResumedActivity: (status) => this.bootstrapResumedActivity(status),
       finalizeSessionOutput: (sessionKeyValue) => this.finalizeSessionOutput(sessionKeyValue),
       resetSessionPresentation: (sessionKeyValue, options) => this.resetSessionPresentation(sessionKeyValue, options),
       refreshActivityContext: (sessionKeyValue) => this.activityStreamer.refreshContext(sessionKeyValue),
@@ -227,18 +230,13 @@ export class RelayController {
     });
     this.slashCommands = new SlashCommandRouter({
       help: async (conversationId) => {
-        await this.sendRendered(conversationId, formatHelpMessage(deps.config.experimentalRelayWorkEnabled));
+        await this.sendRendered(conversationId, formatHelpMessage());
       },
       review: (conversationId, text) => this.threadCommands.runReviewCommand(conversationId, text),
       compact: (conversationId) => this.threadCommands.requestCompactConfirmation(conversationId),
       init: (conversationId, userMessageId) => this.threadCommands.runInitCommand(conversationId, userMessageId),
       newThread: (conversationId, name, clearDisplay) => this.threadCommands.startFreshThread(conversationId, name, clearDisplay),
       resume: (conversationId, searchTerm) => this.threadCommands.renderResumePicker(conversationId, searchTerm),
-      ...(deps.config.experimentalRelayWorkEnabled ? {
-        threads: (conversationId: ConversationId, searchTerm: string) => this.threadCommands.renderResumePicker(conversationId, searchTerm),
-        attach: (conversationId: ConversationId, threadId: string) => this.threadCommands.attachThread(conversationId, threadId),
-        detach: (conversationId: ConversationId) => this.threadCommands.detachThread(conversationId),
-      } : {}),
       fork: (conversationId) => this.threadCommands.forkCurrentThread(conversationId),
       side: (conversationId, prompt, userMessageId) => this.threadCommands.sideConversationCommand(conversationId, prompt, userMessageId),
       rename: (conversationId, name) => this.threadCommands.renameCommand(conversationId, name),
@@ -262,6 +260,7 @@ export class RelayController {
       },
       home: (message) => this.renderConsole(message.conversationId),
       status: (message) => this.renderHomeCallback(message),
+      resume: (message) => this.threadCommands.renderResumePicker(message.conversationId, ""),
       workspaces: (message, pageIndex) => this.workspaceFlow.renderWorkspacesCallback(message, pageIndex),
       newWorkspace: (message, pageIndex) => this.workspaceFlow.promptForWorkspaceName(message, pageIndex),
       toggleStatusMode: (message) => this.toggleStatusModeCallback(message),
@@ -380,10 +379,6 @@ export class RelayController {
         }
       }
     } catch (error) {
-      if (error instanceof MultipleActiveCodexThreadsError) {
-        await this.threadCommands.renderResumePicker(message.conversationId, "");
-        return;
-      }
       const detail = error instanceof Error ? error.message : String(error);
       this.logger.error("router.message_failed", {
         conversation_id: message.conversationId,
@@ -564,7 +559,7 @@ export class RelayController {
     const status = this.statusView(message.conversationId);
     const mode = this.deps.store.getHomeStatusMode(message.conversationId);
     const previousConsoleMessageId = this.deps.store.getConsoleMessageId(message.conversationId);
-    const result = await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
+    const result = await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode, this.deps.config.experimentalRelayWorkEnabled));
     if (result.messageId) this.deps.store.setConsoleMessageId(message.conversationId, result.messageId);
     this.logger.info("router.home_callback_rendered", {
       conversation_id: message.conversationId,
@@ -587,7 +582,7 @@ export class RelayController {
     this.deps.store.setHomeStatusMode(message.conversationId, nextMode);
     const status = this.statusView(message.conversationId);
     try {
-      const result = await this.renderCallbackPage(message, formatHomeMessage(status, nextMode), consoleKeyboard(status, nextMode));
+      const result = await this.renderCallbackPage(message, formatHomeMessage(status, nextMode), consoleKeyboard(status, nextMode, this.deps.config.experimentalRelayWorkEnabled));
       if (result.messageId) this.deps.store.setConsoleMessageId(message.conversationId, result.messageId);
       this.logger.info("router.home_status_mode_toggled", {
         conversation_id: message.conversationId,
@@ -674,7 +669,7 @@ export class RelayController {
   }
 
   private consoleKeyboard(conversationId: ConversationId): InlineKeyboardMarkup {
-    return consoleKeyboard(this.statusView(conversationId), this.deps.store.getHomeStatusMode(conversationId));
+    return consoleKeyboard(this.statusView(conversationId), this.deps.store.getHomeStatusMode(conversationId), this.deps.config.experimentalRelayWorkEnabled);
   }
 
   private async renderConsole(conversationId: ConversationId, options: { forceNewMessage?: boolean } = {}): Promise<void> {
@@ -691,7 +686,7 @@ export class RelayController {
       try {
         await this.editRendered(conversationId, body, {
           messageId: previousMessageId,
-          replyMarkup: consoleKeyboard(status, mode),
+          replyMarkup: consoleKeyboard(status, mode, this.deps.config.experimentalRelayWorkEnabled),
         });
         return;
       } catch (error) {
@@ -702,7 +697,7 @@ export class RelayController {
         });
       }
     }
-    const result = await this.sendRendered(conversationId, body, { replyMarkup: consoleKeyboard(status, mode) });
+    const result = await this.sendRendered(conversationId, body, { replyMarkup: consoleKeyboard(status, mode, this.deps.config.experimentalRelayWorkEnabled) });
     if (result.messageId) this.deps.store.setConsoleMessageId(conversationId, result.messageId);
   }
 
@@ -746,6 +741,25 @@ export class RelayController {
 
   private clearCodexPromptsForSession(sessionKeyValue: string): void {
     this.codexPromptFlow.clearForSession(sessionKeyValue);
+  }
+
+  private async bootstrapResumedActivity(status: AgentSessionStatus): Promise<void> {
+    if (!status.activeTurnId) return;
+    await this.activityStreamer.handle({
+      type: "activity",
+      sessionKey: status.sessionKey,
+      ...(status.threadId ? { threadId: status.threadId } : {}),
+      turnId: status.activeTurnId,
+      itemId: `resume:${status.activeTurnId}`,
+      activity: {
+        kind: "item",
+        category: "other",
+        label: "Joined active Codex turn",
+        status: "inProgress",
+      },
+    });
+    if (status.waitingForApproval) await this.activityStreamer.setPhase(status.sessionKey, "waitingForApproval");
+    else if (status.waitingForUserInput) await this.activityStreamer.setPhase(status.sessionKey, "waitingForInput");
   }
 
   private async resetSessionPresentation(sessionKeyValue: string, options: { deletePages?: boolean } = {}): Promise<void> {

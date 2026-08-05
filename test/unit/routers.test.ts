@@ -51,6 +51,7 @@ describe("relay routers", () => {
       renderStaleConsole: async () => { calls.push("stale"); },
       home: async () => { calls.push("home"); },
       status: async () => { calls.push("status"); },
+      resume: async () => { calls.push("resume"); },
       workspaces: async (_message, pageIndex) => { calls.push(`workspaces:${pageIndex}`); },
       newWorkspace: async (_message, pageIndex) => { calls.push(`new:${pageIndex}`); },
       toggleStatusMode: async () => { calls.push("toggle"); },

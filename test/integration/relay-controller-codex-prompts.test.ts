@@ -563,6 +563,37 @@ describe("relay controller Codex prompts", () => {
     expect(store.getPendingPrompt("1", submitCard.messageId!)).toBeUndefined();
   });
 
+  test("an approval answered by another connected client clears the local controls", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("run tests"));
+
+    await router.handleAgentOutput({
+      type: "approval_request",
+      sessionKey: "codex:1:demo",
+      requestId: "shared-91",
+      method: "item/commandExecution/requestApproval",
+      approvalKind: "command",
+      title: "Approve command?",
+      body: "bun test",
+      params: { command: "bun test" },
+      turnId: "turn-1",
+    });
+    const prompt = adapter.sent.at(-1)!;
+
+    await router.handleAgentOutput({ type: "server_request_resolved", sessionKey: "codex:1:demo", requestId: "shared-91" });
+
+    expect(agent.responses).toEqual([]);
+    expect(store.getPendingPrompt("1", prompt.messageId!)).toBeUndefined();
+    expect(store.getTask(1)?.status).toBe("running");
+    expect(adapter.edited.at(-1)?.text).toContain("Codex request resolved.");
+    expect(adapter.edited.at(-1)?.text).toContain("another connected client");
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
+  });
+
   test("URL MCP elicitation supports Complete and returns accept without content", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");

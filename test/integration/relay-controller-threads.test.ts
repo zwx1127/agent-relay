@@ -632,7 +632,7 @@ describe("relay controller thread commands", () => {
 
     await router.handle(callbackMessage(resumeButton!.callback_data, 7, "cb-resume", adapter.sent.at(-1)?.messageId));
 
-    expect(agent.stopped).toEqual(["codex:1:demo"]);
+    expect(agent.released).toEqual(["codex:1:demo"]);
     expect(agent.getStatus("codex:1:demo")?.threadId).toBe("saved-thread");
     expect(store.getSession("codex:1:demo")?.thread_id).toBe("saved-thread");
     expect(adapter.edited.at(-1)?.text).toContain("Resumed chat.");

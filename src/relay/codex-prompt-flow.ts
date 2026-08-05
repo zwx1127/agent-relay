@@ -3,12 +3,14 @@ import type {
   AgentApprovalRequestEvent,
   AgentDriver,
   AgentMcpElicitationRequestEvent,
+  AgentServerRequestResolvedEvent,
   AgentUserInputOption,
   AgentUserInputQuestion,
   AgentUserInputRequestEvent,
 } from "../ports/agent.ts";
-import type { ImAdapter, InboundMessage, InlineKeyboardMarkup, SendMessageOptions } from "../ports/im.ts";
+import type { EditMessageTextOptions, ImAdapter, InboundMessage, InlineKeyboardMarkup, SendMessageOptions } from "../ports/im.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
+import type { Logger } from "../domain/logger.ts";
 import { parseSessionKey } from "../domain/session.ts";
 import { parseChatScopeKey } from "../domain/scope.ts";
 import type { RelayStore } from "../storage/store.ts";
@@ -47,7 +49,9 @@ export interface CodexPromptFlowDeps {
   store: RelayStore;
   agent: Pick<AgentDriver, "respond">;
   adapter: Pick<ImAdapter, "capabilities">;
+  logger: Logger;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
+  editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: Omit<EditMessageTextOptions, "entities" | "parseMode">): Promise<void>;
   renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
   renderStrictCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
   markActiveTask(sessionKey: string, status: "blocked" | "running", turnId?: string): Promise<void>;
@@ -60,6 +64,7 @@ export class CodexPromptFlow {
     questions: AgentUserInputQuestion[];
     answers: Record<string, { answers: string[] }>;
   }>();
+  private readonly renderedRequests = new Map<string, { scopeKey: string; promptMessageId: MessageId }>();
   private readonly mcp: McpElicitationFlow;
 
   constructor(private readonly deps: CodexPromptFlowDeps) {
@@ -107,6 +112,7 @@ export class CodexPromptFlow {
       }),
       expiresAt,
     });
+    this.rememberRenderedRequest(event.sessionKey, event.requestId, parsed.scopeKey, result.messageId);
   }
 
   private async sendCodexQuestion(
@@ -151,6 +157,7 @@ export class CodexPromptFlow {
       payloadJson: payload,
       expiresAt,
     });
+    this.rememberRenderedRequest(sessionKeyValue, requestId, scope.scopeKey, result.messageId);
   }
 
   async answerOptionCallback(message: CallbackMessage, payload: string): Promise<void> {
@@ -260,6 +267,9 @@ export class CodexPromptFlow {
       payloadJson: JSON.stringify({ ...data, selectedAnswer, answerMode: "note" }),
       expiresAt: pending.expiresAt,
     });
+    if (pending.sessionKey && data.requestId !== undefined) {
+      this.rememberRenderedRequest(pending.sessionKey, data.requestId as string | number, String(message.conversationId), result.messageId);
+    }
   }
 
   private async promptForCodexOtherAnswer(
@@ -286,6 +296,9 @@ export class CodexPromptFlow {
       payloadJson: JSON.stringify({ ...data, answerMode: "other" }),
       expiresAt: pending.expiresAt,
     });
+    if (pending.sessionKey && data.requestId !== undefined) {
+      this.rememberRenderedRequest(pending.sessionKey, data.requestId as string | number, String(message.conversationId), result.messageId);
+    }
   }
 
   private async sendNextCodexQuestion(
@@ -364,6 +377,7 @@ export class CodexPromptFlow {
 
   private async respondToCodexPrompt(response: { sessionKey: string; requestId: string | number; result: unknown }): Promise<void> {
     if (!this.deps.agent.respond) throw new Error("Agent driver cannot answer Codex prompts.");
+    this.renderedRequests.delete(codexRequestKey(response.sessionKey, response.requestId));
     await this.deps.agent.respond(response.sessionKey, response.requestId, response.result);
     await this.deps.markActiveTask(response.sessionKey, "running");
   }
@@ -389,6 +403,7 @@ export class CodexPromptFlow {
       { inline_keyboard: [] },
     );
     this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
+    this.renderedRequests.delete(codexRequestKey(pending.sessionKey, data.requestId as string | number));
     await this.deps.agent.respond(pending.sessionKey, data.requestId as string | number, approvalResponse(data.approvalKind as AgentApprovalKind, decision ?? "decline", data.params));
     await this.deps.markActiveTask(pending.sessionKey, "running");
   }
@@ -407,6 +422,7 @@ export class CodexPromptFlow {
     const agent = this.deps.agent;
     const sessionKeyValue = pending?.sessionKey;
     if (sessionKeyValue && data && data.requestId !== undefined && typeof data.approvalKind === "string" && agent.respond) {
+      this.renderedRequests.delete(codexRequestKey(sessionKeyValue, data.requestId as string | number));
       await this.deps.renderStrictCallbackPage(
         message,
         messageWithTitle(
@@ -435,7 +451,36 @@ export class CodexPromptFlow {
     for (const key of this.codexRequests.keys()) {
       if (key.startsWith(`${sessionKeyValue}:`)) this.codexRequests.delete(key);
     }
+    for (const key of this.renderedRequests.keys()) {
+      if (key.startsWith(`${sessionKeyValue}:`)) this.renderedRequests.delete(key);
+    }
     this.mcp.clearForSession(sessionKeyValue);
+  }
+
+  async handleRequestResolved(event: AgentServerRequestResolvedEvent): Promise<void> {
+    const key = codexRequestKey(event.sessionKey, event.requestId);
+    this.codexRequests.delete(key);
+    const rendered = this.renderedRequests.get(key);
+    this.renderedRequests.delete(key);
+    if (rendered) {
+      this.deps.store.deletePendingPrompt(rendered.scopeKey, rendered.promptMessageId);
+      await this.deps.editRendered(
+        rendered.scopeKey,
+        messageWithTitle("Codex request resolved.", "Answered from another connected client."),
+        { messageId: rendered.promptMessageId, replyMarkup: { inline_keyboard: [] } },
+      ).catch((error) => {
+        this.deps.logger.warn("router.codex_resolved_prompt_edit_failed", {
+          session_key: event.sessionKey,
+          request_id: String(event.requestId),
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      });
+    }
+    await this.mcp.resolve(event.sessionKey, event.requestId);
+  }
+
+  private rememberRenderedRequest(sessionKeyValue: string, requestId: string | number, scopeKey: string, promptMessageId: MessageId): void {
+    this.renderedRequests.set(codexRequestKey(sessionKeyValue, requestId), { scopeKey, promptMessageId });
   }
 }
 

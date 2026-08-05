@@ -61,16 +61,17 @@ Restart Codex Desktop afterward. The same proxy preserves the desktop app-server
 
 - Multiple desktop, CLI, and Relay clients can connect to one Gateway without starting an app-server per client.
 - Each client has an independent WebSocket connection, while one app-server remains authoritative for thread state.
-- If exactly one thread is active in the selected workspace, Relay attaches it automatically.
-- If several threads are active, Relay sends the thread picker instead of guessing.
-- `/threads [search]` lists shared threads.
-- `/attach <thread-id-or-unique-prefix>` attaches the current IM scope.
-- `/detach` releases the current scope.
-- A thread can have only one writable IM scope at a time. Detach it before moving it to another chat, Telegram topic, or Lark thread.
+- Use `/resume [search]`, or **Resume** in Relay Home, to bind an IM scope to an existing thread. Both entrypoints use the same picker and switching semantics as Codex TUI.
+- Relay Work never attaches an active or previously persisted thread merely because an ordinary IM message arrived. Without an explicit `/resume`, that message starts a fresh thread.
+- `/resume` is rejected while the source scope has an active turn, approval, user-input request, or busy Relay task. An idle source scope may resume a target thread that is already active.
+- Multiple native Codex clients and multiple IM scopes may resume the same thread. There is no one-writer or ownership rule; the user controls which connected client sends input.
+- Closing or switching one client releases only that subscription. Relay sends `thread/unsubscribe` after its last logical scope leaves the thread, and releasing a client does not stop shared work. An explicit **Interrupt** or **Stop** still cancels the shared active turn.
 
-The Gateway synchronizes live events only. New progress is forwarded after Codex, Gateway, and Relay are all running and the clients are associated with the same thread. The Gateway stores no progress history, Relay keeps no consumption cursor, and reconnecting does not replay output produced while any process was stopped or not yet running. Resuming a thread restores only the current state needed to continue working; it does not catch offline output up to IM.
+The Gateway synchronizes live events only. New progress is forwarded after Codex, Gateway, and Relay are all running and the clients are associated with the same thread. The Gateway stores no progress history, Relay keeps no consumption cursor, and reconnecting does not replay output produced while any process was stopped or not yet running. Resuming inspects only the latest turn summary needed to identify the current active state; it never renders completed history or catches offline output up to IM.
 
-An approval or user-input request can be presented to multiple clients associated with that thread. The Gateway accepts the first valid response and drops later responses. Relay still serializes its own sends per session.
+An approval, user-input request, or MCP elicitation can be presented to every connected client associated with that thread. The first valid response wins, later responses are rejected, and the resolved notification removes duplicate controls from the other clients.
+
+Ordinary IM input sent during an active turn has Codex TUI **Enter / Steer** semantics and includes the expected active turn id. Relay Work does not expose a TUI **Tab / Queue** action and adds no Gateway-level or thread-level input lock or queue. Relay only preserves per-scope send ordering.
 
 ## Disable and restore defaults
 
@@ -86,7 +87,7 @@ This removes the experimental proxy from the user `Path`, restores the previous 
 EXPERIMENTAL_RELAY_WORK_ENABLED=false
 ```
 
-After Relay restarts it uses the original local stdio `CodexDriver` path. It does not read Gateway state, register shared-thread commands, or modify the desktop environment.
+After Relay restarts it uses the original local stdio `CodexDriver` path. It does not read Gateway state, add the Relay Home Resume action, or modify the desktop environment.
 
 ## Failure behavior
 

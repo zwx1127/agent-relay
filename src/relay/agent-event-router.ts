@@ -4,6 +4,7 @@ import type {
   AgentImageOutputEvent,
   AgentMcpElicitationRequestEvent,
   AgentOutputEvent,
+  AgentServerRequestResolvedEvent,
   AgentThreadLifecycleEvent,
   AgentTurnCompletedEvent,
   AgentUserInputRequestEvent,
@@ -29,13 +30,14 @@ export interface RelayAgentEventRouterDeps {
     handleUserInputRequest(event: AgentUserInputRequestEvent): Promise<void>;
     handleApprovalRequest(event: AgentApprovalRequestEvent): Promise<void>;
     handleMcpElicitationRequest(event: AgentMcpElicitationRequestEvent): Promise<void>;
+    handleRequestResolved(event: AgentServerRequestResolvedEvent): Promise<void>;
   };
   finalizeOutput(sessionKey: string): Promise<void>;
   sendPlanReadyPrompt(sessionKey: string, turnId?: string): Promise<void>;
   appendSystem(scopeKey: ConversationId, text: string): void;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText): Promise<unknown>;
   completeTask(sessionKey: string, turnId: string | undefined, status: "done" | "interrupted" | "failed"): Promise<void>;
-  markActiveTask(sessionKey: string, status: "blocked", turnId?: string): Promise<void>;
+  markActiveTask(sessionKey: string, status: "blocked" | "running", turnId?: string): Promise<void>;
   cancelActiveTasks(sessionKey: string): Promise<void>;
   failActiveTasks(sessionKey: string): Promise<void>;
   currentThreadId(sessionKey: string): string | undefined;
@@ -67,12 +69,21 @@ export class RelayAgentEventRouter {
       case "mcp_elicitation_request":
         await this.blockForPrompt(event, "waitingForInput", () => this.deps.prompts.handleMcpElicitationRequest(event));
         return true;
+      case "server_request_resolved":
+        await this.handleRequestResolved(event);
+        return true;
       case "thread_lifecycle":
         await this.handleThreadLifecycle(event);
         return true;
       default:
         return false;
     }
+  }
+
+  private async handleRequestResolved(event: AgentServerRequestResolvedEvent): Promise<void> {
+    await this.deps.prompts.handleRequestResolved(event);
+    await this.deps.activity.setPhase(event.sessionKey, "working");
+    await this.deps.markActiveTask(event.sessionKey, "running");
   }
 
   private async handleTurnCompleted(event: AgentTurnCompletedEvent): Promise<void> {

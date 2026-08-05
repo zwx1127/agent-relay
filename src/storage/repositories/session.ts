@@ -73,16 +73,6 @@ export class SessionRepository {
     return row ?? undefined;
   }
 
-  findByThreadId(threadId: string, excludingSessionKey: string): AgentSessionRow | undefined {
-    return this.db.query<AgentSessionRow, [string, string]>(`
-      SELECT session_key, scope_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode, collaboration_thread_id
-      FROM agent_sessions
-      WHERE thread_id = ? AND session_key <> ?
-      ORDER BY started_at DESC
-      LIMIT 1
-    `).get(threadId, excludingSessionKey) ?? undefined;
-  }
-
   listRunning(): AgentSessionRow[] {
     return this.db.query<AgentSessionRow, []>(`
       SELECT session_key, scope_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode, collaboration_thread_id

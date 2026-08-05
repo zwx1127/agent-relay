@@ -24,6 +24,13 @@ export interface GatewayClientData {
   queued: string[];
   threads: Set<string>;
   deliveredSeq: Map<string, number>;
+  pendingThreadRequests?: Map<string, PendingThreadRequest>;
+}
+
+export interface PendingThreadRequest {
+  method: "thread/start" | "thread/resume" | "thread/fork" | "thread/unsubscribe";
+  threadId?: string;
+  wasSubscribed?: boolean;
 }
 
 export interface ConnectedClient {
@@ -38,7 +45,8 @@ export interface PendingServerRequest {
   originalId: string | number;
   threadId?: string;
   resolved: boolean;
-  relayIds: string[];
+  resolvedNotified: boolean;
+  participants: Map<string, string | number>;
 }
 
 async function main(): Promise<void> {
@@ -122,7 +130,7 @@ async function main(): Promise<void> {
     const message = parseMessage(raw);
     if (message) {
       updateClientFromRequest(client.data, message);
-      if (isRpcResponse(message) && routeServerRequestResponse(client.data, message, raw, pendingRequests, relayedRequestIds)) return;
+      if (isRpcResponse(message) && routeServerRequestResponse(client.data, message, raw, clients, pendingRequests, relayedRequestIds)) return;
     }
     const backend = client.data.backend;
     if (backend?.readyState === WebSocket.OPEN) backend.send(raw);
@@ -146,6 +154,7 @@ async function main(): Promise<void> {
         client.socket.send(raw);
         return;
       }
+      if (handleServerRequestResolved(client.data, message, clients, pendingRequests)) return;
       const liveEvent = liveEvents.sequence(client.data.id, message);
       if (liveEvent) deliverLiveEvent(liveEvent, raw, client, clients);
       else client.socket.send(raw);
@@ -179,6 +188,7 @@ async function main(): Promise<void> {
         queued: [],
         threads: new Set(),
         deliveredSeq: new Map(),
+        pendingThreadRequests: new Map(),
       };
       if (server.upgrade(request, { data })) return undefined;
       return new Response("not found", { status: 404 });
@@ -197,7 +207,10 @@ async function main(): Promise<void> {
         socket.data.backend?.close();
         clients.delete(socket.data.id);
         for (const [key, pending] of pendingRequests) {
-          if (pending.originClientId === socket.data.id) removePendingRequest(key, pendingRequests, relayedRequestIds);
+          if (pending.originClientId !== socket.data.id) continue;
+          pending.resolved = true;
+          notifyServerRequestResolved(pending, clients);
+          removePendingRequest(key, pendingRequests, relayedRequestIds);
         }
         log(config.logPath, "gateway client disconnected", { clientId: socket.data.id });
       },
@@ -232,16 +245,45 @@ export function deliverLiveEvent(
   }
 }
 
-function updateClientFromRequest(client: GatewayClientData, message: Record<string, unknown>): void {
+export function updateClientFromRequest(client: GatewayClientData, message: Record<string, unknown>): void {
   if (message.method === "initialize") {
     const clientInfo = asRecord(asRecord(message.params)?.clientInfo);
     if (typeof clientInfo?.name === "string") client.name = clientInfo.name;
   }
+  if (!isServerRequest(message)) return;
+  const method = message.method;
+  if (method !== "thread/start" && method !== "thread/resume" && method !== "thread/fork" && method !== "thread/unsubscribe") return;
   const threadId = messageThreadId(message);
-  if (threadId) client.threads.add(threadId);
+  const pending = client.pendingThreadRequests ??= new Map();
+  pending.set(rpcIdKey(message.id), {
+    method,
+    ...(threadId ? { threadId } : {}),
+    ...(method === "thread/resume" && threadId ? { wasSubscribed: client.threads.has(threadId) } : {}),
+  });
+  // A resuming connection must receive events emitted before the RPC response.
+  // Roll this optimistic subscription back if app-server rejects the resume.
+  if (method === "thread/resume" && threadId) client.threads.add(threadId);
 }
 
-function updateClientFromBackend(client: GatewayClientData, message: Record<string, unknown>): void {
+export function updateClientFromBackend(client: GatewayClientData, message: Record<string, unknown>): void {
+  if (isRpcResponse(message)) {
+    const pending = client.pendingThreadRequests?.get(rpcIdKey(message.id));
+    if (pending) {
+      client.pendingThreadRequests?.delete(rpcIdKey(message.id));
+      if ("error" in message) {
+        if (pending.method === "thread/resume" && pending.threadId && !pending.wasSubscribed) client.threads.delete(pending.threadId);
+        return;
+      }
+      if (pending.method === "thread/unsubscribe") {
+        if (pending.threadId) client.threads.delete(pending.threadId);
+        return;
+      }
+      const responseThreadId = messageThreadId(message) ?? pending.threadId;
+      if (responseThreadId) client.threads.add(responseThreadId);
+      return;
+    }
+    return;
+  }
   const threadId = messageThreadId(message);
   if (threadId) client.threads.add(threadId);
 }
@@ -263,19 +305,21 @@ export function shareServerRequest(
     originalId: message.id,
     threadId,
     resolved: false,
-    relayIds: [],
+    resolvedNotified: false,
+    participants: new Map([[origin.data.id, message.id]]),
   };
   pendingRequests.set(key, pending);
   setTimeout(() => {
     const active = pendingRequests.get(key);
     if (!active || active.resolved) return;
     active.resolved = true;
+    notifyServerRequestResolved(active, clients);
     setTimeout(() => removePendingRequest(key, pendingRequests, relayedRequestIds), 5 * 60_000).unref();
   }, 5 * 60_000).unref();
   for (const peer of clients.values()) {
     if (peer.data.id === origin.data.id || (threadId && !peer.data.threads.has(threadId))) continue;
     const relayId = `agent-relay:${randomUUID()}`;
-    pending.relayIds.push(relayId);
+    pending.participants.set(peer.data.id, relayId);
     relayedRequestIds.set(relayId, key);
     peer.socket.send(JSON.stringify({ ...message, id: relayId }));
   }
@@ -285,6 +329,7 @@ export function routeServerRequestResponse(
   client: GatewayClientData,
   message: Record<string, unknown> & { id: string | number },
   raw: string,
+  clients: Map<string, ConnectedClient>,
   pendingRequests: Map<string, PendingServerRequest>,
   relayedRequestIds: Map<string, string>,
 ): boolean {
@@ -297,9 +342,50 @@ export function routeServerRequestResponse(
     const response = relayedKey ? { ...message, id: pending.originalId } : JSON.parse(raw) as Record<string, unknown>;
     pending.originBackend.send(JSON.stringify(response));
     pending.resolved = true;
+    notifyServerRequestResolved(pending, clients);
     setTimeout(() => removePendingRequest(pending.key, pendingRequests, relayedRequestIds), 5 * 60_000).unref();
   }
   return true;
+}
+
+export function handleServerRequestResolved(
+  client: GatewayClientData,
+  message: Record<string, unknown>,
+  clients: Map<string, ConnectedClient>,
+  pendingRequests: Map<string, PendingServerRequest>,
+): boolean {
+  if (message.method !== "serverRequest/resolved") return false;
+  const params = asRecord(message.params);
+  const requestId = params?.requestId;
+  if (typeof requestId !== "string" && typeof requestId !== "number") return false;
+  const direct = pendingRequests.get(requestKey(client.id, requestId));
+  const threadId = typeof params?.threadId === "string" ? params.threadId : undefined;
+  const pending = direct ?? [...pendingRequests.values()].find((candidate) => (
+    candidate.originalId === requestId && (!threadId || candidate.threadId === threadId)
+  ));
+  if (!pending) return false;
+  pending.resolved = true;
+  notifyServerRequestResolved(pending, clients);
+  return true;
+}
+
+function notifyServerRequestResolved(
+  pending: PendingServerRequest,
+  clients: Map<string, ConnectedClient>,
+): void {
+  if (pending.resolvedNotified) return;
+  pending.resolvedNotified = true;
+  for (const [clientId, visibleRequestId] of pending.participants) {
+    const client = clients.get(clientId);
+    if (!client) continue;
+    client.socket.send(JSON.stringify({
+      method: "serverRequest/resolved",
+      params: {
+        ...(pending.threadId ? { threadId: pending.threadId } : {}),
+        requestId: visibleRequestId,
+      },
+    }));
+  }
 }
 
 function removePendingRequest(
@@ -310,7 +396,9 @@ function removePendingRequest(
   const pending = pendingRequests.get(key);
   if (!pending) return;
   pendingRequests.delete(key);
-  for (const relayId of pending.relayIds) relayedRequestIds.delete(relayId);
+  for (const requestId of pending.participants.values()) {
+    if (typeof requestId === "string" && requestId.startsWith("agent-relay:")) relayedRequestIds.delete(requestId);
+  }
 }
 
 export function isShareableServerRequest(method: string): boolean {
@@ -330,7 +418,11 @@ function isRpcResponse(message: Record<string, unknown>): message is Record<stri
 }
 
 function requestKey(clientId: string, id: string | number): string {
-  return `${clientId}:${String(id)}`;
+  return `${clientId}:${rpcIdKey(id)}`;
+}
+
+function rpcIdKey(id: string | number): string {
+  return `${typeof id}:${String(id)}`;
 }
 
 function parseMessage(raw: string): Record<string, unknown> | undefined {

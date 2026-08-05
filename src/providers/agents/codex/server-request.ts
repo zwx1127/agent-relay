@@ -7,12 +7,13 @@ import type { RunningSession, SideConversationCollector } from "./state.ts";
 
 export interface ServerRequestContext {
   sessions: Map<string, RunningSession>;
-  threadToSession: Map<string, string>;
+  threadToSessions: Map<string, Set<string>>;
   sideConversations: Map<string, SideConversationCollector>;
   rpc: CodexRpcClient;
   logger: Logger;
   onOutput: AgentOutputHandler;
   emitActivity(key: string, activity: AgentActivity, params?: Record<string, unknown>): Promise<void>;
+  registerRequest(requestId: string | number, threadId: string, sessionKeys: string[]): void;
 }
 
 export async function handleCodexServerRequest(message: JsonRpcRequest, context: ServerRequestContext): Promise<void> {
@@ -22,7 +23,8 @@ export async function handleCodexServerRequest(message: JsonRpcRequest, context:
     : typeof params?.conversationId === "string"
       ? params.conversationId
       : undefined;
-  const key = threadId ? context.threadToSession.get(threadId) : undefined;
+  const keys = threadId ? [...(context.threadToSessions.get(threadId) ?? [])] : [];
+  const key = keys[0];
   const sideConversation = threadId ? context.sideConversations.get(threadId) : undefined;
   if (sideConversation) {
     await context.rpc.rejectRequest(message.id, -32000, "Interactive prompts and approvals are not supported in Relay side conversations.");
@@ -30,9 +32,11 @@ export async function handleCodexServerRequest(message: JsonRpcRequest, context:
   }
   if (message.method === "item/tool/call" || message.method === "account/chatgptAuthTokens/refresh" || message.method === "attestation/generate") {
     const drift = `Unsupported Codex server request received despite disabled capability: ${message.method}`;
-    if (key) {
-      const running = context.sessions.get(key);
-      if (running) running.status.recentError = drift;
+    if (keys.length > 0) {
+      for (const sessionKey of keys) {
+        const running = context.sessions.get(sessionKey);
+        if (running) running.status.recentError = drift;
+      }
     } else {
       for (const running of context.sessions.values()) running.status.recentError = drift;
     }
@@ -48,16 +52,19 @@ export async function handleCodexServerRequest(message: JsonRpcRequest, context:
 
   if (message.method === "item/tool/requestUserInput") {
     const questions = Array.isArray(params?.questions) ? params.questions.map(toQuestion).filter(Boolean) as AgentUserInputQuestion[] : [];
-    await context.onOutput({
-      type: "user_input_request",
-      sessionKey: key,
-      requestId: message.id,
-      questions,
-      turnId: getTurnId(params),
-      itemId: typeof params?.itemId === "string" ? params.itemId : undefined,
-    });
-    const running = context.sessions.get(key);
-    if (running) running.status.waitingForUserInput = true;
+    context.registerRequest(message.id, threadId!, keys);
+    for (const sessionKey of keys) {
+      await context.onOutput({
+        type: "user_input_request",
+        sessionKey,
+        requestId: message.id,
+        questions,
+        turnId: getTurnId(params),
+        itemId: typeof params?.itemId === "string" ? params.itemId : undefined,
+      });
+      const running = context.sessions.get(sessionKey);
+      if (running) running.status.waitingForUserInput = true;
+    }
     return;
   }
 
@@ -81,41 +88,47 @@ export async function handleCodexServerRequest(message: JsonRpcRequest, context:
       if (running) running.status.recentError = "Codex sent an invalid MCP elicitation schema.";
       return;
     }
-    await context.onOutput({
-      type: "mcp_elicitation_request",
-      sessionKey: key,
-      requestId: message.id,
-      serverName: getString(params, "serverName") ?? "MCP server",
-      mode,
-      message: getString(params, "message") ?? "The MCP server requested additional input.",
-      ...(requestedSchema ? { requestedSchema } : {}),
-      ...(getString(params, "url") ? { url: getString(params, "url") } : {}),
-      ...(getString(params, "elicitationId") ? { elicitationId: getString(params, "elicitationId") } : {}),
-      ...(params?._meta !== undefined ? { meta: params._meta } : {}),
-      ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
-    });
-    const running = context.sessions.get(key);
-    if (running) running.status.waitingForUserInput = true;
+    context.registerRequest(message.id, threadId!, keys);
+    for (const sessionKey of keys) {
+      await context.onOutput({
+        type: "mcp_elicitation_request",
+        sessionKey,
+        requestId: message.id,
+        serverName: getString(params, "serverName") ?? "MCP server",
+        mode,
+        message: getString(params, "message") ?? "The MCP server requested additional input.",
+        ...(requestedSchema ? { requestedSchema } : {}),
+        ...(getString(params, "url") ? { url: getString(params, "url") } : {}),
+        ...(getString(params, "elicitationId") ? { elicitationId: getString(params, "elicitationId") } : {}),
+        ...(params?._meta !== undefined ? { meta: params._meta } : {}),
+        ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
+      });
+      const running = context.sessions.get(sessionKey);
+      if (running) running.status.waitingForUserInput = true;
+    }
     return;
   }
 
   const approvalKind = approvalKindForMethod(message.method);
   if (approvalKind) {
     const { title, body } = approvalCopy(approvalKind, params);
-    await context.onOutput({
-      type: "approval_request",
-      sessionKey: key,
-      requestId: message.id,
-      method: message.method,
-      approvalKind,
-      title,
-      body,
-      params: message.params,
-      turnId: getTurnId(params),
-      itemId: typeof params?.itemId === "string" ? params.itemId : undefined,
-    });
-    const running = context.sessions.get(key);
-    if (running) running.status.waitingForApproval = true;
+    context.registerRequest(message.id, threadId!, keys);
+    for (const sessionKey of keys) {
+      await context.onOutput({
+        type: "approval_request",
+        sessionKey,
+        requestId: message.id,
+        method: message.method,
+        approvalKind,
+        title,
+        body,
+        params: message.params,
+        turnId: getTurnId(params),
+        itemId: typeof params?.itemId === "string" ? params.itemId : undefined,
+      });
+      const running = context.sessions.get(sessionKey);
+      if (running) running.status.waitingForApproval = true;
+    }
     return;
   }
 

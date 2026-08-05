@@ -50,6 +50,12 @@ export function applyThreadMetadata(status: AgentSessionStatus, thread: Record<s
   status.threadName = getString(thread, "name") ?? status.threadName;
   const threadStatus = asRecord(thread.status);
   status.threadStatus = getString(threadStatus, "type") ?? status.threadStatus;
+  const activeFlags = Array.isArray(threadStatus?.activeFlags) ? threadStatus.activeFlags : [];
+  status.waitingForApproval = activeFlags.includes("waitingOnApproval");
+  status.waitingForUserInput = activeFlags.includes("waitingOnUserInput");
+  status.canAcceptDirectInput = typeof thread.canAcceptDirectInput === "boolean"
+    ? thread.canAcceptDirectInput
+    : status.canAcceptDirectInput;
 }
 
 export function toThreadSummary(value: unknown): AgentThreadSummary | undefined {

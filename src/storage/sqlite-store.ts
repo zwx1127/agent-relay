@@ -102,10 +102,6 @@ export class SQLiteStore implements RelayStore {
     return this.repositories.sessions.get(sessionKey);
   }
 
-  findSessionByThreadId(threadId: string, excludingSessionKey: string): AgentSessionRow | undefined {
-    return this.repositories.sessions.findByThreadId(threadId, excludingSessionKey);
-  }
-
   listRunningSessions(): AgentSessionRow[] {
     return this.repositories.sessions.listRunning();
   }

@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   deliverLiveEvent,
+  handleServerRequestResolved,
   isShareableServerRequest,
   routeServerRequestResponse,
   shareServerRequest,
+  updateClientFromBackend,
+  updateClientFromRequest,
   type ConnectedClient,
   type PendingServerRequest,
 } from "../../src/gateway/main.ts";
@@ -11,6 +14,7 @@ import {
 describe("experimental relay work Gateway approval arbitration", () => {
   test("routes the first response to the originating app-server and drops later responses", () => {
     const backendMessages: string[] = [];
+    const originMessages: string[] = [];
     const peerMessages: string[] = [];
     const backend = {
       readyState: WebSocket.OPEN,
@@ -20,7 +24,7 @@ describe("experimental relay work Gateway approval arbitration", () => {
     } as unknown as WebSocket;
     const origin = {
       data: { id: "desktop", connectedAt: 1, backend, queued: [], threads: new Set(["thread-1"]), deliveredSeq: new Map() },
-      socket: { send: () => undefined },
+      socket: { send: (raw: string) => originMessages.push(raw) },
     } as unknown as ConnectedClient;
     const peer = {
       data: { id: "relay", connectedAt: 2, queued: [], threads: new Set(["thread-1"]), deliveredSeq: new Map() },
@@ -37,10 +41,12 @@ describe("experimental relay work Gateway approval arbitration", () => {
     }, backend, clients, pending, relayed);
     const shared = JSON.parse(peerMessages[0]!) as { id: string };
 
-    expect(routeServerRequestResponse(peer.data, { id: shared.id, result: { decision: "accept" } }, "", pending, relayed)).toBe(true);
+    expect(routeServerRequestResponse(peer.data, { id: shared.id, result: { decision: "accept" } }, "", clients, pending, relayed)).toBe(true);
     expect(JSON.parse(backendMessages[0]!)).toEqual({ id: 7, result: { decision: "accept" } });
-    expect(routeServerRequestResponse(origin.data, { id: 7, result: { decision: "decline" } }, JSON.stringify({ id: 7, result: { decision: "decline" } }), pending, relayed)).toBe(true);
+    expect(routeServerRequestResponse(origin.data, { id: 7, result: { decision: "decline" } }, JSON.stringify({ id: 7, result: { decision: "decline" } }), clients, pending, relayed)).toBe(true);
     expect(backendMessages).toHaveLength(1);
+    expect(JSON.parse(originMessages[0]!)).toEqual({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: 7 } });
+    expect(JSON.parse(peerMessages[1]!)).toEqual({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: shared.id } });
   });
 
   test("shares only approval and user-input server request methods", () => {
@@ -48,6 +54,32 @@ describe("experimental relay work Gateway approval arbitration", () => {
     expect(isShareableServerRequest("item/tool/requestUserInput")).toBe(true);
     expect(isShareableServerRequest("mcpServer/elicitation/request")).toBe(true);
     expect(isShareableServerRequest("account/login/completed")).toBe(false);
+  });
+
+  test("suppresses an upstream resolved notification after notifying every participant", () => {
+    const backend = { readyState: WebSocket.OPEN, send: () => undefined } as unknown as WebSocket;
+    const originMessages: string[] = [];
+    const peerMessages: string[] = [];
+    const origin = {
+      data: { id: "desktop", connectedAt: 1, backend, queued: [], threads: new Set(["thread-1"]), deliveredSeq: new Map() },
+      socket: { send: (raw: string) => originMessages.push(raw) },
+    } as unknown as ConnectedClient;
+    const peer = {
+      data: { id: "relay", connectedAt: 2, queued: [], threads: new Set(["thread-1"]), deliveredSeq: new Map() },
+      socket: { send: (raw: string) => peerMessages.push(raw) },
+    } as unknown as ConnectedClient;
+    const clients = new Map([[origin.data.id, origin], [peer.data.id, peer]]);
+    const pending = new Map<string, PendingServerRequest>();
+    const relayed = new Map<string, string>();
+    shareServerRequest(origin, { id: 8, method: "item/tool/requestUserInput", params: { threadId: "thread-1" } }, backend, clients, pending, relayed);
+    const peerRequestId = (JSON.parse(peerMessages[0]!) as { id: string }).id;
+
+    expect(handleServerRequestResolved(origin.data, {
+      method: "serverRequest/resolved",
+      params: { threadId: "thread-1", requestId: 8 },
+    }, clients, pending)).toBe(true);
+    expect(JSON.parse(originMessages[0]!)).toEqual({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: 8 } });
+    expect(JSON.parse(peerMessages[1]!)).toEqual({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: peerRequestId } });
   });
 
   test("fans out each sequenced thread event once to currently connected clients", () => {
@@ -72,5 +104,21 @@ describe("experimental relay work Gateway approval arbitration", () => {
     expect(desktopMessages).toEqual([raw]);
     expect(otherMessages).toEqual([]);
     expect(relayMessages).toEqual([raw]);
+  });
+
+  test("tracks resume and unsubscribe only after their RPC outcomes", () => {
+    const client = { id: "relay", connectedAt: 1, queued: [], threads: new Set<string>(), deliveredSeq: new Map() };
+    updateClientFromRequest(client, { id: 1, method: "thread/resume", params: { threadId: "thread-1" } });
+    expect(client.threads.has("thread-1")).toBe(true);
+    updateClientFromBackend(client, { id: 1, error: { code: -1, message: "missing" } });
+    expect(client.threads.has("thread-1")).toBe(false);
+
+    updateClientFromRequest(client, { id: 2, method: "thread/resume", params: { threadId: "thread-1" } });
+    updateClientFromBackend(client, { id: 2, result: { thread: { id: "thread-1" } } });
+    expect(client.threads.has("thread-1")).toBe(true);
+    updateClientFromRequest(client, { id: 3, method: "thread/unsubscribe", params: { threadId: "thread-1" } });
+    expect(client.threads.has("thread-1")).toBe(true);
+    updateClientFromBackend(client, { id: 3, result: { status: "unsubscribed" } });
+    expect(client.threads.has("thread-1")).toBe(false);
   });
 });

@@ -64,7 +64,7 @@
 
 ![实验性接力工作架构：Codex 与 IM 通过同一 thread 双向互通实时进度和控制信息](docs/assets/relay-work-overview.png)
 
-它只同步 Codex、Gateway 和 Relay 都在运行并已连接后产生的最新实时进度。任一进程停止或尚未连接期间产生的输出不会保存、重放或事后追赶。请阅读[实验性接力工作](docs/zh-CN/experimental-relay-work.md)，了解手动开启方法、支持的命令、多进程与多 thread 行为、限制以及完整关闭和恢复步骤。
+使用 `/resume` 或 Relay Home 中的 **Resume** 加入已有 thread。多个原生 Codex 客户端和 IM scope 可以共享同一个 thread，不设归属限制；活动 turn 中的普通输入使用 Steer 语义，审批或输入请求由第一个回答的客户端胜出。它只同步 Codex、Gateway 和 Relay 都在运行并已连接后产生的最新实时进度，不提供 Queue 操作，也不会保存、重放或事后追赶离线输出。请阅读[实验性接力工作](docs/zh-CN/experimental-relay-work.md)，了解手动开启方法、多客户端行为、限制以及完整关闭和恢复步骤。
 
 ## 快速开始
 

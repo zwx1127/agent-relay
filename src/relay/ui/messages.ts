@@ -3,7 +3,7 @@ import { renderTelegramText, truncateForTelegramLabel, type RenderedTelegramText
 import { UI_BUTTON } from "./constants.ts";
 import { bold, code } from "./text-parts.ts";
 
-export function formatHelpMessage(experimentalRelayWorkEnabled = false): RenderedTelegramText {
+export function formatHelpMessage(): RenderedTelegramText {
   const parts: TelegramTextPart[] = [
     bold("Relay commands"),
     "\n\n",
@@ -19,11 +19,6 @@ export function formatHelpMessage(experimentalRelayWorkEnabled = false): Rendere
     "- ", code("/new [name]"), " - Start a fresh Codex chat and keep Relay display history.\n",
     "- ", code("/clear [name]"), " - Clear Relay display state and start a fresh chat.\n",
     "- ", code("/resume [search]"), " - Resume a recent Codex thread.\n",
-    ...(experimentalRelayWorkEnabled ? [
-      "- ", code("/threads [search]"), " - List threads available through the experimental shared Gateway.\n",
-      "- ", code("/attach <thread-id>"), " - Attach this IM scope to one shared thread.\n",
-      "- ", code("/detach"), " - Detach this IM scope from its shared thread.\n",
-    ] satisfies TelegramTextPart[] : []),
     "- ", code("/fork"), " - Fork the current thread.\n",
     "- ", code("/side <prompt>"), ", ", code("/btw <prompt>"), " - Ask in an ephemeral side conversation.\n",
     "- ", code("/rename <name>"), " - Rename the current thread.\n",

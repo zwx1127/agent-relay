@@ -141,7 +141,7 @@ export function codexQuestionConfirmKeyboard(token: string): InlineKeyboardMarku
   };
 }
 
-export function consoleKeyboard(status: { workspaceName?: string; running?: boolean }, mode: HomeStatusMode): InlineKeyboardMarkup {
+export function consoleKeyboard(status: { workspaceName?: string; running?: boolean }, mode: HomeStatusMode, relayWorkEnabled = false): InlineKeyboardMarkup {
   const rows: InlineKeyboardMarkup["inline_keyboard"] = [];
   rows.push([
     { text: UI_BUTTON.workspace, callback_data: "ar:w" },
@@ -149,7 +149,10 @@ export function consoleKeyboard(status: { workspaceName?: string; running?: bool
     { text: UI_BUTTON.refresh, callback_data: "ar:s" },
   ]);
   if (status.workspaceName) {
-    rows.push([{ text: UI_BUTTON.stop, callback_data: "ar:stop" }]);
+    rows.push([
+      ...(relayWorkEnabled ? [{ text: UI_BUTTON.resume, callback_data: "ar:r" }] : []),
+      { text: UI_BUTTON.stop, callback_data: "ar:stop" },
+    ]);
   }
   return {
     inline_keyboard: rows,

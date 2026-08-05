@@ -190,7 +190,7 @@ export class WorkspaceFlow {
   private async renderHomeOnCallback(message: CallbackMessage): Promise<void> {
     const status = this.deps.statusView(message.conversationId);
     const mode = this.deps.store.getHomeStatusMode(message.conversationId);
-    const result = await this.deps.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
+    const result = await this.deps.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode, this.deps.config.experimentalRelayWorkEnabled));
     this.trackControlMessage(message.conversationId, result);
     this.deps.logger.info("router.workspace_home_rendered", {
       conversation_id: message.conversationId,

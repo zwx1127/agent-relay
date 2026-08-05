@@ -30,12 +30,26 @@ describe("experimental Codex Gateway transport", () => {
             thread: {
               id: params?.threadId,
               status: { type: "active" },
-              turns: [{ id: "active-turn", status: "inProgress", items: [] }],
             },
+            initialTurnsPage: { data: [{ id: "active-turn", status: "inProgress", items: [] }], nextCursor: null },
             model: "gpt-test",
           });
           else if (method === "thread/backgroundTerminals/list") {
             send({ data: [] });
+            socket.send(JSON.stringify({
+              id: "shared-question",
+              method: "item/tool/requestUserInput",
+              params: {
+                threadId: "shared-thread",
+                turnId: "active-turn",
+                itemId: "question",
+                questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [] }],
+              },
+            }));
+            setTimeout(() => socket.send(JSON.stringify({
+              method: "serverRequest/resolved",
+              params: { threadId: "shared-thread", requestId: "shared-question" },
+            })), 5);
             socket.send(JSON.stringify({
               method: "item/agentMessage/delta",
               params: { threadId: "shared-thread", turnId: "active-turn", itemId: "reply", delta: "live after connection" },
@@ -61,9 +75,13 @@ describe("experimental Codex Gateway transport", () => {
       await Bun.sleep(20);
       await driver.send(status.sessionKey, "steer from IM");
       const resume = received.find((message) => message.method === "thread/resume");
-      expect((resume?.params as Record<string, unknown>)?.excludeTurns).toBe(false);
+      expect((resume?.params as Record<string, unknown>)?.excludeTurns).toBe(true);
+      expect((resume?.params as Record<string, unknown>)?.initialTurnsPage).toEqual({ limit: 1, sortDirection: "desc", itemsView: "summary" });
       expect(received.some((message) => message.method === "turn/steer")).toBe(true);
       expect(outputs).toContainEqual(expect.objectContaining({ type: "message", chunk: "live after connection" }));
+      expect(outputs).toContainEqual(expect.objectContaining({ type: "user_input_request", requestId: "shared-question" }));
+      expect(outputs).toContainEqual({ type: "server_request_resolved", sessionKey: status.sessionKey, requestId: "shared-question" });
+      expect(driver.getStatus(status.sessionKey)?.activeTurnId).toBe("active-turn");
     } finally {
       server.stop(true);
     }

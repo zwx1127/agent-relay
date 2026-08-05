@@ -8,7 +8,7 @@ export function shortToken(): string {
 }
 
 export function codexRequestKey(sessionKeyValue: string, requestId: string | number): string {
-  return `${sessionKeyValue}:${String(requestId)}`;
+  return `${sessionKeyValue}:${typeof requestId}:${String(requestId)}`;
 }
 
 export function workspaceCallbackData(name: string): string {
@@ -41,6 +41,7 @@ export function workspaceCallbackToken(name: string): string {
 
 export function isConsolePayload(payload: string): boolean {
   return payload === "s"
+    || payload === "r"
     || payload === "w"
     || payload === "n"
     || payload.startsWith("n:")

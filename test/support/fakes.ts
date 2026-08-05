@@ -94,6 +94,7 @@ export class FakeAgent implements AgentDriver {
   statuses = new Map<string, AgentSessionStatus>();
   sent: Array<{ key: string; text: string; options?: AgentSendOptions }> = [];
   stopped: string[] = [];
+  released: string[] = [];
   interrupted: Array<{ key: string; turnId?: string }> = [];
   responses: Array<{ key: string; requestId: string | number; result: unknown }> = [];
   builtins: Array<{ key: string; command: AgentBuiltinCommand }> = [];
@@ -201,6 +202,11 @@ export class FakeAgent implements AgentDriver {
     const status = this.statuses.get(key);
     if (status) status.threadGoal = this.goal;
     return this.goal;
+  }
+
+  async release(key: string): Promise<void> {
+    this.released.push(key);
+    this.statuses.delete(key);
   }
 
   async setThreadGoal(key: string, goal: AgentThreadGoalSetOptions): Promise<AgentThreadGoal> {

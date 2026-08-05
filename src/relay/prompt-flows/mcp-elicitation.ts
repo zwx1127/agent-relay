@@ -1,6 +1,7 @@
 import type { AgentDriver, AgentMcpElicitationRequestEvent } from "../../ports/agent.ts";
-import type { ImAdapter, InboundMessage, InlineKeyboardMarkup, SendMessageOptions } from "../../ports/im.ts";
+import type { EditMessageTextOptions, ImAdapter, InboundMessage, InlineKeyboardMarkup, SendMessageOptions } from "../../ports/im.ts";
 import type { ConversationId, MessageId } from "../../domain/ids.ts";
+import type { Logger } from "../../domain/logger.ts";
 import { parseSessionKey } from "../../domain/session.ts";
 import { parseChatScopeKey } from "../../domain/scope.ts";
 import type { RelayStore } from "../../storage/store.ts";
@@ -20,7 +21,9 @@ export interface McpElicitationDeps {
   store: RelayStore;
   agent: Pick<AgentDriver, "respond">;
   adapter: Pick<ImAdapter, "capabilities">;
+  logger: Logger;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
+  editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: Omit<EditMessageTextOptions, "entities" | "parseMode">): Promise<void>;
   renderStrictCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
   markActiveTask(sessionKey: string, status: "blocked" | "running", turnId?: string): Promise<void>;
 }
@@ -161,8 +164,28 @@ export class McpElicitationFlow {
       if (request.sessionKey !== sessionKey) continue;
       clearTimeout(request.timer);
       this.requests.delete(key);
-      void this.deps.agent.respond?.(request.sessionKey, request.requestId, { action: "cancel", content: null, _meta: null }).catch(() => undefined);
     }
+  }
+
+  async resolve(sessionKey: string, requestId: string | number): Promise<void> {
+    const key = codexRequestKey(sessionKey, requestId);
+    const request = this.requests.get(key);
+    if (!request) return;
+    clearTimeout(request.timer);
+    this.requests.delete(key);
+    if (request.promptMessageId === undefined) return;
+    this.deps.store.deletePendingPrompt(request.scopeKey, request.promptMessageId);
+    await this.deps.editRendered(
+      request.scopeKey,
+      messageWithTitle("Codex request resolved.", "Answered from another connected client."),
+      { messageId: request.promptMessageId, replyMarkup: { inline_keyboard: [] } },
+    ).catch((error) => {
+      this.deps.logger.warn("router.mcp_resolved_prompt_edit_failed", {
+        session_key: sessionKey,
+        request_id: String(requestId),
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    });
   }
 
   private async sendFormStep(conversationId: ConversationId, sessionKey: string, state: Record<string, unknown>, expiresAt: number, forceInput = false): Promise<void> {

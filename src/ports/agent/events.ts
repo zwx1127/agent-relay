@@ -11,7 +11,14 @@ export type AgentOutputEvent =
   | AgentUserInputRequestEvent
   | AgentApprovalRequestEvent
   | AgentMcpElicitationRequestEvent
+  | AgentServerRequestResolvedEvent
   | AgentThreadLifecycleEvent;
+
+export interface AgentServerRequestResolvedEvent {
+  type: "server_request_resolved";
+  sessionKey: string;
+  requestId: string | number;
+}
 
 /**
  * Streaming text output from an agent turn.

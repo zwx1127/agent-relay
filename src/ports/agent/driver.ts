@@ -29,6 +29,8 @@ export interface AgentDriver {
   start(options: StartAgentOptions): Promise<AgentSessionStatus>;
   send(sessionKey: string, text: string, options?: AgentSendOptions): Promise<AgentSendResult>;
   stop(sessionKey: string): Promise<void>;
+  /** Release this logical client without interrupting a shared thread. */
+  release?(sessionKey: string): Promise<void>;
   getStatus(sessionKey: string): AgentSessionStatus | undefined;
   interrupt?(sessionKey: string): Promise<AgentInterruptResult>;
   respond?(sessionKey: string, requestId: string | number, result: unknown): Promise<void>;

@@ -15,6 +15,7 @@ import type {
   AgentDriver,
   AgentExitHandler,
   AgentModelSummary,
+  AgentOutputEvent,
   AgentOutputHandler,
   AgentSessionStatus,
   AgentSideConversationResult,
@@ -50,6 +51,17 @@ export interface CodexDriverOptions {
   env?: Record<string, string>;
 }
 
+function interactiveRequestKey(requestId: string | number): string {
+  return `${typeof requestId}:${String(requestId)}`;
+}
+
+interface PendingInteractiveRequest {
+  threadId: string;
+  sessionKeys: Set<string>;
+  resolved: boolean;
+  resolutionEmitted: boolean;
+}
+
 export class CodexDriver implements AgentDriver {
   readonly providerId = "codex";
   readonly capabilities = {
@@ -76,7 +88,8 @@ export class CodexDriver implements AgentDriver {
 
   private readonly sessions = new Map<string, RunningSession>();
   // Codex notifications are thread-scoped, while relay routing is session-scoped.
-  private readonly threadToSession = new Map<string, string>();
+  private readonly threadToSessions = new Map<string, Set<string>>();
+  private readonly pendingInteractiveRequests = new Map<string, PendingInteractiveRequest>();
   // Sends for the same relay session must be ordered so steering input cannot
   // overtake the turn/start request that created the active turn.
   private readonly inputQueues = new Map<string, Promise<{ turnId?: string }>>();
@@ -141,7 +154,13 @@ export class CodexDriver implements AgentDriver {
     });
 
     const result = await this.request(options.threadId ? "thread/resume" : "thread/start", {
-      ...(options.threadId ? { threadId: options.threadId, excludeTurns: !this.options.gatewayUrl } : {}),
+      ...(options.threadId ? {
+        threadId: options.threadId,
+        excludeTurns: true,
+        ...(this.options.gatewayUrl ? {
+          initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "summary" },
+        } : {}),
+      } : {}),
       cwd: options.workspacePath,
       approvalPolicy: this.options.approval,
       approvalsReviewer: "user",
@@ -155,14 +174,15 @@ export class CodexDriver implements AgentDriver {
     status.appServerVersion = this.appServerVersion;
     applySessionMetadata(status, result);
     if (this.options.gatewayUrl && options.threadId) this.applyResumedTurnState(status, result);
-    this.threadToSession.set(threadId, key);
-    this.sessions.set(key, { status, backgroundTerminals: new BackgroundTerminalTracker() });
+    const sharedSession = this.firstSessionForThread(threadId);
+    this.sessions.set(key, { status, backgroundTerminals: sharedSession?.backgroundTerminals ?? new BackgroundTerminalTracker() });
+    this.bindSession(threadId, key);
+    this.mirrorThreadStatus(key);
     try {
       const terminals = asRecord(await this.request("thread/backgroundTerminals/list", { threadId, limit: 1 }));
       if (!Array.isArray(terminals?.data)) throw new Error("thread/backgroundTerminals/list returned an invalid response.");
     } catch (error) {
-      this.threadToSession.delete(threadId);
-      this.sessions.delete(key);
+      await this.release(key);
       throw new Error(`Codex ${this.appServerVersion ?? "unknown"} is missing required background-terminal APIs: ${error instanceof Error ? error.message : String(error)}`);
     }
 
@@ -226,15 +246,22 @@ export class CodexDriver implements AgentDriver {
         stale_turn_id: running.status.activeTurnId,
       });
       running.status.activeTurnId = undefined;
+      this.mirrorThreadStatus(key);
       result = await this.request("turn/start", { threadId: running.status.threadId, input, ...(collaborationMode ? { collaborationMode } : {}) });
     }
     updateActiveTurnFromResult(running, result);
+    this.mirrorThreadStatus(key);
     return { turnId: getTurnId(result) };
   }
 
   private applyResumedTurnState(status: AgentSessionStatus, result: unknown): void {
     const thread = asRecord(asRecord(result)?.thread);
-    const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+    const initialTurnsPage = asRecord(asRecord(result)?.initialTurnsPage);
+    const turns = Array.isArray(initialTurnsPage?.data)
+      ? initialTurnsPage.data
+      : Array.isArray(thread?.turns)
+        ? thread.turns
+        : [];
     for (let index = turns.length - 1; index >= 0; index -= 1) {
       const turn = asRecord(turns[index]);
       if (getString(turn, "status") !== "inProgress") continue;
@@ -267,13 +294,28 @@ export class CodexDriver implements AgentDriver {
           error: error instanceof Error ? error : new Error(String(error)),
         });
       });
-      running.status.activeTurnId = undefined;
+      this.clearThreadBusyState(running.status.threadId);
     }
+    await this.release(key);
+    this.logger.info("codex.session_stopped", { session_key: key });
+  }
+
+  async release(key: string): Promise<void> {
+    const running = this.sessions.get(key);
+    if (!running) return;
+    const threadId = running.status.threadId;
     running.status.running = false;
-    if (running.status.threadId) this.threadToSession.delete(running.status.threadId);
     this.sessions.delete(key);
     this.inputQueues.delete(key);
-    this.logger.info("codex.session_stopped", { session_key: key });
+    for (const request of this.pendingInteractiveRequests.values()) request.sessionKeys.delete(key);
+    if (!threadId || !this.unbindSession(threadId, key)) return;
+    await this.request("thread/unsubscribe", { threadId }).catch((error) => {
+      this.logger.warn("codex.thread_unsubscribe_failed", {
+        session_key: key,
+        thread_id: threadId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    });
   }
 
   getStatus(key: string): AgentSessionStatus | undefined {
@@ -294,6 +336,7 @@ export class CodexDriver implements AgentDriver {
       });
       running.status.waitingForApproval = false;
       running.status.waitingForUserInput = false;
+      this.mirrorThreadStatus(key);
       return { interrupted: false };
     }
 
@@ -318,24 +361,31 @@ export class CodexDriver implements AgentDriver {
         thread_id: running.status.threadId,
         stale_turn_id: turnId,
       });
-      running.status.activeTurnId = undefined;
-      running.status.waitingForApproval = false;
-      running.status.waitingForUserInput = false;
+      this.clearThreadBusyState(running.status.threadId);
       return { interrupted: false, turnId, stale: true };
     }
-    running.status.activeTurnId = undefined;
-    running.status.waitingForApproval = false;
-    running.status.waitingForUserInput = false;
+    this.clearThreadBusyState(running.status.threadId);
     return { interrupted: true, turnId };
   }
 
   async respond(sessionKey: string, requestId: string | number, result: unknown): Promise<void> {
+    const request = this.pendingInteractiveRequests.get(interactiveRequestKey(requestId));
+    if (request) {
+      if (!request.sessionKeys.has(sessionKey)) throw new Error("This Codex request does not belong to the current Relay scope.");
+      if (request.resolved) throw new Error("This Codex request has already been resolved.");
+      request.resolved = true;
+      try {
+        await this.rpc.respond(requestId, result);
+      } catch (error) {
+        request.resolved = false;
+        throw error;
+      }
+      await this.finishInteractiveRequest(requestId, request);
+      return;
+    }
     await this.rpc.respond(requestId, result);
     const running = this.sessions.get(sessionKey);
-    if (running) {
-      running.status.waitingForApproval = false;
-      running.status.waitingForUserInput = false;
-    }
+    if (running) this.clearThreadWaitingState(running.status.threadId);
   }
 
   async runBuiltinCommand(key: string, command: AgentBuiltinCommand): Promise<AgentBuiltinResult> {
@@ -422,11 +472,22 @@ export class CodexDriver implements AgentDriver {
     });
     const threadId = getThreadId(result);
     if (!threadId) throw new Error("Codex app-server did not return a forked thread id.");
-    if (running.status.threadId) this.threadToSession.delete(running.status.threadId);
+    const previousThreadId = running.status.threadId;
+    const shouldUnsubscribePrevious = previousThreadId ? this.unbindSession(previousThreadId, key) : false;
     running.status.threadId = threadId;
-    running.backgroundTerminals.clear();
+    const sharedSession = this.firstSessionForThread(threadId);
+    running.backgroundTerminals = sharedSession?.backgroundTerminals ?? new BackgroundTerminalTracker();
     applySessionMetadata(running.status, result);
-    this.threadToSession.set(threadId, key);
+    this.bindSession(threadId, key);
+    if (shouldUnsubscribePrevious && previousThreadId) {
+      await this.request("thread/unsubscribe", { threadId: previousThreadId }).catch((error) => {
+        this.logger.warn("codex.thread_unsubscribe_failed", {
+          session_key: key,
+          thread_id: previousThreadId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      });
+    }
     return { threadId, threadName: running.status.threadName };
   }
 
@@ -810,14 +871,22 @@ export class CodexDriver implements AgentDriver {
     // Ephemeral side-conversation notifications are consumed locally and never
     // update the parent relay session or transcript.
     if (sideConversation && await this.handleSideConversationNotification(sideConversation, message, params)) return;
-    const key = threadId ? this.threadToSession.get(threadId) : undefined;
+    if (message.method === "serverRequest/resolved") {
+      const requestId = params?.requestId;
+      if (typeof requestId === "string" || typeof requestId === "number") await this.resolveInteractiveRequest(requestId);
+      return;
+    }
+    const keys = threadId ? this.sessionKeysForThread(threadId) : [];
+    const key = keys[0];
 
     if (message.method === "thread/started") {
       const startedThreadId = getThreadId({ thread: params?.thread });
-      const session = startedThreadId ? this.threadToSession.get(startedThreadId) : undefined;
-      const running = session ? this.sessions.get(session) : undefined;
-      if (running) applyThreadMetadata(running.status, asRecord(params?.thread));
-      this.logger.debug("codex.thread_started", { thread_id: startedThreadId, session_key: session });
+      const sessionKeys = startedThreadId ? this.sessionKeysForThread(startedThreadId) : [];
+      for (const sessionKey of sessionKeys) {
+        const running = this.sessions.get(sessionKey);
+        if (running) applyThreadMetadata(running.status, asRecord(params?.thread));
+      }
+      this.logger.debug("codex.thread_started", { thread_id: startedThreadId, session_keys: sessionKeys.join(",") });
       return;
     }
 
@@ -830,6 +899,7 @@ export class CodexDriver implements AgentDriver {
     const running = this.sessions.get(key);
     if (!running) return;
     await this.flushGlobalNotices(key);
+    try {
 
     if (message.method === "item/reasoning/summaryTextDelta") {
       const delta = getString(params, "delta");
@@ -870,7 +940,7 @@ export class CodexDriver implements AgentDriver {
       const delta = typeof params?.delta === "string" ? params.delta : "";
       const turnId = getTurnId(params);
       const itemId = typeof params?.itemId === "string" ? params.itemId : undefined;
-      if (delta) await this.onOutput({ type: "message", sessionKey: key, chunk: delta, turnId, itemId });
+      if (delta) await this.emitOutputForSessions(key, (sessionKeyValue) => ({ type: "message", sessionKey: sessionKeyValue, chunk: delta, turnId, itemId }));
       return;
     }
 
@@ -878,7 +948,7 @@ export class CodexDriver implements AgentDriver {
       const delta = typeof params?.delta === "string" ? params.delta : "";
       const turnId = getTurnId(params);
       const itemId = typeof params?.itemId === "string" ? params.itemId : undefined;
-      if (delta) await this.onOutput({ type: "message", sessionKey: key, chunk: delta, turnId, itemId });
+      if (delta) await this.emitOutputForSessions(key, (sessionKeyValue) => ({ type: "message", sessionKey: sessionKeyValue, chunk: delta, turnId, itemId }));
       return;
     }
 
@@ -911,10 +981,11 @@ export class CodexDriver implements AgentDriver {
       const activity = itemActivity(item, false);
       if (activity) await this.emitActivity(key, activity, params, getString(item, "id"));
       if (item?.type === "exitedReviewMode" && typeof item.review === "string" && item.review) {
-        await this.onOutput({ type: "message", sessionKey: key, chunk: item.review, turnId: getTurnId(params), itemId: getString(item, "id") });
+        const review = item.review;
+        await this.emitOutputForSessions(key, (sessionKeyValue) => ({ type: "message", sessionKey: sessionKeyValue, chunk: review, turnId: getTurnId(params), itemId: getString(item, "id") }));
       }
       if (item?.type === "imageGeneration") {
-        await this.onOutput(imageOutputEvent(key, item, getTurnId(params)));
+        await this.emitOutputForSessions(key, (sessionKeyValue) => imageOutputEvent(sessionKeyValue, item, getTurnId(params)));
       }
       return;
     }
@@ -922,7 +993,7 @@ export class CodexDriver implements AgentDriver {
     if (message.method === "rawResponseItem/completed") {
       const item = asRecord(params?.item);
       if (item?.type === "image_generation_call") {
-        await this.onOutput(imageOutputEvent(key, item, getTurnId(params)));
+        await this.emitOutputForSessions(key, (sessionKeyValue) => imageOutputEvent(sessionKeyValue, item, getTurnId(params)));
       }
       return;
     }
@@ -993,7 +1064,7 @@ export class CodexDriver implements AgentDriver {
       } else {
         clearRecentError(running);
       }
-      await this.onOutput(completed);
+      await this.emitOutputForSessions(key, (sessionKeyValue) => ({ ...completed, sessionKey: sessionKeyValue }));
       return;
     }
 
@@ -1028,11 +1099,14 @@ export class CodexDriver implements AgentDriver {
       const initiatedByClient = this.requestedLifecycle.get(threadId!) === action;
       this.requestedLifecycle.delete(threadId!);
       this.requestedGoalMutation.delete(threadId!);
-      running.status.running = false;
-      this.threadToSession.delete(threadId!);
-      this.sessions.delete(key);
-      this.inputQueues.delete(key);
-      await this.onOutput({ type: "thread_lifecycle", sessionKey: key, threadId: threadId!, action, ...(initiatedByClient ? { initiatedByClient: true } : {}) });
+      this.threadToSessions.delete(threadId!);
+      for (const sessionKeyValue of keys) {
+        const session = this.sessions.get(sessionKeyValue);
+        if (session) session.status.running = false;
+        this.sessions.delete(sessionKeyValue);
+        this.inputQueues.delete(sessionKeyValue);
+        await this.onOutput({ type: "thread_lifecycle", sessionKey: sessionKeyValue, threadId: threadId!, action, ...(initiatedByClient ? { initiatedByClient: true } : {}) });
+      }
       return;
     }
 
@@ -1111,6 +1185,9 @@ export class CodexDriver implements AgentDriver {
       await this.emitActivity(key, { kind: "notice", level: "error", title: "Codex error", ...(running.status.recentError ? { detail: running.status.recentError } : {}) }, params);
       return;
     }
+    } finally {
+      this.mirrorThreadStatus(key);
+    }
   }
 
   private async handleSideConversationNotification(
@@ -1160,14 +1237,127 @@ export class CodexDriver implements AgentDriver {
     const running = this.sessions.get(sessionKeyValue);
     const turnId = getTurnId(params) ?? running?.status.activeTurnId;
     const threadId = running?.status.threadId;
-    await this.onOutput({
+    await this.emitOutputForSessions(sessionKeyValue, (targetKey) => ({
       type: "activity",
-      sessionKey: sessionKeyValue,
+      sessionKey: targetKey,
       activity,
       ...(threadId ? { threadId } : {}),
       ...(turnId ? { turnId } : {}),
       ...(itemId ? { itemId } : {}),
+    }));
+  }
+
+  private async emitOutputForSessions(
+    sessionKeyValue: string,
+    createEvent: (targetKey: string) => AgentOutputEvent,
+  ): Promise<void> {
+    const running = this.sessions.get(sessionKeyValue);
+    const keys = running?.status.threadId ? this.sessionKeysForThread(running.status.threadId) : [sessionKeyValue];
+    for (const key of keys) await this.onOutput(createEvent(key));
+  }
+
+  private bindSession(threadId: string, key: string): void {
+    const keys = this.threadToSessions.get(threadId) ?? new Set<string>();
+    keys.add(key);
+    this.threadToSessions.set(threadId, keys);
+  }
+
+  /** Returns true when the app-server connection no longer has a logical subscriber. */
+  private unbindSession(threadId: string, key: string): boolean {
+    const keys = this.threadToSessions.get(threadId);
+    if (!keys) return false;
+    keys.delete(key);
+    if (keys.size > 0) return false;
+    this.threadToSessions.delete(threadId);
+    return true;
+  }
+
+  private sessionKeysForThread(threadId: string): string[] {
+    return [...(this.threadToSessions.get(threadId) ?? [])].filter((key) => this.sessions.has(key));
+  }
+
+  private firstSessionForThread(threadId: string): RunningSession | undefined {
+    const key = this.sessionKeysForThread(threadId)[0];
+    return key ? this.sessions.get(key) : undefined;
+  }
+
+  private mirrorThreadStatus(sourceKey: string): void {
+    const source = this.sessions.get(sourceKey);
+    const threadId = source?.status.threadId;
+    if (!source || !threadId) return;
+    for (const key of this.sessionKeysForThread(threadId)) {
+      if (key === sourceKey) continue;
+      const target = this.sessions.get(key);
+      if (!target) continue;
+      const identity = {
+        sessionKey: target.status.sessionKey,
+        conversationId: target.status.conversationId,
+        scopeKey: target.status.scopeKey,
+        workspaceName: target.status.workspaceName,
+        workspacePath: target.status.workspacePath,
+        startedAt: target.status.startedAt,
+      };
+      const identityKeys = new Set(Object.keys(identity));
+      const sourceRecord = source.status as unknown as Record<string, unknown>;
+      const targetRecord = target.status as unknown as Record<string, unknown>;
+      for (const property of Object.keys(targetRecord)) {
+        if (!identityKeys.has(property) && !(property in sourceRecord)) delete targetRecord[property];
+      }
+      Object.assign(target.status, source.status, identity);
+    }
+  }
+
+  private clearThreadBusyState(threadId: string | undefined): void {
+    if (!threadId) return;
+    for (const key of this.sessionKeysForThread(threadId)) {
+      const running = this.sessions.get(key);
+      if (!running) continue;
+      running.status.activeTurnId = undefined;
+      running.status.waitingForApproval = false;
+      running.status.waitingForUserInput = false;
+    }
+  }
+
+  private clearThreadWaitingState(threadId: string | undefined): void {
+    if (!threadId) return;
+    for (const key of this.sessionKeysForThread(threadId)) {
+      const running = this.sessions.get(key);
+      if (!running) continue;
+      running.status.waitingForApproval = false;
+      running.status.waitingForUserInput = false;
+    }
+  }
+
+  private registerInteractiveRequest(requestId: string | number, threadId: string, sessionKeys: string[]): void {
+    this.pendingInteractiveRequests.set(interactiveRequestKey(requestId), {
+      threadId,
+      sessionKeys: new Set(sessionKeys),
+      resolved: false,
+      resolutionEmitted: false,
     });
+  }
+
+  private async resolveInteractiveRequest(requestId: string | number): Promise<void> {
+    const request = this.pendingInteractiveRequests.get(interactiveRequestKey(requestId));
+    if (!request) return;
+    request.resolved = true;
+    await this.finishInteractiveRequest(requestId, request);
+  }
+
+  private async finishInteractiveRequest(requestId: string | number, request: PendingInteractiveRequest): Promise<void> {
+    this.clearThreadWaitingState(request.threadId);
+    if (!request.resolutionEmitted) {
+      request.resolutionEmitted = true;
+      for (const key of request.sessionKeys) {
+        if (this.sessions.get(key)?.status.threadId === request.threadId) {
+          await this.onOutput({ type: "server_request_resolved", sessionKey: key, requestId });
+        }
+      }
+    }
+    const mapKey = interactiveRequestKey(requestId);
+    setTimeout(() => {
+      if (this.pendingInteractiveRequests.get(mapKey) === request) this.pendingInteractiveRequests.delete(mapKey);
+    }, 5 * 60_000).unref();
   }
 
   private queueGlobalNotice(notice: PendingGlobalNotice): void {
@@ -1193,12 +1383,13 @@ export class CodexDriver implements AgentDriver {
   private async handleServerRequest(message: JsonRpcRequest): Promise<void> {
     await handleCodexServerRequest(message, {
       sessions: this.sessions,
-      threadToSession: this.threadToSession,
+      threadToSessions: this.threadToSessions,
       sideConversations: this.sideConversations,
       rpc: this.rpc,
       logger: this.logger,
       onOutput: this.onOutput,
       emitActivity: (key, activity, params) => this.emitActivity(key, activity, params),
+      registerRequest: (requestId, threadId, sessionKeys) => this.registerInteractiveRequest(requestId, threadId, sessionKeys),
     });
   }
 
@@ -1242,7 +1433,8 @@ export class CodexDriver implements AgentDriver {
     const sessions = [...this.sessions.values()];
     const sideConversations = [...this.sideConversations.values()];
     this.sessions.clear();
-    this.threadToSession.clear();
+    this.threadToSessions.clear();
+    this.pendingInteractiveRequests.clear();
     this.sideConversations.clear();
     this.requestedLifecycle.clear();
     this.requestedGoalMutation.clear();

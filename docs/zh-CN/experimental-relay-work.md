@@ -63,16 +63,17 @@ Windows 使用用户环境变量；macOS 还会创建用户级 LaunchAgent，确
 
 - 多个桌面版、CLI 或 Relay 客户端可以同时连接同一个 Gateway；Gateway 不会为每个客户端再启动 app-server。
 - 每个客户端拥有独立 WebSocket 连接，但 thread 状态仍由同一个 app-server 管理。
-- 当前工作区只有一个活动 thread 时，Relay 自动绑定。
-- 存在多个活动 thread 时，Relay 显示选择器，不进行猜测。
-- `/threads [search]` 列出共享 thread。
-- `/attach <thread-id-or-unique-prefix>` 将当前 IM scope 绑定到指定 thread。
-- `/detach` 解除当前 scope 的绑定。
-- 一条 thread 同时只能对应一个可写 IM scope；移动到其他聊天、Telegram topic 或 Lark thread 前必须先解除原绑定。
+- 使用 `/resume [search]` 或 Relay Home 中的 **Resume**，把 IM scope 绑定到已有 thread。两个入口复用同一个选择器和 Codex TUI 的切换语义。
+- 接力工作不会因为收到普通 IM 消息就自动绑定活动 thread 或之前持久化的 thread。没有显式执行 `/resume` 时，该消息会启动新 thread。
+- 当来源 scope 存在活动 turn、审批、用户输入请求或忙碌的 Relay task 时，`/resume` 会拒绝切换。来源 scope 空闲时，可以恢复一个已经活动的目标 thread。
+- 多个原生 Codex 客户端和多个 IM scope 可以恢复同一个 thread；不存在单写者或归属限制，由用户决定哪个已连接客户端发送输入。
+- 关闭或切换一个客户端只会释放它自己的订阅。Relay 最后一个逻辑 scope 离开后才发送 `thread/unsubscribe`，释放客户端不会停止共享工作；显式使用 **Interrupt** 或 **Stop** 仍会取消共享的活动 turn。
 
-Gateway 只同步实时事件：Codex、Gateway、Relay 都已启动，并且客户端已经关联同一 thread 后产生的新进度才会转发。Gateway 不保存进度历史，Relay 不维护消费游标，也不会在重连后补发任一进程停止或尚未启动期间的输出。恢复 thread 只恢复继续工作的当前状态，不会把离线输出追赶到 IM。
+Gateway 只同步实时事件：Codex、Gateway、Relay 都已启动，并且客户端已经关联同一 thread 后产生的新进度才会转发。Gateway 不保存进度历史，Relay 不维护消费游标，也不会在重连后补发任一进程停止或尚未启动期间的输出。恢复时只读取用于识别当前活动状态的最新 turn 摘要，不会渲染已完成历史，也不会把离线输出追赶到 IM。
 
-同一项审批或用户输入请求可以显示在关联该 thread 的多个客户端上。Gateway 只接受第一份有效响应，后续响应会被丢弃。Relay 对同一 session 的发送仍会串行执行。
+同一项审批、用户输入请求或 MCP elicitation 可以显示在关联该 thread 的所有已连接客户端上。第一份有效响应胜出，后续响应会被拒绝，resolved 通知会清除其他客户端上的重复控件。
+
+活动 turn 期间发送的普通 IM 输入与 Codex TUI 的 **Enter / Steer** 语义一致，并携带预期的活动 turn id。接力工作不提供 TUI 的 **Tab / Queue** 操作，也不会在 Gateway 或 thread 层增加输入锁或队列；Relay 仅保持每个 scope 内部的发送顺序。
 
 ## 关闭并恢复默认行为
 
@@ -88,7 +89,7 @@ bun run relay-work disable
 EXPERIMENTAL_RELAY_WORK_ENABLED=false
 ```
 
-Relay 重启后会恢复原有本地 stdio `CodexDriver` 路径：不读取 Gateway 状态、不注册共享 thread 命令，也不修改桌面环境。
+Relay 重启后会恢复原有本地 stdio `CodexDriver` 路径：不读取 Gateway 状态、不添加 Relay Home Resume 动作，也不修改桌面环境。
 
 ## 故障策略
 

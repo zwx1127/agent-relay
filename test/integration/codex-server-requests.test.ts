@@ -6,6 +6,42 @@ import { cleanupCodexHarness, fakeCodexBin, readLog, sleep } from "../support/co
 afterEach(cleanupCodexHarness);
 
 describe("CodexDriver server requests and recovery", () => {
+  test("fans one shared thread out to multiple Relay scopes and unsubscribes only after the last release", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => { events.push(event); },
+      () => undefined,
+    );
+
+    const first = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd(), threadId: "thread-1" });
+    const second = await driver.start({ conversationId: 2, workspaceName: "demo", workspacePath: process.cwd(), threadId: "thread-1" });
+    await driver.send(first.sessionKey, "ask");
+    await sleep(100);
+
+    expect(events.filter((event) => event.type === "user_input_request").map((event) => event.sessionKey)).toEqual([
+      first.sessionKey,
+      second.sessionKey,
+    ]);
+    expect(driver.getStatus(first.sessionKey)?.waitingForUserInput).toBe(true);
+    expect(driver.getStatus(second.sessionKey)?.waitingForUserInput).toBe(true);
+
+    await driver.respond(second.sessionKey, 900, { answers: { mode: { answers: ["Fast"] } } });
+    expect(events.filter((event) => event.type === "server_request_resolved").map((event) => event.sessionKey)).toEqual([
+      first.sessionKey,
+      second.sessionKey,
+    ]);
+    expect(driver.getStatus(first.sessionKey)?.activeTurnId).toBe("turn-1");
+    expect(driver.getStatus(second.sessionKey)?.activeTurnId).toBe("turn-1");
+    await expect(driver.respond(first.sessionKey, 900, { answers: { mode: { answers: ["Slow"] } } })).rejects.toThrow("already been resolved");
+
+    await driver.release(first.sessionKey);
+    expect((readLog(fake).match(/"method":"thread\/unsubscribe"/g) ?? [])).toHaveLength(0);
+    await driver.release(second.sessionKey);
+    expect((readLog(fake).match(/"method":"thread\/unsubscribe"/g) ?? [])).toHaveLength(1);
+  });
+
   test("normalizes typed MCP form elicitations and returns MCP response metadata", async () => {
     const fake = fakeCodexBin();
     const events: AgentOutputEvent[] = [];

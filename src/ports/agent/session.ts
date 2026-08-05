@@ -15,6 +15,8 @@ export interface AgentSessionStatus {
   threadStatus?: string;
   /** Present while the provider believes subsequent input should steer an in-flight turn. */
   activeTurnId?: string;
+  /** App-server hint that the thread can accept direct input while it is active. */
+  canAcceptDirectInput?: boolean;
   model?: string;
   modelProvider?: string;
   reasoningEffort?: string;
