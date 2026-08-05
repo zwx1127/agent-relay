@@ -14,6 +14,14 @@ export interface RelaySessionServiceDeps {
   agent: AgentDriver;
   logger: Logger;
   currentWorkspace(scopeKey: ConversationId): WorkspaceRecord | undefined;
+  experimentalSeamlessWorkEnabled?: boolean;
+}
+
+export class MultipleActiveCodexThreadsError extends Error {
+  constructor(readonly threadCount: number) {
+    super(`${threadCount} active Codex threads are available. Choose one from /threads before sending work.`);
+    this.name = "MultipleActiveCodexThreadsError";
+  }
 }
 
 export class RelaySessionService {
@@ -36,7 +44,20 @@ export class RelaySessionService {
 
     const resumePrevious = options.resumePrevious ?? true;
     const previous = threadId || !resumePrevious ? undefined : this.deps.store.getSession(key);
-    const resumeThreadId = threadId ?? previous?.thread_id ?? undefined;
+    let resumeThreadId = threadId ?? previous?.thread_id ?? undefined;
+    if (this.deps.experimentalSeamlessWorkEnabled && !resumeThreadId && this.deps.agent.listThreads) {
+      const threads = await this.deps.agent.listThreads({ workspacePath: workspace.path, limit: 50 });
+      const activeThreads = threads.filter((candidate) => candidate.status === "active");
+      if (activeThreads.length === 1) resumeThreadId = activeThreads[0]!.id;
+      else if (activeThreads.length > 1) throw new MultipleActiveCodexThreadsError(activeThreads.length);
+    }
+    if (this.deps.experimentalSeamlessWorkEnabled && resumeThreadId) {
+      const bound = this.deps.store.findSessionByThreadId(resumeThreadId, key);
+      const boundScope = bound?.scope_key ?? bound?.conversation_id;
+      if (bound && bound.session_key !== key && boundScope !== scope.scopeKey) {
+        throw new Error(`Codex thread ${resumeThreadId} is already attached to IM scope ${boundScope}. Detach it there before attaching it here.`);
+      }
+    }
     this.deps.logger.info("router.session_starting", { conversation_id: conversationId, workspace: workspace.name, session_key: key, thread_id: resumeThreadId });
     let status: AgentSessionStatus;
     try {

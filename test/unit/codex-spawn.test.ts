@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { codexAppServerSpawnCommand, codexVersionSpawnCommand, formatCodexSpawnError, isCodexVersionSupported, parseCodexVersion } from "../../src/providers/agents/codex/spawn.ts";
+import { codexAppServerSpawnCommand, codexAppServerWebSocketSpawnCommand, codexVersionSpawnCommand, formatCodexSpawnError, isCodexVersionSupported, parseCodexVersion } from "../../src/providers/agents/codex/spawn.ts";
 
 describe("codex app-server spawn command", () => {
   test("keeps direct spawn behavior on non-Windows platforms", () => {
@@ -9,6 +9,14 @@ describe("codex app-server spawn command", () => {
       resolvedCodexBin: "codex",
     });
     expect(codexAppServerSpawnCommand("codex", {}, "linux").windowsVerbatimArguments).toBeUndefined();
+  });
+
+  test("builds the experimental loopback WebSocket app-server command", () => {
+    expect(codexAppServerWebSocketSpawnCommand("codex", "ws://127.0.0.1:18765", {}, "linux")).toEqual({
+      command: "codex",
+      args: ["app-server", "--listen", "ws://127.0.0.1:18765"],
+      resolvedCodexBin: "codex",
+    });
   });
 
   test("uses the same resolved binary for version preflight", () => {

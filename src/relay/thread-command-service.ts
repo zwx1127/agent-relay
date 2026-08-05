@@ -341,6 +341,69 @@ export class ThreadCommandService {
     await this.deps.sendRendered(conversationId, messageWithTitle("Interrupt command removed.", "Use Interrupt on the latest activity card."));
   }
 
+  async attachThread(conversationId: ConversationId, requestedThreadId: string): Promise<void> {
+    const requested = requestedThreadId.trim();
+    if (!requested) {
+      await this.deps.sendRendered(conversationId, messageWithTitle("Thread id required.", "Use /threads to list available shared threads."));
+      return;
+    }
+    const workspace = this.deps.requireCurrentWorkspace(conversationId);
+    const key = sessionKey(conversationId, workspace.name);
+    const statusBefore = this.deps.agent.getStatus(key);
+    if (this.commandBusy(conversationId, workspace.name, statusBefore)) {
+      await this.sendBusyCommandNotice(conversationId);
+      return;
+    }
+    if (!this.deps.agent.listThreads) throw new Error("Agent driver cannot list threads.");
+    const candidates = await this.deps.agent.listThreads({ workspacePath: workspace.path, limit: 100, searchTerm: requested });
+    const exact = candidates.find((thread) => thread.id === requested);
+    const prefixMatches = candidates.filter((thread) => thread.id.startsWith(requested));
+    const selected = exact ?? (prefixMatches.length === 1 ? prefixMatches[0] : undefined);
+    if (!selected) {
+      const detail = prefixMatches.length > 1
+        ? "The id prefix matches multiple threads. Use a longer id."
+        : "No matching thread was found. Use /threads to refresh the list.";
+      await this.deps.sendRendered(conversationId, messageWithTitle("Could not attach thread.", detail));
+      return;
+    }
+    const currentThreadId = statusBefore?.threadId ?? this.deps.store.getSession(key)?.thread_id ?? undefined;
+    if (selected.id === currentThreadId) {
+      await this.deps.sendRendered(conversationId, messageWithTitle("Already attached.", selected.name ?? selected.id));
+      return;
+    }
+    const sourceMode = this.deps.store.getCollaborationMode(key);
+    await this.deps.resetSessionPresentation(key, { deletePages: false });
+    await this.deps.agent.stop(key);
+    this.deps.store.markSessionStopped(key);
+    try {
+      const status = await this.deps.ensureAgentStarted(conversationId, workspace, selected.id);
+      this.deps.store.setSessionThreadId(key, status.threadId ?? selected.id);
+      await this.deps.sendRendered(conversationId, messageWithTitle("Attached shared thread.", status.threadName ?? selected.name ?? selected.id));
+    } catch (error) {
+      await this.restoreThreadAfterFailedSwitch(conversationId, workspace, key, currentThreadId, statusBefore?.threadName, sourceMode, `attach ${selected.name ?? selected.id}`, error);
+    }
+  }
+
+  async detachThread(conversationId: ConversationId): Promise<void> {
+    const workspace = this.deps.requireCurrentWorkspace(conversationId);
+    const key = sessionKey(conversationId, workspace.name);
+    const status = this.deps.agent.getStatus(key);
+    if (this.commandBusy(conversationId, workspace.name, status)) {
+      await this.sendBusyCommandNotice(conversationId);
+      return;
+    }
+    const threadId = status?.threadId ?? this.deps.store.getSession(key)?.thread_id ?? undefined;
+    if (!threadId) {
+      await this.deps.sendRendered(conversationId, messageWithTitle("No shared thread is attached."));
+      return;
+    }
+    await this.deps.resetSessionPresentation(key, { deletePages: false });
+    await this.deps.agent.stop(key);
+    this.deps.store.markSessionStopped(key);
+    this.deps.store.clearSessionThreadId(key);
+    await this.deps.sendRendered(conversationId, messageWithTitle("Detached shared thread.", threadId));
+  }
+
   async renderBackgroundTerminals(conversationId: ConversationId): Promise<void> {
     await this.backgroundTerminals.render(conversationId);
   }

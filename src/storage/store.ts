@@ -26,6 +26,7 @@ export interface RelayStore {
   getCollaborationMode(sessionKey: string): AgentCollaborationMode;
   setCollaborationMode(sessionKey: string, mode: AgentCollaborationMode): void;
   getSession(sessionKey: string): AgentSessionRow | undefined;
+  findSessionByThreadId(threadId: string, excludingSessionKey: string): AgentSessionRow | undefined;
   listRunningSessions(): AgentSessionRow[];
   appendTranscript(event: TranscriptEvent): void;
   clearTranscript(scopeKey: ConversationId, workspaceName: string): void;

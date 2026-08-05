@@ -41,7 +41,7 @@ import { ThreadCommandService } from "./thread-command-service.ts";
 import { WorkspaceFlow } from "./workspace-flow.ts";
 import { ConversationQueue } from "./conversation-queue.ts";
 import { RelayMessageRenderer } from "./rendering.ts";
-import { RelaySessionService } from "./session-service.ts";
+import { MultipleActiveCodexThreadsError, RelaySessionService } from "./session-service.ts";
 import { RelayAgentEventRouter } from "./agent-event-router.ts";
 import { RelayCapabilityService } from "./capability-service.ts";
 
@@ -141,6 +141,7 @@ export class RelayController {
       agent: deps.agent,
       logger: this.logger,
       currentWorkspace: (conversationId) => this.workspaceFlow.currentWorkspace(conversationId),
+      experimentalSeamlessWorkEnabled: deps.config.experimentalSeamlessWorkEnabled,
     });
     this.mediaRelay = new MediaRelayService({
       config: deps.config,
@@ -226,13 +227,18 @@ export class RelayController {
     });
     this.slashCommands = new SlashCommandRouter({
       help: async (conversationId) => {
-        await this.sendRendered(conversationId, formatHelpMessage());
+        await this.sendRendered(conversationId, formatHelpMessage(deps.config.experimentalSeamlessWorkEnabled));
       },
       review: (conversationId, text) => this.threadCommands.runReviewCommand(conversationId, text),
       compact: (conversationId) => this.threadCommands.requestCompactConfirmation(conversationId),
       init: (conversationId, userMessageId) => this.threadCommands.runInitCommand(conversationId, userMessageId),
       newThread: (conversationId, name, clearDisplay) => this.threadCommands.startFreshThread(conversationId, name, clearDisplay),
       resume: (conversationId, searchTerm) => this.threadCommands.renderResumePicker(conversationId, searchTerm),
+      ...(deps.config.experimentalSeamlessWorkEnabled ? {
+        threads: (conversationId: ConversationId, searchTerm: string) => this.threadCommands.renderResumePicker(conversationId, searchTerm),
+        attach: (conversationId: ConversationId, threadId: string) => this.threadCommands.attachThread(conversationId, threadId),
+        detach: (conversationId: ConversationId) => this.threadCommands.detachThread(conversationId),
+      } : {}),
       fork: (conversationId) => this.threadCommands.forkCurrentThread(conversationId),
       side: (conversationId, prompt, userMessageId) => this.threadCommands.sideConversationCommand(conversationId, prompt, userMessageId),
       rename: (conversationId, name) => this.threadCommands.renameCommand(conversationId, name),
@@ -374,6 +380,10 @@ export class RelayController {
         }
       }
     } catch (error) {
+      if (error instanceof MultipleActiveCodexThreadsError) {
+        await this.threadCommands.renderResumePicker(message.conversationId, "");
+        return;
+      }
       const detail = error instanceof Error ? error.message : String(error);
       this.logger.error("router.message_failed", {
         conversation_id: message.conversationId,

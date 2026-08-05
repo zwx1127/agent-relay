@@ -13,8 +13,17 @@ RESTART_WORKER_DELAY_SECONDS="${AGENT_RELAY_RESTART_WORKER_DELAY_SECONDS:-1}"
 
 usage() {
   cat <<USAGE
-usage: $(basename "$0") <start|stop|restart|status|clean-data|clean>
+usage: $(basename "$0") <start|stop|restart|status|clean-data|clean|gateway-start|gateway-stop|gateway-status|gateway-install|gateway-uninstall|clients-enable|clients-disable|desktop-enable|desktop-disable>
 USAGE
+}
+
+experimental_seamless_enabled() {
+  local value="${EXPERIMENTAL_SEAMLESS_WORK_ENABLED:-}"
+  if [[ -z "$value" && -f "$ROOT_DIR/.env" ]]; then
+    value="$(sed -nE 's/^[[:space:]]*EXPERIMENTAL_SEAMLESS_WORK_ENABLED[[:space:]]*=[[:space:]]*([^#[:space:]]+).*$/\1/p' "$ROOT_DIR/.env" | tail -n 1 | tr -d "\"'")"
+  fi
+  value="${value,,}"
+  [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
 }
 
 ensure_bun() {
@@ -238,8 +247,17 @@ restart_worker() {
 
 restart_sequence() {
   stop
-  clean_data
+  if experimental_seamless_enabled; then
+    echo "experimental seamless work enabled; preserving Relay data and the independent Gateway"
+  else
+    clean_data
+  fi
   start
+}
+
+seamless_command() {
+  ensure_bun
+  (cd "$ROOT_DIR" && bun src/gateway/manage.ts "$1")
 }
 
 restart() {
@@ -297,6 +315,33 @@ case "$command" in
     ;;
   status)
     status
+    ;;
+  gateway-start)
+    seamless_command start
+    ;;
+  gateway-stop)
+    seamless_command stop
+    ;;
+  gateway-status)
+    seamless_command status
+    ;;
+  gateway-install)
+    seamless_command gateway-install
+    ;;
+  gateway-uninstall)
+    seamless_command gateway-uninstall
+    ;;
+  desktop-enable)
+    seamless_command desktop-enable
+    ;;
+  desktop-disable)
+    seamless_command desktop-disable
+    ;;
+  clients-enable)
+    seamless_command clients-enable
+    ;;
+  clients-disable)
+    seamless_command clients-disable
     ;;
   clean-data | clean)
     clean_data

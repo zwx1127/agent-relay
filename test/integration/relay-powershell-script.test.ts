@@ -68,6 +68,23 @@ if (process.platform === "win32") {
       expect(clean.stderr).toContain("stop it before cleaning data");
       expect(existsSync(sentinel)).toBe(true);
     }, 15_000);
+
+    test("experimental seamless restart preserves Relay data for Gateway continuity", async () => {
+      const root = createFixture();
+      expectSuccess(runRelay(root, "start"));
+      const firstPid = readPid(root);
+      const sentinel = join(root, ".data", "seamless-binding");
+      writeFileSync(sentinel, "keep");
+
+      const restart = runRelay(root, "restart", { EXPERIMENTAL_SEAMLESS_WORK_ENABLED: "true" });
+      expectSuccess(restart);
+      await waitFor(() => {
+        if (!existsSync(join(root, ".data", "agent-relay.pid"))) return false;
+        const nextPid = readPid(root);
+        return nextPid !== firstPid && existsSync(sentinel);
+      }, "experimental restart to preserve data", 10_000);
+      expect(existsSync(sentinel)).toBe(true);
+    }, 15_000);
   });
 }
 
@@ -81,7 +98,7 @@ function createFixture(): string {
   return root;
 }
 
-function runRelay(root: string, command: string): ReturnType<typeof spawnSync> {
+function runRelay(root: string, command: string, envOverrides: Record<string, string> = {}): ReturnType<typeof spawnSync> {
   return spawnSync("powershell.exe", [
     "-NoProfile",
     "-ExecutionPolicy",
@@ -89,7 +106,7 @@ function runRelay(root: string, command: string): ReturnType<typeof spawnSync> {
     "-File",
     join(root, "scripts", "relay.ps1"),
     command,
-  ], { cwd: root, encoding: "utf8", env: fastRelayEnv });
+  ], { cwd: root, encoding: "utf8", env: { ...fastRelayEnv, ...envOverrides } });
 }
 
 function expectSuccess(result: ReturnType<typeof spawnSync>): void {

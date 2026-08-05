@@ -28,6 +28,9 @@ describe("config", () => {
     expect(config.telegramRetryMaxDelayMs).toBe(10000);
     expect(config.relayControlEnabled).toBe(false);
     expect(config.relayControlPort).toBe(0);
+    expect(config.experimentalSeamlessWorkEnabled).toBe(false);
+    expect(config.experimentalSeamlessGatewayPort).toBe(18765);
+    expect(config.experimentalSeamlessGatewayStatePath).toBe(".data/agent-relay-gateway.json");
     expect(config.relayPeerAgents).toEqual([]);
     expect(config.imProvider).toBe("telegram");
     expect(config.agentProvider).toBe("codex");
@@ -238,6 +241,25 @@ describe("config", () => {
     expect(() => loadConfig({ ...baseEnv, RELAY_CONTROL_PORT: "" })).toThrow("RELAY_CONTROL_PORT");
     expect(() => loadConfig({ ...baseEnv, RELAY_CONTROL_PORT: "-1" })).toThrow("RELAY_CONTROL_PORT");
     expect(() => loadConfig({ ...baseEnv, RELAY_CONTROL_PORT: "1.5" })).toThrow("RELAY_CONTROL_PORT");
+  });
+
+  test("loads experimental seamless work only through an explicit valid opt-in", () => {
+    const baseEnv = {
+      TELEGRAM_BOT_TOKEN: "token",
+      ALLOWED_USER_IDS: "10",
+      WORKSPACE_ROOT: "/tmp/workspaces",
+    };
+    const config = loadConfig({
+      ...baseEnv,
+      EXPERIMENTAL_SEAMLESS_WORK_ENABLED: "true",
+      EXPERIMENTAL_SEAMLESS_GATEWAY_PORT: "29991",
+      EXPERIMENTAL_SEAMLESS_GATEWAY_STATE_PATH: "/tmp/seamless.json",
+    });
+    expect(config.experimentalSeamlessWorkEnabled).toBe(true);
+    expect(config.experimentalSeamlessGatewayPort).toBe(29991);
+    expect(config.experimentalSeamlessGatewayStatePath).toBe("/tmp/seamless.json");
+    expect(() => loadConfig({ ...baseEnv, EXPERIMENTAL_SEAMLESS_WORK_ENABLED: "maybe" })).toThrow("EXPERIMENTAL_SEAMLESS_WORK_ENABLED");
+    expect(() => loadConfig({ ...baseEnv, EXPERIMENTAL_SEAMLESS_GATEWAY_PORT: "0" })).toThrow("EXPERIMENTAL_SEAMLESS_GATEWAY_PORT");
   });
 
   test("loads developer and model instructions from env and files", () => {

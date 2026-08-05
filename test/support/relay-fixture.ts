@@ -56,6 +56,9 @@ export function relayTestConfig(root: string, logLevel: LogLevel = "info", confi
     relayPeerAgents: [],
     relayControlEnabled: false,
     relayControlPort: 0,
+    experimentalSeamlessWorkEnabled: false,
+    experimentalSeamlessGatewayPort: 18765,
+    experimentalSeamlessGatewayStatePath: ".data/agent-relay-gateway.json",
     logLevel,
     ...configOverrides,
   };

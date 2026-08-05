@@ -52,6 +52,9 @@ export function loadConfig(env?: Env): AppConfig {
     relayPeerAgents: parsePeerAgentsFile(effectiveEnv.RELAY_PEER_AGENTS_FILE),
     relayControlEnabled: parseBooleanEnv(effectiveEnv, "RELAY_CONTROL_ENABLED", false),
     relayControlPort: parseNonNegativeIntegerEnv(effectiveEnv, "RELAY_CONTROL_PORT", 0),
+    experimentalSeamlessWorkEnabled: parseBooleanEnv(effectiveEnv, "EXPERIMENTAL_SEAMLESS_WORK_ENABLED", false),
+    experimentalSeamlessGatewayPort: parsePositiveIntegerEnv(effectiveEnv, "EXPERIMENTAL_SEAMLESS_GATEWAY_PORT", 18765),
+    experimentalSeamlessGatewayStatePath: effectiveEnv.EXPERIMENTAL_SEAMLESS_GATEWAY_STATE_PATH?.trim() || ".data/agent-relay-gateway.json",
     logLevel: parseLogLevel(effectiveEnv.LOG_LEVEL),
   };
 }

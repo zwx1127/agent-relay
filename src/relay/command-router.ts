@@ -11,6 +11,9 @@ export interface SlashCommandHandlers {
   init(conversationId: ConversationId, userMessageId?: MessageId): Promise<void>;
   newThread(conversationId: ConversationId, name: string, clearDisplay: boolean): Promise<void>;
   resume(conversationId: ConversationId, searchTerm: string): Promise<void>;
+  threads?(conversationId: ConversationId, searchTerm: string): Promise<void>;
+  attach?(conversationId: ConversationId, threadId: string): Promise<void>;
+  detach?(conversationId: ConversationId): Promise<void>;
   fork(conversationId: ConversationId): Promise<void>;
   side(conversationId: ConversationId, prompt: string, userMessageId?: MessageId): Promise<void>;
   rename(conversationId: ConversationId, name: string): Promise<void>;
@@ -56,6 +59,18 @@ export class SlashCommandRouter {
       case "/resume":
         await this.handlers.resume(message.conversationId, commandArgs(text));
         return true;
+      case "/threads":
+        if (!this.handlers.threads) break;
+        await this.handlers.threads(message.conversationId, commandArgs(text));
+        return true;
+      case "/attach":
+        if (!this.handlers.attach) break;
+        await this.handlers.attach(message.conversationId, commandArgs(text));
+        return true;
+      case "/detach":
+        if (!this.handlers.detach) break;
+        await this.handlers.detach(message.conversationId);
+        return true;
       case "/fork":
         await this.handlers.fork(message.conversationId);
         return true;
@@ -99,8 +114,9 @@ export class SlashCommandRouter {
         await this.handlers.deleteThread(message.conversationId);
         return true;
       default:
-        await this.handlers.unknown(message.conversationId, command);
-        return true;
+        break;
     }
+    await this.handlers.unknown(message.conversationId, command);
+    return true;
   }
 }

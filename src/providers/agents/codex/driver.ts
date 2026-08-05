@@ -41,6 +41,8 @@ import { handleCodexServerRequest } from "./server-request.ts";
 
 export interface CodexDriverOptions {
   codexBin: string;
+  /** Connect through the already-running experimental Gateway instead of spawning stdio. */
+  gatewayUrl?: string;
   sandbox: string;
   approval: string;
   developerInstructions?: string;
@@ -81,6 +83,7 @@ export class CodexDriver implements AgentDriver {
   private readonly rpc = new CodexRpcClient((message, options) => this.writeMessage(message, options));
   private readonly recentServerStderr = new RecentStderrBuffer();
   private proc?: ChildProcessWithoutNullStreams;
+  private socket?: WebSocket;
   private ready?: Promise<void>;
   private stopping = false;
   private appServerCommand?: CodexSpawnCommand;
@@ -138,7 +141,7 @@ export class CodexDriver implements AgentDriver {
     });
 
     const result = await this.request(options.threadId ? "thread/resume" : "thread/start", {
-      ...(options.threadId ? { threadId: options.threadId, excludeTurns: true } : {}),
+      ...(options.threadId ? { threadId: options.threadId, excludeTurns: !this.options.gatewayUrl } : {}),
       cwd: options.workspacePath,
       approvalPolicy: this.options.approval,
       approvalsReviewer: "user",
@@ -151,6 +154,7 @@ export class CodexDriver implements AgentDriver {
     status.threadId = threadId;
     status.appServerVersion = this.appServerVersion;
     applySessionMetadata(status, result);
+    if (this.options.gatewayUrl && options.threadId) this.applyResumedTurnState(status, result);
     this.threadToSession.set(threadId, key);
     this.sessions.set(key, { status, backgroundTerminals: new BackgroundTerminalTracker() });
     try {
@@ -226,6 +230,17 @@ export class CodexDriver implements AgentDriver {
     }
     updateActiveTurnFromResult(running, result);
     return { turnId: getTurnId(result) };
+  }
+
+  private applyResumedTurnState(status: AgentSessionStatus, result: unknown): void {
+    const thread = asRecord(asRecord(result)?.thread);
+    const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turn = asRecord(turns[index]);
+      if (getString(turn, "status") !== "inProgress") continue;
+      status.activeTurnId = getString(turn, "id");
+      break;
+    }
   }
 
   async stop(key: string): Promise<void> {
@@ -634,30 +649,36 @@ export class CodexDriver implements AgentDriver {
     this.stopping = false;
     const env = { ...process.env, ...this.options.env };
     this.appServerVersion = await this.readAndValidateCodexVersion(env);
-    const command = codexAppServerSpawnCommand(this.options.codexBin, env);
-    this.appServerCommand = command;
     this.recentServerStderr.clear();
-    try {
-      this.proc = spawn(command.command, command.args, {
-        env,
-        stdio: ["pipe", "pipe", "pipe"],
-        ...(command.windowsVerbatimArguments === undefined ? {} : { windowsVerbatimArguments: command.windowsVerbatimArguments }),
-      });
-    } catch (error) {
-      this.proc = undefined;
-      throw formatCodexSpawnError(error, this.options.codexBin);
-    }
-
-    const proc = this.proc;
-    createInterface({ input: proc.stdout }).on("line", (line) => this.handleLine(line));
-    createInterface({ input: proc.stderr }).on("line", (line) => {
-      if (line.trim()) {
-        this.recordServerStderr(line);
-        this.logger.debug("codex.app_server_stderr", { line });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let socket: WebSocket | undefined;
+    if (this.options.gatewayUrl) {
+      socket = await this.connectGateway(this.options.gatewayUrl);
+    } else {
+      const command = codexAppServerSpawnCommand(this.options.codexBin, env);
+      this.appServerCommand = command;
+      try {
+        this.proc = spawn(command.command, command.args, {
+          env,
+          stdio: ["pipe", "pipe", "pipe"],
+          ...(command.windowsVerbatimArguments === undefined ? {} : { windowsVerbatimArguments: command.windowsVerbatimArguments }),
+        });
+      } catch (error) {
+        this.proc = undefined;
+        throw formatCodexSpawnError(error, this.options.codexBin);
       }
-    });
-    proc.on("error", (error) => this.handleServerError(error));
-    proc.on("exit", (exitCode, signalCode) => this.handleServerExit(exitCode, signalCode));
+
+      proc = this.proc;
+      createInterface({ input: proc.stdout }).on("line", (line) => this.handleLine(line));
+      createInterface({ input: proc.stderr }).on("line", (line) => {
+        if (line.trim()) {
+          this.recordServerStderr(line);
+          this.logger.debug("codex.app_server_stderr", { line });
+        }
+      });
+      proc.on("error", (error) => this.handleServerError(error));
+      proc.on("exit", (exitCode, signalCode) => this.handleServerExit(exitCode, signalCode));
+    }
 
     try {
       const initializeResult = await this.request("initialize", {
@@ -679,11 +700,51 @@ export class CodexDriver implements AgentDriver {
       await this.rpc.notify("initialized", undefined, { ensureWritable: false });
       await this.probeServerCapabilities();
     } catch (error) {
-      if (this.proc === proc && !proc.killed) proc.kill();
+      if (proc && this.proc === proc && !proc.killed) proc.kill();
+      if (socket && this.socket === socket) socket.close();
       this.proc = undefined;
+      this.socket = undefined;
       throw error;
     }
-    this.logger.info("codex.app_server_started", { version: this.appServerVersion });
+    this.logger.info("codex.app_server_started", {
+      version: this.appServerVersion,
+      transport: this.options.gatewayUrl ? "experimental_gateway" : "stdio",
+      gateway_url: this.options.gatewayUrl,
+    });
+  }
+
+  private connectGateway(url: string): Promise<WebSocket> {
+    return new Promise((resolveConnection, reject) => {
+      const socket = new WebSocket(url);
+      const timer = setTimeout(() => {
+        socket.close();
+        reject(new Error(`Timed out connecting to experimental seamless Gateway at ${url}.`));
+      }, 10_000);
+      socket.addEventListener("open", () => {
+        clearTimeout(timer);
+        this.socket = socket;
+        resolveConnection(socket);
+      }, { once: true });
+      socket.addEventListener("message", (event) => {
+        const line = typeof event.data === "string" ? event.data : String(event.data);
+        for (const message of line.split(/\r?\n/)) if (message.trim()) this.handleLine(message);
+      });
+      socket.addEventListener("error", () => {
+        clearTimeout(timer);
+        if (this.socket !== socket) {
+          reject(new Error(`Failed to connect to experimental seamless Gateway at ${url}.`));
+          return;
+        }
+        this.handleServerError(new Error(`Experimental seamless Gateway connection failed: ${url}`));
+        this.handleServerExit(null, null);
+      });
+      socket.addEventListener("close", () => {
+        clearTimeout(timer);
+        if (this.socket !== socket) return;
+        this.socket = undefined;
+        this.handleServerExit(null, null);
+      });
+    });
   }
 
   private async readAndValidateCodexVersion(env: NodeJS.ProcessEnv): Promise<string> {
@@ -1156,12 +1217,18 @@ export class CodexDriver implements AgentDriver {
 
   private async writeMessage(message: JsonRpcMessage, options: { ensureWritable?: boolean } = {}): Promise<void> {
     if (options.ensureWritable !== false) await this.ensureWritable();
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(message));
+      return;
+    }
     if (!this.proc) throw new Error("Codex app-server is not running.");
-    this.proc!.stdin.write(`${JSON.stringify(message)}\n`);
+    this.proc.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
   private async ensureWritable(): Promise<void> {
-    if (!this.proc || this.proc.killed || !this.proc.stdin.writable) {
+    const socketWritable = this.socket?.readyState === WebSocket.OPEN;
+    const processWritable = Boolean(this.proc && !this.proc.killed && this.proc.stdin.writable);
+    if (!socketWritable && !processWritable) {
       this.ready = undefined;
       await this.ensureServer();
     }
@@ -1180,6 +1247,7 @@ export class CodexDriver implements AgentDriver {
     this.requestedLifecycle.clear();
     this.requestedGoalMutation.clear();
     this.proc = undefined;
+    this.socket = undefined;
     this.ready = undefined;
     for (const running of sessions) {
       running.status.running = false;
@@ -1192,13 +1260,16 @@ export class CodexDriver implements AgentDriver {
 
   private handleServerError(error: Error): void {
     if (this.stopping) return;
-    const wrapped = formatCodexSpawnError(error, this.options.codexBin);
+    const wrapped = this.options.gatewayUrl
+      ? new Error(`Experimental seamless Gateway unavailable at ${this.options.gatewayUrl}. ${error.message}`)
+      : formatCodexSpawnError(error, this.options.codexBin);
     this.logger.error("codex.app_server_spawn_failed", {
       codex_bin: this.options.codexBin,
       error: wrapped,
     });
     this.rpc.rejectPending(wrapped);
     this.proc = undefined;
+    this.socket = undefined;
     this.ready = undefined;
   }
 

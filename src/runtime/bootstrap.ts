@@ -14,6 +14,7 @@ import { startControlServer, type RunningControlServer } from "../relay/control/
 import { resolveRelayHelperPath } from "../relay/control/helper.ts";
 import { createImAdapter } from "../providers/im/factory.ts";
 import { createAgentDriver } from "../providers/agents/factory.ts";
+import { ensureSeamlessGateway } from "../gateway/state.ts";
 
 export async function main(): Promise<void> {
   const config = loadConfig();
@@ -22,6 +23,9 @@ export async function main(): Promise<void> {
   const imAdapter = createImAdapter(config, logger);
   let router: RelayController;
   let control: RunningControlServer | undefined;
+  const gateway = config.experimentalSeamlessWorkEnabled
+    ? await ensureSeamlessGateway(config, logger)
+    : undefined;
   const helperPath = resolveRelayHelperPath(dirname(fileURLToPath(import.meta.url)));
   const controlToken = randomBytes(32).toString("hex");
   const controlEnv: Record<string, string> = {};
@@ -65,6 +69,7 @@ export async function main(): Promise<void> {
     onOutput: (event) => router.handleAgentOutput(event),
     onExit: (event) => router.handleAgentExit(event.sessionKey, `Agent exited with code ${event.exitCode ?? "unknown"}${event.signalCode ? ` (${event.signalCode})` : ""}.`),
     logger,
+    ...(gateway ? { gatewayUrl: gateway.url } : {}),
   });
   router = new RelayController({ config, store, adapter: imAdapter, agent, logger });
   if (config.relayControlEnabled) {
@@ -107,6 +112,8 @@ export async function main(): Promise<void> {
     media_max_bytes: config.mediaMaxBytes,
     relay_control_enabled: config.relayControlEnabled,
     relay_control_port: config.relayControlPort,
+    experimental_seamless_work_enabled: config.experimentalSeamlessWorkEnabled,
+    experimental_seamless_gateway_url: gateway?.url,
     relay_agent_name: config.relayAgentName,
     relay_peer_agent_count: config.relayPeerAgents.length,
     allowed_user_count: config.allowedUserIds.size,
@@ -117,6 +124,13 @@ export async function main(): Promise<void> {
   }
   if (config.relayControlEnabled) {
     logger.warn("app.config_risky", { setting: "RELAY_CONTROL_ENABLED", value: String(config.relayControlEnabled) });
+  }
+  if (config.experimentalSeamlessWorkEnabled) {
+    logger.warn("app.experimental_feature_enabled", {
+      feature: "seamless_work",
+      gateway_url: gateway?.url,
+      stability: "experimental",
+    });
   }
   if (!config.allowedConversationIds) {
     logger.warn("app.config_risky", { setting: "ALLOWED_CONVERSATION_IDS", value: "any" });

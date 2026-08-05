@@ -27,6 +27,10 @@ export interface AppConfig {
   relayPeerAgents: RelayPeerAgent[];
   relayControlEnabled: boolean;
   relayControlPort: number;
+  /** Opt-in gate for the experimental shared Codex Gateway. */
+  experimentalSeamlessWorkEnabled: boolean;
+  experimentalSeamlessGatewayPort: number;
+  experimentalSeamlessGatewayStatePath: string;
   logLevel: LogLevel;
 }
 

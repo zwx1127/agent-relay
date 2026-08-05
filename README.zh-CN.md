@@ -56,6 +56,14 @@
 - 可以把多个 agent-relay bot 放在同一个群里，让 agent 提及已配置的 peer bot 协作。
 - 继续扩展更多 IM provider 或 Agent backend。
 
+## 实验性功能：无缝工作
+
+> **本功能处于实验阶段、默认关闭，并且只能手动开启。** 在正式稳定前，其接口和启用方式可能发生不兼容变化。未手动开启时，它不会启动 Gateway、安装客户端代理，也不会改变现有 Relay、Codex CLI 或 Codex 桌面版的任何行为。
+
+“无缝工作”允许你先在原生 Codex CLI 或 Windows/macOS Codex 桌面版开始工作，离开电脑后再通过 Telegram 或 Lark/飞书继续同一个 Codex thread。Relay、交互式 Codex CLI 进程和 Codex 桌面版统一连接一个独立的本地 Gateway，由其唯一 app-server 管理 thread；用户不能选择其他远端入口。
+
+它只同步 Codex、Gateway 和 Relay 都在运行并已连接后产生的最新实时进度。任一进程停止或尚未连接期间产生的输出不会保存、重放或事后追赶。请阅读[实验性无缝工作](docs/zh-CN/experimental-seamless-work.md)，了解手动开启方法、支持的命令、多进程与多 thread 行为、限制以及完整关闭和恢复步骤。
+
 ## 快速开始
 
 ```bash
@@ -79,13 +87,14 @@ bun run start
 - [Lark/飞书快速上手](docs/zh-CN/quickstart-lark.md)
 - [常见问题排查](docs/zh-CN/troubleshooting.md)
 - [扩展 agent-relay](docs/zh-CN/extending-agent-relay.md)
+- [实验性无缝工作](docs/zh-CN/experimental-seamless-work.md)（默认关闭）
 
 ## 最低要求
 
 - Bun 1.3 或更新版本。
 - Git。
 - 本地可用的 `codex` CLI，或通过 `CODEX_BIN` 指定完整路径。
-- Codex CLI 需要支持 `codex app-server --listen stdio://`。
+- Codex CLI 0.145.0 或更高版本需要支持 `codex app-server --listen stdio://`；实验代理会在内部使用 CLI 的 WebSocket 传输，用户不再选择单独的 remote 模式。
 - Telegram bot token，或 Lark/飞书自建应用。
 
 ## 日常使用

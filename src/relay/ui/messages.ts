@@ -3,8 +3,8 @@ import { renderTelegramText, truncateForTelegramLabel, type RenderedTelegramText
 import { UI_BUTTON } from "./constants.ts";
 import { bold, code } from "./text-parts.ts";
 
-export function formatHelpMessage(): RenderedTelegramText {
-  return renderTelegramText([
+export function formatHelpMessage(experimentalSeamlessWorkEnabled = false): RenderedTelegramText {
+  const parts: TelegramTextPart[] = [
     bold("Relay commands"),
     "\n\n",
     "Use these slash commands in Relay:\n",
@@ -19,6 +19,11 @@ export function formatHelpMessage(): RenderedTelegramText {
     "- ", code("/new [name]"), " - Start a fresh Codex chat and keep Relay display history.\n",
     "- ", code("/clear [name]"), " - Clear Relay display state and start a fresh chat.\n",
     "- ", code("/resume [search]"), " - Resume a recent Codex thread.\n",
+    ...(experimentalSeamlessWorkEnabled ? [
+      "- ", code("/threads [search]"), " - List threads available through the experimental shared Gateway.\n",
+      "- ", code("/attach <thread-id>"), " - Attach this IM scope to one shared thread.\n",
+      "- ", code("/detach"), " - Detach this IM scope from its shared thread.\n",
+    ] satisfies TelegramTextPart[] : []),
     "- ", code("/fork"), " - Fork the current thread.\n",
     "- ", code("/side <prompt>"), ", ", code("/btw <prompt>"), " - Ask in an ephemeral side conversation.\n",
     "- ", code("/rename <name>"), " - Rename the current thread.\n",
@@ -34,7 +39,8 @@ export function formatHelpMessage(): RenderedTelegramText {
     "- ", code("/delete"), " - Permanently delete the current chat after two confirmations.\n",
     "- ", code("/stop"), ", ", code("/clean"), " - Stop all background terminals for this chat.\n\n",
     "Relay-only commands: ", code("/help"), ", ", code("/relay"), ".",
-  ]);
+  ];
+  return renderTelegramText(parts);
 }
 
 export function formatResumeMessage(threads: AgentThreadSummary[]): RenderedTelegramText {

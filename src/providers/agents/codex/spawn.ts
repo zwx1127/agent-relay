@@ -23,6 +23,16 @@ export function codexAppServerSpawnCommand(
   return codexSpawnCommand(codexBin, [...CODEX_APP_SERVER_ARGS], env, platform, exists);
 }
 
+export function codexAppServerWebSocketSpawnCommand(
+  codexBin: string,
+  url: string,
+  env: Env = process.env,
+  platform = process.platform,
+  exists: (path: string) => boolean = existsSync,
+): CodexSpawnCommand {
+  return codexSpawnCommand(codexBin, ["app-server", "--listen", url], env, platform, exists);
+}
+
 export function codexVersionSpawnCommand(
   codexBin: string,
   env: Env = process.env,
