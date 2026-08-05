@@ -4,6 +4,8 @@
 
 实验性接力工作会为当前操作系统用户长期运行一个独立的 Codex Gateway。Gateway 是本机数据面代理，并拥有唯一的 Codex app-server 子进程；Relay、原生 Codex CLI 进程，以及 Windows/macOS Codex 桌面版都通过它继续处理同一批 Codex thread。
 
+![实验性接力工作架构：Codex 与 IM 通过同一 thread 双向互通实时进度和控制信息](../assets/relay-work-overview.png)
+
 ## 开启
 
 先在 `.env` 中显式加入：

@@ -62,6 +62,8 @@
 
 “接力工作”允许你先在原生 Codex CLI 或 Windows/macOS Codex 桌面版开始工作，离开电脑后再通过 Telegram 或 Lark/飞书继续同一个 Codex thread。Relay、交互式 Codex CLI 进程和 Codex 桌面版统一连接一个独立的本地 Gateway，由其唯一 app-server 管理 thread；用户不能选择其他远端入口。
 
+![实验性接力工作架构：Codex 与 IM 通过同一 thread 双向互通实时进度和控制信息](docs/assets/relay-work-overview.png)
+
 它只同步 Codex、Gateway 和 Relay 都在运行并已连接后产生的最新实时进度。任一进程停止或尚未连接期间产生的输出不会保存、重放或事后追赶。请阅读[实验性接力工作](docs/zh-CN/experimental-relay-work.md)，了解手动开启方法、支持的命令、多进程与多 thread 行为、限制以及完整关闭和恢复步骤。
 
 ## 快速开始

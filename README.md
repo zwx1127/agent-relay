@@ -63,6 +63,8 @@ Scan the Telegram QR code below to join the project community group.
 
 Experimental relay work lets you begin in the native Codex CLI or the Windows/macOS Codex Desktop app, leave the computer, and continue the same Codex thread through Telegram or Lark/Feishu. Relay, interactive Codex CLI processes, and Codex Desktop all connect to one independent local Gateway and its single authoritative app-server; users do not choose separate remote endpoints.
 
+![Experimental relay work architecture: Codex and IM exchange live progress and control bidirectionally through one shared thread](docs/assets/relay-work-overview.png)
+
 Only new live progress produced while Codex, Gateway, and Relay are running is synchronized. Output produced while a process is stopped or not yet connected is not stored, replayed, or caught up later. See [Experimental relay work](docs/en/experimental-relay-work.md) for opt-in setup, supported commands, multi-process/thread behavior, limitations, and complete disable/restore instructions.
 
 ## Quick start

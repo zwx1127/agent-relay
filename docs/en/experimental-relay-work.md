@@ -4,6 +4,8 @@
 
 Experimental relay work keeps an independent per-user Codex Gateway running as the local data-plane proxy. The Gateway owns one Codex app-server child process. Relay, native Codex CLI processes, and the Windows or macOS Codex desktop app connect through it and continue the same Codex threads.
 
+![Experimental relay work architecture: Codex and IM exchange live progress and control bidirectionally through one shared thread](../assets/relay-work-overview.png)
+
 ## Enable
 
 1. Add the master opt-in to `.env`:
