@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { sessionKey } from "../../src/domain/session.ts";
+import { workspaceCallbackToken } from "../../src/relay/ui/callback-data.ts";
 import { callbackMessage, cleanupRelayFixtures, relayFixture, textMessage } from "../support/relay-fixture.ts";
 
 afterEach(cleanupRelayFixtures);
@@ -13,6 +14,17 @@ function experimentalFixture() {
   result.store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
   result.store.bindConversation("1", "demo");
   return { ...result, path };
+}
+
+function addWorkspace(fixture: ReturnType<typeof experimentalFixture>, name: string) {
+  const path = join(fixture.root, name);
+  mkdirSync(path);
+  fixture.store.upsertWorkspace({ name, path, createdAt: 2 });
+  return path;
+}
+
+function selectWorkspace(name: string, callbackQueryId = `select-${name}`) {
+  return callbackMessage(`ar:uh:${workspaceCallbackToken(name)}`, 7, callbackQueryId);
 }
 
 describe("experimental relay work behavior", () => {
@@ -46,6 +58,176 @@ describe("experimental relay work behavior", () => {
     expect(agent.getStatus(sessionKey("1", "demo"))?.threadId).not.toBe("active-thread");
     expect(agent.getStatus(sessionKey("1", "demo"))?.threadId).not.toBe("persisted-thread");
     expect(store.getSession(sessionKey("1", "demo"))?.thread_id).toBe("thread-1");
+  });
+
+  test("idle workspace selection releases the old session and binds the directory without starting a thread", async () => {
+    const fixture = experimentalFixture();
+    const { router, store, adapter, agent, path } = fixture;
+    addWorkspace(fixture, "other");
+    const sourceKey = sessionKey("1", "demo");
+    const source = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "desktop-thread" });
+    store.markSessionStarted(sourceKey, "1", "demo", 1, source.threadId, "1");
+
+    await router.handle(selectWorkspace("other"));
+
+    expect(store.getBinding("1")?.workspaceName).toBe("other");
+    expect(agent.released).toEqual([sourceKey]);
+    expect(agent.stopped).toEqual([]);
+    expect(agent.getStatus(sourceKey)).toBeUndefined();
+    expect(agent.getStatus(sessionKey("1", "other"))).toBeUndefined();
+    expect(store.getSession(sourceKey)?.status).toBe("stopped");
+    expect(store.getSession(sourceKey)?.thread_id).toBe("desktop-thread");
+    expect(adapter.edited.at(-1)?.text).toContain("workspace: other");
+    expect(adapter.edited.at(-1)?.text).toContain("Stopped");
+  });
+
+  test("the first ordinary message after a workspace switch starts fresh", async () => {
+    const fixture = experimentalFixture();
+    const { router, store, agent, path } = fixture;
+    const otherPath = addWorkspace(fixture, "other");
+    const sourceKey = sessionKey("1", "demo");
+    const targetKey = sessionKey("1", "other");
+    const source = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "source-thread" });
+    store.markSessionStarted(sourceKey, "1", "demo", 1, source.threadId, "1");
+    store.markSessionStarted(targetKey, "1", "other", 1, "persisted-other-thread", "1");
+    store.markSessionStopped(targetKey, 2);
+
+    await router.handle(selectWorkspace("other"));
+    expect(agent.getStatus(targetKey)).toBeUndefined();
+
+    await router.handle(textMessage("start work in other"));
+
+    expect(agent.sent.at(-1)?.key).toBe(targetKey);
+    expect(agent.getStatus(targetKey)?.workspacePath).toBe(otherPath);
+    expect(agent.getStatus(targetKey)?.threadId).not.toBe("persisted-other-thread");
+    expect(store.getSession(targetKey)?.thread_id).toBe(agent.getStatus(targetKey)?.threadId);
+  });
+
+  test("workspace switching rejects every busy state without changing the binding", async () => {
+    const scenarios = ["turn", "approval", "user-input", "task"] as const;
+
+    for (const scenario of scenarios) {
+      const fixture = experimentalFixture();
+      const { router, store, adapter, agent, path } = fixture;
+      addWorkspace(fixture, "other");
+      const sourceKey = sessionKey("1", "demo");
+      const source = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: `thread-${scenario}` });
+      store.markSessionStarted(sourceKey, "1", "demo", 1, source.threadId, "1");
+      if (scenario === "turn") source.activeTurnId = "turn-active";
+      if (scenario === "approval") source.waitingForApproval = true;
+      if (scenario === "user-input") source.waitingForUserInput = true;
+      if (scenario === "task") {
+        store.createTask({ conversationId: "1", workspaceName: "demo", text: "queued work", status: "queued" });
+      }
+
+      await router.handle(selectWorkspace("other", `busy-${scenario}`));
+
+      expect(store.getBinding("1")?.workspaceName).toBe("demo");
+      expect(agent.getStatus(sourceKey)?.threadId).toBe(`thread-${scenario}`);
+      expect(agent.released).toEqual([]);
+      expect(adapter.edited.at(-1)?.text).toContain("Codex is busy.");
+    }
+  });
+
+  test("selecting the current workspace is a no-op even while its turn is active", async () => {
+    const { router, store, agent, path } = experimentalFixture();
+    const key = sessionKey("1", "demo");
+    const source = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "same-thread" });
+    source.activeTurnId = "active-turn";
+    store.markSessionStarted(key, "1", "demo", 1, source.threadId, "1");
+    store.setCollaborationMode(key, "plan");
+
+    await router.handle(selectWorkspace("demo"));
+
+    expect(store.getBinding("1")?.workspaceName).toBe("demo");
+    expect(agent.getStatus(key)?.threadId).toBe("same-thread");
+    expect(agent.getStatus(key)?.activeTurnId).toBe("active-turn");
+    expect(store.getCollaborationMode(key)).toBe("plan");
+    expect(agent.released).toEqual([]);
+    expect(agent.stopped).toEqual([]);
+  });
+
+  test("a busy workspace consumes the create prompt without creating or selecting the directory", async () => {
+    const { router, store, adapter, agent, root, path } = experimentalFixture();
+    const key = sessionKey("1", "demo");
+    const source = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "busy-thread" });
+    source.activeTurnId = "active-turn";
+    store.markSessionStarted(key, "1", "demo", 1, source.threadId, "1");
+
+    await router.handle(callbackMessage("ar:n", 7, "new-workspace"));
+    const prompt = adapter.sent.at(-1)!;
+    expect(store.getPendingPrompt("1", prompt.messageId!)).toBeDefined();
+
+    await router.handle(textMessage("other", 7, Number(prompt.messageId)));
+
+    expect(store.getPendingPrompt("1", prompt.messageId!)).toBeUndefined();
+    expect(existsSync(join(root, "other"))).toBe(false);
+    expect(store.getBinding("1")?.workspaceName).toBe("demo");
+    expect(agent.released).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("Codex is busy.");
+  });
+
+  test("late events from the released workspace cannot update IM or transcript state", async () => {
+    const fixture = experimentalFixture();
+    const { router, store, adapter, agent, logLines, path } = fixture;
+    addWorkspace(fixture, "other");
+    const sourceKey = sessionKey("1", "demo");
+    const source = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "source-thread" });
+    store.markSessionStarted(sourceKey, "1", "demo", 1, source.threadId, "1");
+    await router.handle(selectWorkspace("other"));
+    const sentCount = adapter.sent.length;
+    const editedCount = adapter.edited.length;
+
+    await router.handleAgentOutput({ type: "message", sessionKey: sourceKey, chunk: "late output" });
+    await router.handleAgentOutput({
+      type: "activity",
+      sessionKey: sourceKey,
+      threadId: "source-thread",
+      turnId: "late-turn",
+      activity: { kind: "plan", steps: [{ step: "late", status: "inProgress" }] },
+    });
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: sourceKey,
+      turnId: "late-turn",
+      requestId: "late-question",
+      questions: [{
+        id: "choice",
+        header: "Choice",
+        question: "Continue?",
+        options: [{ label: "Yes", description: "Continue" }],
+      }],
+    });
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: sourceKey, turnId: "late-turn" });
+
+    expect(adapter.sent).toHaveLength(sentCount);
+    expect(adapter.edited).toHaveLength(editedCount);
+    expect(store.latestTranscriptEvent("1", "demo", "agent")).toBeUndefined();
+    expect(store.latestPendingPrompt("1", ["codex_user_input"])).toBeUndefined();
+    expect(logLines.join("\n")).toContain("router.agent_event_inactive_workspace");
+  });
+
+  test("a failure after release restores the source thread and collaboration mode", async () => {
+    const fixture = experimentalFixture();
+    const { router, store, agent, path } = fixture;
+    addWorkspace(fixture, "other");
+    const sourceKey = sessionKey("1", "demo");
+    const source = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "source-thread" });
+    store.markSessionStarted(sourceKey, "1", "demo", 1, source.threadId, "1");
+    store.setCollaborationMode(sourceKey, "plan");
+    const bindConversation = store.bindConversation.bind(store);
+    store.bindConversation = ((scopeKey, workspaceName, updatedAt, conversationId) => {
+      if (workspaceName === "other") throw new Error("bind failed");
+      bindConversation(scopeKey, workspaceName, updatedAt, conversationId);
+    }) as typeof store.bindConversation;
+
+    await router.handle(selectWorkspace("other", "rollback"));
+
+    expect(agent.released).toEqual([sourceKey]);
+    expect(store.getBinding("1")?.workspaceName).toBe("demo");
+    expect(agent.getStatus(sourceKey)?.threadId).toBe("source-thread");
+    expect(store.getSession(sourceKey)?.status).toBe("running");
+    expect(store.getCollaborationMode(sourceKey)).toBe("plan");
   });
 
   test("Relay Home Resume reuses the /resume picker", async () => {

@@ -61,6 +61,9 @@ Restart Codex Desktop afterward. The same proxy preserves the desktop app-server
 
 - Multiple desktop, CLI, and Relay clients can connect to one Gateway without starting an app-server per client.
 - Each client has an independent WebSocket connection, while one app-server remains authoritative for thread state.
+- Selecting a different workspace in Relay Home is allowed only while both the current and target workspace are idle. An active turn, approval, user-input request, or waiting/queued/running/blocked Relay task rejects the switch and leaves the current workspace unchanged.
+- An idle switch releases Relay's subscription to the old workspace without stopping its Codex thread, preserves that thread for a later `/resume`, and binds the IM scope to the new directory. Selecting the already-current workspace is a no-op.
+- Workspace selection does not start or resume a thread. The first ordinary IM message starts a fresh thread in the selected directory; use `/resume` explicitly to join an existing thread.
 - Use `/resume [search]`, or **Resume** in Relay Home, to bind an IM scope to an existing thread. Both entrypoints use the same picker and switching semantics as Codex TUI.
 - Relay Work never attaches an active or previously persisted thread merely because an ordinary IM message arrived. Without an explicit `/resume`, that message starts a fresh thread.
 - `/resume` is rejected while the source scope has an active turn, approval, user-input request, or busy Relay task. An idle source scope may resume a target thread that is already active.

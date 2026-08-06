@@ -63,6 +63,9 @@ Windows 使用用户环境变量；macOS 还会创建用户级 LaunchAgent，确
 
 - 多个桌面版、CLI 或 Relay 客户端可以同时连接同一个 Gateway；Gateway 不会为每个客户端再启动 app-server。
 - 每个客户端拥有独立 WebSocket 连接，但 thread 状态仍由同一个 app-server 管理。
+- 只有当前 workspace 和目标 workspace 都空闲时，才能在 Relay Home 中切换 workspace。存在活动 turn、审批、用户输入请求，或处于 waiting/queued/running/blocked 状态的 Relay task 时，切换会被拒绝，当前 workspace 保持不变。
+- 空闲切换只会释放 Relay 对旧 workspace 的订阅，不会停止它的 Codex thread；该 thread 会保留以供之后 `/resume`。随后 IM scope 只绑定到新目录。再次选择当前 workspace 是无操作行为。
+- 选择 workspace 不会启动或恢复 thread。切换后的第一条普通 IM 消息会在所选目录中启动新 thread；只有显式使用 `/resume` 才会加入已有 thread。
 - 使用 `/resume [search]` 或 Relay Home 中的 **Resume**，把 IM scope 绑定到已有 thread。两个入口复用同一个选择器和 Codex TUI 的切换语义。
 - 接力工作不会因为收到普通 IM 消息就自动绑定活动 thread 或之前持久化的 thread。没有显式执行 `/resume` 时，该消息会启动新 thread。
 - 当来源 scope 存在活动 turn、审批、用户输入请求或忙碌的 Relay task 时，`/resume` 会拒绝切换。来源 scope 空闲时，可以恢复一个已经活动的目标 thread。

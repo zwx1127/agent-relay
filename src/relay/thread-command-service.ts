@@ -30,6 +30,7 @@ import { GoalCommandService } from "./thread-commands/goal.ts";
 import { PlanCommandService } from "./thread-commands/plan.ts";
 import type { CallbackMessage } from "./thread-commands/types.ts";
 import { isActivityControlAction, type ActivityControlAction } from "./activity-controls.ts";
+import { hasBusyWorkspaceWork, isAgentSessionBusy } from "./session-busy.ts";
 
 export interface ThreadCommandDeps {
   store: RelayStore;
@@ -402,7 +403,7 @@ export class ThreadCommandService {
   }
 
   private sessionBusy(status: AgentSessionStatus): boolean {
-    return Boolean(status.activeTurnId || status.waitingForApproval || status.waitingForUserInput);
+    return isAgentSessionBusy(status);
   }
 
   private async sendBusyCommandNotice(conversationId: ConversationId): Promise<void> {
@@ -694,8 +695,7 @@ export class ThreadCommandService {
   }
 
   private commandBusy(conversationId: ConversationId, workspaceName: string, status: AgentSessionStatus | undefined): boolean {
-    return Boolean(status && this.sessionBusy(status))
-      || this.deps.store.countTasks(conversationId, workspaceName, ["waiting", "queued", "running", "blocked"]) > 0;
+    return hasBusyWorkspaceWork(this.deps.store, conversationId, workspaceName, status);
   }
 
   async answerRelayCommandPrompt(conversationId: ConversationId, promptMessageId: MessageId, text: string, userMessageId?: MessageId): Promise<void> {

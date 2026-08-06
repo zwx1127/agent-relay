@@ -435,6 +435,7 @@ export class RelayController {
   }
 
   private async handleAgentOutputSerial(session: AgentOutputEvent): Promise<void> {
+    if (this.isInactiveRelayWorkSession(session.sessionKey, session.type ?? "message")) return;
     if (await this.agentEvents.handle(session)) return;
     if (session.type !== undefined && session.type !== "message") return;
     const parsed = parseSessionKey(session.sessionKey);
@@ -471,6 +472,7 @@ export class RelayController {
   }
 
   private async handleAgentExitSerial(sessionKeyValue: string, exitText: string): Promise<void> {
+    if (this.isInactiveRelayWorkSession(sessionKeyValue, "agent_exit")) return;
     const parsed = parseSessionKey(sessionKeyValue);
     if (!parsed) {
       this.logger.warn("router.agent_exit_invalid_session", { session_key: sessionKeyValue });
@@ -780,6 +782,28 @@ export class RelayController {
 
   private currentWorkspace(conversationId: ConversationId): WorkspaceRecord | undefined {
     return this.workspaceFlow.currentWorkspace(conversationId);
+  }
+
+  private isInactiveRelayWorkSession(sessionKeyValue: string, eventType: string): boolean {
+    if (!this.deps.config.experimentalRelayWorkEnabled) return false;
+    const parsed = parseSessionKey(sessionKeyValue);
+    if (!parsed) return false;
+    const binding = this.deps.store.getBinding(parsed.scopeKey);
+    const stored = this.deps.store.getSession(sessionKeyValue);
+    const runtime = this.deps.agent.getStatus(sessionKeyValue);
+    const active = binding?.workspaceName === parsed.workspaceName
+      && (stored?.status === "running" || runtime?.running === true);
+    if (active) return false;
+    this.logger.info("router.agent_event_inactive_workspace", {
+      session_key: sessionKeyValue,
+      scope_key: parsed.scopeKey,
+      event_workspace: parsed.workspaceName,
+      current_workspace: binding?.workspaceName,
+      stored_status: stored?.status,
+      runtime_running: Boolean(runtime?.running),
+      event_type: eventType,
+    });
+    return true;
   }
 
   private appendSystem(conversationId: ConversationId, text: string): void {

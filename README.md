@@ -65,7 +65,7 @@ Experimental relay work lets you begin in the native Codex CLI or the Windows/ma
 
 ![Experimental relay work architecture: Codex and IM exchange live progress and control bidirectionally through one shared thread](docs/assets/relay-work-overview.png)
 
-Use `/resume` or **Resume** in Relay Home to join an existing thread. Multiple native Codex clients and IM scopes can share it without ownership restrictions; ordinary input during an active turn uses Steer semantics, and the first client to answer an approval or input request wins. Only new live progress produced while Codex, Gateway, and Relay are running is synchronized—there is no Queue action, offline replay, or catch-up. See [Experimental relay work](docs/en/experimental-relay-work.md) for opt-in setup, multi-client behavior, limitations, and complete disable/restore instructions.
+Use `/resume` or **Resume** in Relay Home to join an existing thread. An idle Relay Home workspace switch releases the old subscription without stopping its thread and only binds the new directory; the next ordinary message starts fresh, while `/resume` explicitly joins existing work. Busy workspace switches are rejected. Multiple native Codex clients and IM scopes can share a thread without ownership restrictions; ordinary input during an active turn uses Steer semantics, and the first client to answer an approval or input request wins. Only new live progress produced while Codex, Gateway, and Relay are running is synchronized—there is no Queue action, offline replay, or catch-up. See [Experimental relay work](docs/en/experimental-relay-work.md) for opt-in setup, multi-client behavior, limitations, and complete disable/restore instructions.
 
 ## Quick start
 

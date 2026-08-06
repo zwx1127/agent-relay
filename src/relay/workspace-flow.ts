@@ -19,13 +19,14 @@ import { formatHomeMessage } from "./ui/status-message.ts";
 import { renderTelegramText, type RenderedTelegramText } from "../presentation/telegram/text.ts";
 import type { RenderCallbackPageResult } from "./controller-types.ts";
 import { WorkspaceFileBrowser } from "./workspace-files.ts";
+import { hasBusyWorkspaceWork } from "./session-busy.ts";
 
 type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
 
 export interface WorkspaceFlowDeps {
   config: AppConfig;
   store: RelayStore;
-  agent: Pick<AgentDriver, "stop">;
+  agent: Pick<AgentDriver, "stop" | "release" | "getStatus">;
   logger: Logger;
   ensureAgentStarted(conversationId: ConversationId, workspace: WorkspaceRecord, threadId?: string, options?: { resumePrevious?: boolean }): Promise<AgentSessionStatus>;
   resetSessionPresentation(sessionKey: string, options?: { deletePages?: boolean }): Promise<void>;
@@ -130,13 +131,14 @@ export class WorkspaceFlow {
     const name = await this.workspaceNameForToken(token);
     const workspace = this.requireWorkspace(name);
     await this.deps.renderStrictCallbackPage(message, messageWithTitle("Selecting workspace.", workspace.name), { inline_keyboard: [] });
-    this.resetCurrentCollaborationMode(message.conversationId);
-    this.deps.store.bindConversation(message.conversationId, workspace.name);
+    try {
+      await this.activateWorkspace(message.conversationId, workspace);
+    } catch (error) {
+      if (!(error instanceof WorkspaceSwitchBusyError)) throw error;
+      await this.deps.renderCallbackPage(message, workspaceBusyMessage(), { inline_keyboard: [] });
+      return;
+    }
     this.deps.logger.info("router.workspace_selected", { conversation_id: message.conversationId, workspace: workspace.name, path: workspace.path });
-    // Explicit workspace selection starts a fresh session binding rather than
-    // resuming the previous thread implicitly.
-    await this.deps.ensureAgentStarted(message.conversationId, workspace, undefined, { resumePrevious: false });
-    this.deps.store.setCollaborationMode(sessionKey(message.conversationId, workspace.name), "default");
     await this.renderHomeOnCallback(message);
   }
 
@@ -231,7 +233,15 @@ export class WorkspaceFlow {
   async createWorkspaceFromPrompt(conversationId: ConversationId, promptMessageId: MessageId, name: string): Promise<void> {
     const pending = this.deps.store.getPendingPrompt(conversationId, promptMessageId);
     const payload = parsePromptPayload(pending?.payloadJson);
-    const { existed } = await this.selectOrCreateWorkspace(conversationId, name);
+    let existed: boolean;
+    try {
+      ({ existed } = await this.selectOrCreateWorkspace(conversationId, name));
+    } catch (error) {
+      if (!(error instanceof WorkspaceSwitchBusyError)) throw error;
+      this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
+      await this.deps.sendRendered(conversationId, workspaceBusyMessage());
+      return;
+    }
     this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
     await this.deps.sendRendered(conversationId, renderTelegramText([
       "workspace ",
@@ -243,17 +253,122 @@ export class WorkspaceFlow {
 
   async selectOrCreateWorkspace(conversationId: ConversationId, name: string): Promise<{ name: string; path: string; existed: boolean }> {
     validateWorkspaceName(name);
+    this.assertWorkspaceSwitchAvailable(conversationId, name);
     const existed = workspaceDirectoryExists(this.deps.config.workspaceRoot, name);
     const path = existed
       ? resolveWorkspacePath(this.deps.config.workspaceRoot, name)
       : await createWorkspace(this.deps.config.workspaceRoot, name);
     this.deps.store.upsertWorkspace({ name, path, createdAt: Date.now() });
-    this.resetCurrentCollaborationMode(conversationId);
-    this.deps.store.bindConversation(conversationId, name);
+    const workspace = { name, path, createdAt: Date.now() };
+    await this.activateWorkspace(conversationId, workspace);
     this.deps.logger.info(existed ? "router.workspace_existing_selected" : "router.workspace_created", { conversation_id: conversationId, workspace: name, path });
-    await this.deps.ensureAgentStarted(conversationId, { name, path, createdAt: Date.now() }, undefined, { resumePrevious: false });
-    this.deps.store.setCollaborationMode(sessionKey(conversationId, name), "default");
     return { name, path, existed };
+  }
+
+  private async activateWorkspace(conversationId: ConversationId, workspace: WorkspaceRecord): Promise<void> {
+    if (!this.deps.config.experimentalRelayWorkEnabled) {
+      this.resetCurrentCollaborationMode(conversationId);
+      this.deps.store.bindConversation(conversationId, workspace.name);
+      // Legacy mode keeps its eager-start behavior. Relay Work binds the
+      // directory lazily so ordinary input can start fresh and /resume can be
+      // the only operation that joins an existing Codex thread.
+      await this.deps.ensureAgentStarted(conversationId, workspace, undefined, { resumePrevious: false });
+      this.deps.store.setCollaborationMode(sessionKey(conversationId, workspace.name), "default");
+      return;
+    }
+
+    const current = this.currentWorkspace(conversationId);
+    if (current?.name === workspace.name) {
+      this.deps.logger.info("router.workspace_selection_unchanged", {
+        conversation_id: conversationId,
+        workspace: workspace.name,
+      });
+      return;
+    }
+    this.assertWorkspaceSwitchAvailable(conversationId, workspace.name);
+
+    const targetKey = sessionKey(conversationId, workspace.name);
+    await this.releaseWorkspaceSession(conversationId, workspace.name, targetKey, true);
+
+    const sourceKey = current ? sessionKey(conversationId, current.name) : undefined;
+    const sourceStatus = sourceKey ? this.deps.agent.getStatus(sourceKey) : undefined;
+    const sourceWasRunning = Boolean(sourceStatus?.running);
+    const sourceThreadId = sourceKey
+      ? sourceStatus?.threadId ?? this.deps.store.getSession(sourceKey)?.thread_id ?? undefined
+      : undefined;
+    const sourceMode = sourceKey ? this.deps.store.getCollaborationMode(sourceKey) : "default";
+    let sourceReleased = false;
+
+    try {
+      if (current && sourceKey) {
+        sourceReleased = await this.releaseWorkspaceSession(conversationId, current.name, sourceKey, true);
+      }
+      this.deps.store.bindConversation(conversationId, workspace.name);
+    } catch (error) {
+      if (current && sourceKey && sourceReleased && sourceWasRunning && sourceThreadId) {
+        try {
+          await this.deps.ensureAgentStarted(conversationId, current, sourceThreadId);
+          this.deps.store.setCollaborationMode(sourceKey, sourceMode);
+        } catch (rollbackError) {
+          throw new Error(
+            `Could not switch workspace: ${errorMessage(error)} Could not restore ${current.name}: ${errorMessage(rollbackError)}`,
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
+  private assertWorkspaceSwitchAvailable(conversationId: ConversationId, targetWorkspaceName: string): void {
+    if (!this.deps.config.experimentalRelayWorkEnabled) return;
+    const current = this.currentWorkspace(conversationId);
+    if (current?.name === targetWorkspaceName) return;
+    const busyWorkspace = [current?.name, targetWorkspaceName]
+      .filter((name): name is string => Boolean(name))
+      .find((name) => hasBusyWorkspaceWork(
+        this.deps.store,
+        conversationId,
+        name,
+        this.deps.agent.getStatus(sessionKey(conversationId, name)),
+      ));
+    if (!busyWorkspace) return;
+    this.deps.logger.info("router.workspace_switch_rejected_busy", {
+      conversation_id: conversationId,
+      current_workspace: current?.name,
+      target_workspace: targetWorkspaceName,
+      busy_workspace: busyWorkspace,
+    });
+    throw new WorkspaceSwitchBusyError();
+  }
+
+  private async releaseWorkspaceSession(
+    conversationId: ConversationId,
+    workspaceName: string,
+    key: string,
+    resetPresentation: boolean,
+  ): Promise<boolean> {
+    const status = this.deps.agent.getStatus(key);
+    const stored = this.deps.store.getSession(key);
+    if (!status?.running) {
+      if (stored?.status === "running") {
+        if (resetPresentation) await this.deps.resetSessionPresentation(key, { deletePages: false });
+        this.deps.store.markSessionStopped(key);
+      }
+      return false;
+    }
+    if (!this.deps.agent.release) {
+      throw new Error("Agent driver cannot release a shared workspace session.");
+    }
+    if (resetPresentation) await this.deps.resetSessionPresentation(key, { deletePages: false });
+    await this.deps.agent.release(key);
+    this.deps.store.markSessionStopped(key);
+    this.deps.logger.info("router.workspace_session_released", {
+      conversation_id: conversationId,
+      workspace: workspaceName,
+      session_key: key,
+      thread_id: status.threadId,
+    });
+    return true;
   }
 
   private resetCurrentCollaborationMode(conversationId: ConversationId): void {
@@ -293,4 +408,22 @@ export class WorkspaceFlow {
     if (result.messageId) this.deps.store.setConsoleMessageId(conversationId, result.messageId);
   }
 
+}
+
+class WorkspaceSwitchBusyError extends Error {
+  constructor() {
+    super("Codex is busy. The current workspace was not changed.");
+    this.name = "WorkspaceSwitchBusyError";
+  }
+}
+
+function workspaceBusyMessage(): RenderedTelegramText {
+  return messageWithTitle(
+    "Codex is busy.",
+    "Wait for the current turn, answer the pending question, or handle the approval request before switching workspace.",
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
