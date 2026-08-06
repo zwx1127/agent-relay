@@ -22,23 +22,24 @@ export class SessionRepository {
         -- last known thread for resume/status flows.
         thread_id = COALESCE(excluded.thread_id, agent_sessions.thread_id),
         collaboration_mode = 'default',
-        collaboration_thread_id = NULL
+        collaboration_thread_id = NULL,
+        collaboration_mode_pending = NULL
     `).run({ $sessionKey: sessionKey, $scopeKey: scopeKey, $conversationId: String(conversationId), $workspaceName: workspaceName, $startedAt: startedAt, $threadId: threadId ?? null });
     this.logger.info("store.session_marked_started", { session_key: sessionKey, conversation_id: conversationId, workspace: workspaceName });
   }
 
   markStopped(sessionKey: string, stoppedAt = Date.now()): void {
-    this.db.query("UPDATE agent_sessions SET status = 'stopped', stopped_at = ?, collaboration_mode = 'default', collaboration_thread_id = NULL WHERE session_key = ?").run(stoppedAt, sessionKey);
+    this.db.query("UPDATE agent_sessions SET status = 'stopped', stopped_at = ?, collaboration_mode = 'default', collaboration_thread_id = NULL, collaboration_mode_pending = NULL WHERE session_key = ?").run(stoppedAt, sessionKey);
     this.logger.info("store.session_marked_stopped", { session_key: sessionKey });
   }
 
   clearThreadId(sessionKey: string): void {
-    this.db.query("UPDATE agent_sessions SET thread_id = NULL, collaboration_mode = 'default', collaboration_thread_id = NULL WHERE session_key = ?").run(sessionKey);
+    this.db.query("UPDATE agent_sessions SET thread_id = NULL, collaboration_mode = 'default', collaboration_thread_id = NULL, collaboration_mode_pending = NULL WHERE session_key = ?").run(sessionKey);
     this.logger.info("store.session_thread_cleared", { session_key: sessionKey });
   }
 
   setThreadId(sessionKey: string, threadId: string): void {
-    this.db.query("UPDATE agent_sessions SET thread_id = ?, collaboration_mode = 'default', collaboration_thread_id = NULL WHERE session_key = ?").run(threadId, sessionKey);
+    this.db.query("UPDATE agent_sessions SET thread_id = ?, collaboration_mode = 'default', collaboration_thread_id = NULL, collaboration_mode_pending = NULL WHERE session_key = ?").run(threadId, sessionKey);
     this.logger.info("store.session_thread_set", { session_key: sessionKey, thread_id: threadId });
   }
 
@@ -58,15 +59,44 @@ export class SessionRepository {
     this.db.query(`
       UPDATE agent_sessions
       SET collaboration_mode = ?,
-          collaboration_thread_id = CASE WHEN ? = 'plan' THEN thread_id ELSE NULL END
+          collaboration_thread_id = CASE WHEN ? = 'plan' THEN thread_id ELSE NULL END,
+          collaboration_mode_pending = NULL
       WHERE session_key = ?
     `).run(mode, mode, sessionKey);
     this.logger.info("store.session_collaboration_mode_set", { session_key: sessionKey, collaboration_mode: mode });
   }
 
+  requestCollaborationMode(sessionKey: string, mode: AgentCollaborationMode): void {
+    this.db.query(`
+      UPDATE agent_sessions
+      SET collaboration_mode = ?,
+          collaboration_thread_id = CASE WHEN ? = 'plan' THEN thread_id ELSE NULL END,
+          collaboration_mode_pending = ?
+      WHERE session_key = ? AND status = 'running' AND thread_id IS NOT NULL
+    `).run(mode, mode, mode, sessionKey);
+    this.logger.info("store.session_collaboration_mode_requested", { session_key: sessionKey, collaboration_mode: mode });
+  }
+
+  getPendingCollaborationMode(sessionKey: string): AgentCollaborationMode | undefined {
+    const row = this.db.query<{ status?: string | null; collaboration_mode_pending?: string | null }, [string]>(`
+      SELECT status, collaboration_mode_pending
+      FROM agent_sessions
+      WHERE session_key = ?
+    `).get(sessionKey);
+    if (row?.status !== "running") return undefined;
+    return row.collaboration_mode_pending === "plan" || row.collaboration_mode_pending === "default"
+      ? row.collaboration_mode_pending
+      : undefined;
+  }
+
+  clearPendingCollaborationMode(sessionKey: string, expectedMode: AgentCollaborationMode): void {
+    this.db.query("UPDATE agent_sessions SET collaboration_mode_pending = NULL WHERE session_key = ? AND collaboration_mode_pending = ?").run(sessionKey, expectedMode);
+    this.logger.info("store.session_collaboration_mode_applied", { session_key: sessionKey, collaboration_mode: expectedMode });
+  }
+
   get(sessionKey: string): AgentSessionRow | undefined {
     const row = this.db.query<AgentSessionRow, [string]>(`
-      SELECT session_key, scope_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode, collaboration_thread_id
+      SELECT session_key, scope_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode, collaboration_thread_id, collaboration_mode_pending
       FROM agent_sessions
       WHERE session_key = ?
     `).get(sessionKey);
@@ -75,7 +105,7 @@ export class SessionRepository {
 
   listRunning(): AgentSessionRow[] {
     return this.db.query<AgentSessionRow, []>(`
-      SELECT session_key, scope_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode, collaboration_thread_id
+      SELECT session_key, scope_key, conversation_id, workspace_name, status, started_at, stopped_at, thread_id, collaboration_mode, collaboration_thread_id, collaboration_mode_pending
       FROM agent_sessions
       WHERE status = 'running'
       ORDER BY started_at DESC

@@ -79,12 +79,14 @@ Relay 永远不会启动 Gateway。实验开关启用但当前为 local 模式�
 ## Thread、workspace 与多客户端
 
 - 多个 CLI、桌面版和 Relay 客户端可连接同一个 Gateway。每个客户端有独立 WebSocket 连接，但只由一个 app-server 管理权威状态。
+- Gateway 模式从共享 app-server 和已有 thread 继承 Codex 配置。Relay 的普通请求、fork 和 side conversation 都不会覆盖 model、reasoning effort、personality、审批、sandbox 或 instructions；由 IM 新建 thread 时只携带用户明确选择的 workspace 目录。只有用户明确选择 Default 或 Plan 后，Relay 才会发送一次 collaboration mode 设置；协议要求的 model 和 reasoning-effort 字段复用 thread 当前值，如果当时是 steer，该模式意图会保留到下一个新 turn。`CODEX_APPROVAL`、`CODEX_SANDBOX` 和 Relay instruction 注入设置只用于本地 stdio 模式。
 - 多个原生客户端和多个 IM scope 可以 `/resume` 同一个 thread。Relay 不增加单写者或所有权限制，由用户决定哪个客户端发送输入。
 - `/resume` 复用 Codex TUI 的恢复语义。来源 scope 存在活动 turn、审批、用户输入请求或其他忙碌 Relay task 时，会拒绝切换。
 - `/resume` 成功后，Relay 会根据最近 turn 摘要立即显示活动卡片。活动 turn 会继续更新同一张卡；已完成、中断、失败或没有 turn 的 thread 会显示对应终态或 Idle 状态。
 - Relay Home 选择 workspace 只绑定目录，不会让已运行的原生 Codex 进程切换目录，也不会自动绑定 thread。第一条普通消息会新建 thread；只有 `/resume` 会显式加入已有工作。
 - 空闲 workspace 切换只释放 Relay 的旧订阅，不停止 thread；忙碌时会拒绝切换。
 - 活动 turn 期间的普通 IM 输入采用 Codex TUI Enter/Steer 语义。接力工作不增加 Tab/Queue、Gateway 输入锁或 thread 所有权锁。
+- 原生 Codex 客户端或其他 IM scope 新发送的用户消息会实时同步到同一 thread 上的其余 IM scope；Relay 不会把消息回显到来源 scope。文本保持原样；非文本输入只显示附件数量，不会下载或重新上传。
 - 审批、用户输入和 MCP elicitation 可以出现在关联同一 thread 的全部已连接客户端中。第一份有效响应胜出，resolved 通知会清除重复控件。
 
 Gateway 只转发 Codex、Gateway、Relay 同时运行且关联同一 thread 后产生的新实时事件。它不保存进度历史、消费游标、离线队列、重放或追赶流。恢复时只读取最新 turn 摘要来生成即时活动状态卡，不会把错过的对话输出补发到 IM。

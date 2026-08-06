@@ -285,12 +285,17 @@ export class TaskCoordinator {
       // Collaboration mode is stored per relay session so Plan mode survives
       // callbacks and prompt submissions without changing the agent interface.
       const mode = this.deps.store.getCollaborationMode(key);
+      const pendingMode = this.deps.store.getPendingCollaborationMode(key);
       const sendOptions: AgentSendOptions = {
         collaborationMode: mode,
+        ...(pendingMode === mode ? { collaborationModeExplicit: true } : {}),
         ...(input.attachments?.length ? { attachments: input.attachments } : {}),
         ...(input.images?.length ? { images: input.images } : {}),
       };
       result = await this.deps.agent.send(key, input.text, Object.keys(sendOptions).length > 0 ? sendOptions : undefined);
+      if (pendingMode === mode && result.collaborationModeApplied) {
+        this.deps.store.clearPendingCollaborationMode(key, mode);
+      }
     } catch (error) {
       if (task) {
         this.updateTaskStatus(task.id, "failed", task.turnId);

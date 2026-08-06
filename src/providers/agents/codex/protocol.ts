@@ -1,4 +1,4 @@
-import type { AgentApprovalKind, AgentCollaborationMode, AgentImageInput, AgentInputAttachment, AgentMcpElicitationFieldSchema, AgentMcpElicitationSchema, AgentModelSummary, AgentReviewTarget, AgentSessionStatus, AgentThreadGoal, AgentThreadGoalStatus, AgentThreadSummary, AgentTokenBreakdown, AgentTurnCompletedEvent, AgentTurnError, AgentTurnStatus, AgentUserInputQuestion } from "../../../ports/agent.ts";
+import type { AgentApprovalKind, AgentCollaborationMode, AgentImageInput, AgentInputAttachment, AgentMcpElicitationFieldSchema, AgentMcpElicitationSchema, AgentModelSummary, AgentReviewTarget, AgentSessionStatus, AgentTaskInput, AgentThreadGoal, AgentThreadGoalStatus, AgentThreadSummary, AgentTokenBreakdown, AgentTurnCompletedEvent, AgentTurnError, AgentTurnStatus, AgentUserInputQuestion } from "../../../ports/agent.ts";
 
 export function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
@@ -326,6 +326,58 @@ export function userInputPayload(
     if (!structuredLocalImages.has(image.path)) input.push({ type: "localImage", path: image.path });
   }
   return input;
+}
+
+export function userMessageInput(item: Record<string, unknown> | undefined): AgentTaskInput | undefined {
+  if (item?.type !== "userMessage" || !Array.isArray(item.content)) return undefined;
+  const textParts: string[] = [];
+  const attachments: AgentInputAttachment[] = [];
+  for (const value of item.content) {
+    const content = asRecord(value);
+    switch (content?.type) {
+      case "text": {
+        const text = getString(content, "text");
+        if (text !== undefined) textParts.push(text);
+        break;
+      }
+      case "image": {
+        const url = getString(content, "url");
+        if (url) attachments.push({ type: "image", url, ...(isImageDetail(content.detail) ? { detail: content.detail } : {}) });
+        break;
+      }
+      case "localImage": {
+        const path = getString(content, "path");
+        if (path) attachments.push({ type: "localImage", path, ...(isImageDetail(content.detail) ? { detail: content.detail } : {}) });
+        break;
+      }
+      case "audio": {
+        const url = getString(content, "url");
+        if (url) attachments.push({ type: "audio", url });
+        break;
+      }
+      case "localAudio": {
+        const path = getString(content, "path");
+        if (path) attachments.push({ type: "localAudio", path });
+        break;
+      }
+      case "skill":
+      case "mention": {
+        const name = getString(content, "name");
+        const path = getString(content, "path");
+        if (name && path) attachments.push({ type: content.type, name, path });
+        break;
+      }
+    }
+  }
+  if (textParts.length === 0 && attachments.length === 0) return undefined;
+  return {
+    text: textParts.join("\n"),
+    ...(attachments.length > 0 ? { attachments } : {}),
+  };
+}
+
+function isImageDetail(value: unknown): value is "auto" | "low" | "high" | "original" {
+  return value === "auto" || value === "low" || value === "high" || value === "original";
 }
 
 export function imageOutputEvent(sessionKey: string, item: Record<string, unknown>, turnId: string | undefined): {

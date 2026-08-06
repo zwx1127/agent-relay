@@ -1,3 +1,4 @@
+import type { AgentTaskInput } from "./input.ts";
 import type { AgentThreadGoal } from "./thread.ts";
 
 export type AgentOutputHandler = (event: AgentOutputEvent) => void | Promise<void>;
@@ -12,7 +13,17 @@ export type AgentOutputEvent =
   | AgentApprovalRequestEvent
   | AgentMcpElicitationRequestEvent
   | AgentServerRequestResolvedEvent
+  | AgentUserMessageEvent
   | AgentThreadLifecycleEvent;
+
+export interface AgentUserMessageEvent {
+  type: "user_message";
+  sessionKey: string;
+  input: AgentTaskInput;
+  threadId: string;
+  turnId?: string;
+  itemId?: string;
+}
 
 export interface AgentServerRequestResolvedEvent {
   type: "server_request_resolved";

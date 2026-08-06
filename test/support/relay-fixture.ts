@@ -69,8 +69,12 @@ export function cleanupRelayFixtures(): void {
   for (const dir of fixtureDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 }
 
-export function sentPrompt(text: string, collaborationMode: "default" | "plan" = "default"): { key: string; text: string; options: { collaborationMode: "default" | "plan" } } {
-  return { key: "codex:1:demo", text, options: { collaborationMode } };
+export function sentPrompt(text: string, collaborationMode: "default" | "plan" = "default", explicit = false): {
+  key: string;
+  text: string;
+  options: { collaborationMode: "default" | "plan"; collaborationModeExplicit?: true };
+} {
+  return { key: "codex:1:demo", text, options: { collaborationMode, ...(explicit ? { collaborationModeExplicit: true } : {}) } };
 }
 
 export async function waitForStreamFlush(): Promise<void> {

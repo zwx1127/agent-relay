@@ -86,7 +86,38 @@ describe("experimental Codex Gateway transport", () => {
               method: "item/agentMessage/delta",
               params: { threadId: "shared-thread", turnId: "active-turn", itemId: "reply", delta: "live after connection" },
             }));
-          } else if (method === "turn/steer") send({ turn: { id: "active-turn", status: "inProgress", items: [] } });
+            socket.send(JSON.stringify({
+              method: "item/started",
+              params: {
+                threadId: "shared-thread",
+                turnId: "active-turn",
+                item: {
+                  type: "userMessage",
+                  id: "external-user",
+                  clientId: null,
+                  content: [
+                    { type: "text", text: "from Codex Desktop" },
+                    { type: "localImage", path: "C:/tmp/screenshot.png" },
+                  ],
+                },
+              },
+            }));
+          } else if (method === "turn/steer") {
+            send({ turn: { id: "active-turn", status: "inProgress", items: [] } });
+            socket.send(JSON.stringify({
+              method: "item/started",
+              params: {
+                threadId: "shared-thread",
+                turnId: "active-turn",
+                item: {
+                  type: "userMessage",
+                  id: "relay-user",
+                  clientId: params?.clientUserMessageId,
+                  content: [{ type: "text", text: "steer from IM" }],
+                },
+              },
+            }));
+          }
           else if (method === "thread/list") send({ data: [{ id: "shared-thread", status: { type: "active" } }] });
         },
       },
@@ -100,6 +131,8 @@ describe("experimental Codex Gateway transport", () => {
       },
       sandbox: "workspace-write",
       approval: "on-request",
+      developerInstructions: "relay developer instructions",
+      baseInstructions: "relay base instructions",
     }, (event) => {
       outputs.push(event as unknown as Record<string, unknown>);
     }, () => undefined);
@@ -117,14 +150,178 @@ describe("experimental Codex Gateway transport", () => {
       });
       await Bun.sleep(20);
       await driver.send(status.sessionKey, "steer from IM");
+      await Bun.sleep(10);
       const resume = received.find((message) => message.method === "thread/resume");
-      expect((resume?.params as Record<string, unknown>)?.excludeTurns).toBe(true);
-      expect((resume?.params as Record<string, unknown>)?.initialTurnsPage).toEqual({ limit: 1, sortDirection: "desc", itemsView: "summary" });
-      expect(received.some((message) => message.method === "turn/steer")).toBe(true);
+      const resumeParams = resume?.params as Record<string, unknown>;
+      expect(resumeParams.excludeTurns).toBe(true);
+      expect(resumeParams.initialTurnsPage).toEqual({ limit: 1, sortDirection: "desc", itemsView: "summary" });
+      for (const field of ["cwd", "approvalPolicy", "approvalsReviewer", "sandbox", "developerInstructions", "baseInstructions"]) {
+        expect(resumeParams).not.toHaveProperty(field);
+      }
+      const steer = received.find((message) => message.method === "turn/steer");
+      expect((steer?.params as Record<string, unknown>)?.clientUserMessageId).toMatch(/^agent-relay:/);
       expect(outputs).toContainEqual(expect.objectContaining({ type: "message", chunk: "live after connection" }));
+      expect(outputs).toContainEqual(expect.objectContaining({
+        type: "user_message",
+        sessionKey: status.sessionKey,
+        input: { text: "from Codex Desktop", attachments: [{ type: "localImage", path: "C:/tmp/screenshot.png" }] },
+      }));
+      expect(outputs).not.toContainEqual(expect.objectContaining({ type: "user_message", input: expect.objectContaining({ text: "steer from IM" }) }));
       expect(outputs).toContainEqual(expect.objectContaining({ type: "user_input_request", requestId: "shared-question" }));
       expect(outputs).toContainEqual({ type: "server_request_resolved", sessionKey: status.sessionKey, requestId: "shared-question" });
       expect(driver.getStatus(status.sessionKey)?.activeTurnId).toBe("active-turn");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("mirrors live user messages across shared IM scopes without echoing the origin", async () => {
+    const received: Array<Record<string, unknown>> = [];
+    const outputs: Array<Record<string, unknown>> = [];
+    let sendNotification: ((message: unknown) => void) | undefined;
+    const server = Bun.serve<{ name?: string }>({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request, bunServer) {
+        if (bunServer.upgrade(request, { data: {} })) return undefined;
+        return new Response("not found", { status: 404 });
+      },
+      websocket: {
+        open(socket) {
+          sendNotification = (message) => socket.send(JSON.stringify(message));
+        },
+        close() {
+          sendNotification = undefined;
+        },
+        message(socket, data) {
+          const message = JSON.parse(String(data)) as Record<string, unknown>;
+          received.push(message);
+          const id = message.id;
+          const method = message.method;
+          const params = message.params as Record<string, unknown> | undefined;
+          const send = (result: unknown) => socket.send(JSON.stringify({ id, result }));
+          if (method === "initialize") send({ userAgent: "codex-cli 0.145.0" });
+          else if (method === "model/list") send({ data: [{ id: "gpt-test", model: "gpt-test", isDefault: true }] });
+          else if (method === "collaborationMode/list") send({ data: [{ mode: "default" }, { mode: "plan" }] });
+          else if (method === "thread/resume") send({ thread: { id: params?.threadId, status: { type: "idle" } }, initialTurnsPage: { data: [], nextCursor: null } });
+          else if (method === "thread/start") send({
+            thread: { id: "fresh-thread", status: { type: "idle" } },
+            model: "gpt-thread-config",
+            reasoningEffort: "high",
+          });
+          else if (method === "thread/fork") send({ thread: { id: params?.ephemeral ? "side-thread" : "forked-thread", status: { type: "idle" } } });
+          else if (method === "thread/backgroundTerminals/list") send({ data: [] });
+          else if (method === "thread/unsubscribe") send({});
+          else if (method === "thread/inject_items") send({});
+          else if (method === "turn/start") {
+            send({ turn: { id: "new-turn", status: "inProgress", items: [] } });
+            if (params?.threadId === "side-thread") {
+              socket.send(JSON.stringify({
+                method: "item/agentMessage/delta",
+                params: { threadId: "side-thread", turnId: "new-turn", itemId: "side-answer", delta: "side response" },
+              }));
+              socket.send(JSON.stringify({
+                method: "turn/completed",
+                params: { threadId: "side-thread", turn: { id: "new-turn", status: "completed", items: [] } },
+              }));
+              return;
+            }
+            socket.send(JSON.stringify({
+              method: "item/started",
+              params: {
+                threadId: params?.threadId,
+                turnId: "new-turn",
+                item: {
+                  type: "userMessage",
+                  id: "relay-origin-message",
+                  clientId: params?.clientUserMessageId,
+                  content: [{ type: "text", text: "from scope one" }],
+                },
+              },
+            }));
+          }
+        },
+      },
+    });
+    const driver = new CodexDriver({
+      codexBin: fakeCodexBin(),
+      gatewayUrl: `ws://127.0.0.1:${server.port}`,
+      sandbox: "workspace-write",
+      approval: "on-request",
+      developerInstructions: "relay developer instructions",
+      baseInstructions: "relay base instructions",
+    }, (event) => {
+      outputs.push(event as unknown as Record<string, unknown>);
+    }, () => undefined);
+
+    try {
+      const first = await driver.start({ conversationId: "1", scopeKey: "1", workspaceName: "demo", workspacePath: "C:/work/demo", threadId: "shared-thread" });
+      const second = await driver.start({ conversationId: "2", scopeKey: "2", workspaceName: "demo", workspacePath: "C:/work/demo", threadId: "shared-thread" });
+      const external = {
+        method: "item/started",
+        params: {
+          threadId: "shared-thread",
+          turnId: "external-turn",
+          item: { type: "userMessage", id: "external-message", clientId: "codex-native", content: [{ type: "text", text: "native input" }] },
+        },
+      };
+      sendNotification?.(external);
+      sendNotification?.(external);
+      await Bun.sleep(20);
+      expect(outputs.filter((event) => event.type === "user_message")).toEqual([
+        expect.objectContaining({ sessionKey: first.sessionKey, input: { text: "native input" } }),
+        expect.objectContaining({ sessionKey: second.sessionKey, input: { text: "native input" } }),
+      ]);
+
+      outputs.length = 0;
+      await driver.send(first.sessionKey, "from scope one", { collaborationMode: "default" });
+      await Bun.sleep(20);
+      expect(outputs.filter((event) => event.type === "user_message")).toEqual([
+        expect.objectContaining({ sessionKey: second.sessionKey, input: { text: "from scope one" } }),
+      ]);
+      const turnStart = received.find((message) => message.method === "turn/start");
+      expect((turnStart?.params as Record<string, unknown>)?.clientUserMessageId).toMatch(/^agent-relay:/);
+      expect(turnStart?.params as Record<string, unknown>).not.toHaveProperty("collaborationMode");
+
+      expect(await driver.sideConversation(first.sessionKey, "side question")).toMatchObject({ message: "side response", threadId: "side-thread" });
+      const sideFork = received.find((message) => message.method === "thread/fork" && (message.params as Record<string, unknown>)?.ephemeral === true);
+      const sideForkParams = sideFork?.params as Record<string, unknown>;
+      expect(sideForkParams).toMatchObject({ threadId: "shared-thread", ephemeral: true, excludeTurns: true });
+      for (const field of ["cwd", "approvalPolicy", "approvalsReviewer", "sandbox", "developerInstructions", "baseInstructions"]) {
+        expect(sideForkParams).not.toHaveProperty(field);
+      }
+      const sideBoundary = received.find((message) => message.method === "thread/inject_items"
+        && (message.params as Record<string, unknown>)?.threadId === "side-thread");
+      expect(JSON.stringify(sideBoundary?.params)).toContain("side conversation");
+
+      const fresh = await driver.start({ conversationId: "3", scopeKey: "3", workspaceName: "demo", workspacePath: "C:/work/fresh" });
+      const threadStart = received.find((message) => message.method === "thread/start");
+      expect(threadStart?.params).toEqual({
+        cwd: "C:/work/fresh",
+      });
+
+      const explicitModeResult = await driver.send(fresh.sessionKey, "explicit plan mode", {
+        collaborationMode: "plan",
+        collaborationModeExplicit: true,
+      });
+      const explicitModeTurn = received.find((message) => message.method === "turn/start"
+        && JSON.stringify(message.params).includes("explicit plan mode"));
+      expect((explicitModeTurn?.params as Record<string, unknown>)?.collaborationMode).toEqual({
+        mode: "plan",
+        settings: {
+          model: "gpt-thread-config",
+          reasoning_effort: "high",
+          developer_instructions: null,
+        },
+      });
+      expect(explicitModeResult.collaborationModeApplied).toBe(true);
+
+      await driver.forkThread(second.sessionKey);
+      const fork = received.find((message) => message.method === "thread/fork" && (message.params as Record<string, unknown>)?.ephemeral !== true);
+      expect(fork?.params).toEqual({ threadId: "shared-thread", excludeTurns: true });
+      await driver.release(first.sessionKey);
+      await driver.release(second.sessionKey);
+      await driver.release(fresh.sessionKey);
     } finally {
       server.stop(true);
     }

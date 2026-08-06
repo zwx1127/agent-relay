@@ -145,14 +145,14 @@ export class FakeAgent implements AgentDriver {
     return status;
   }
 
-  async send(key: string, text: string, options?: AgentSendOptions): Promise<{ turnId?: string }> {
+  async send(key: string, text: string, options?: AgentSendOptions): Promise<{ turnId?: string; collaborationModeApplied?: boolean }> {
     if (this.failSend) throw this.failSend;
     this.sent.push({ key, text, ...(options ? { options } : {}) });
     const status = this.statuses.get(key);
     if (status?.activeTurnId) return { turnId: status.activeTurnId };
     const turnId = `turn-${this.sent.length}`;
     if (status) status.activeTurnId = turnId;
-    return { turnId };
+    return { turnId, ...(options?.collaborationMode ? { collaborationModeApplied: true } : {}) };
   }
 
   async stop(key: string): Promise<void> {

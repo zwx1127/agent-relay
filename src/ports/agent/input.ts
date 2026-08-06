@@ -1,5 +1,7 @@
 export interface AgentSendOptions {
   collaborationMode?: AgentCollaborationMode;
+  /** True only when the user explicitly requested this mode transition. */
+  collaborationModeExplicit?: boolean;
   attachments?: AgentInputAttachment[];
   /** Compatibility with tasks persisted before structured attachments were added. */
   images?: AgentImageInput[];
@@ -29,6 +31,8 @@ export interface AgentTaskInput {
 
 export interface AgentSendResult {
   turnId?: string;
+  /** The requested collaboration mode was attached to a newly started turn. */
+  collaborationModeApplied?: boolean;
 }
 
 export interface AgentInterruptResult {

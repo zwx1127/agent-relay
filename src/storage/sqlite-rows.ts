@@ -43,6 +43,7 @@ export interface AgentSessionRow {
   thread_id?: string | null;
   collaboration_mode?: string | null;
   collaboration_thread_id?: string | null;
+  collaboration_mode_pending?: string | null;
 }
 
 export interface PagedOutputRow {

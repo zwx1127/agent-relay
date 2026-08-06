@@ -98,6 +98,18 @@ export class SQLiteStore implements RelayStore {
     this.repositories.sessions.setCollaborationMode(sessionKey, mode);
   }
 
+  requestCollaborationMode(sessionKey: string, mode: AgentCollaborationMode): void {
+    this.repositories.sessions.requestCollaborationMode(sessionKey, mode);
+  }
+
+  getPendingCollaborationMode(sessionKey: string): AgentCollaborationMode | undefined {
+    return this.repositories.sessions.getPendingCollaborationMode(sessionKey);
+  }
+
+  clearPendingCollaborationMode(sessionKey: string, expectedMode: AgentCollaborationMode): void {
+    this.repositories.sessions.clearPendingCollaborationMode(sessionKey, expectedMode);
+  }
+
   getSession(sessionKey: string): AgentSessionRow | undefined {
     return this.repositories.sessions.get(sessionKey);
   }

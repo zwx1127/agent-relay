@@ -944,7 +944,7 @@ describe("relay controller thread commands", () => {
 
     await router.handle(textMessage("/plan design this"));
 
-    expect(agent.sent.at(-1)).toEqual(sentPrompt("design this", "plan"));
+    expect(agent.sent.at(-1)).toEqual(sentPrompt("design this", "plan", true));
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
     agent.getStatus("codex:1:demo")!.activeTurnId = undefined;
     const planButton = adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Implement");
@@ -953,7 +953,7 @@ describe("relay controller thread commands", () => {
     await router.handle(callbackMessage(planButton!.callback_data, 7, "cb-plan", adapter.sent.at(-1)?.messageId));
 
     expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
-    expect(agent.sent.at(-1)).toEqual(sentPrompt("Implement the approved plan."));
+    expect(agent.sent.at(-1)).toEqual(sentPrompt("Implement the approved plan.", "default", true));
     expect(adapter.reactions).toEqual([
       { conversationId: "1", messageId: "1", emoji: "🫡", options: { isBig: true } },
       { conversationId: "1", messageId: "1", emoji: "✍" },
@@ -981,6 +981,12 @@ describe("relay controller thread commands", () => {
     expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
     expect(agent.sent).toEqual([]);
     expect(adapter.sent.slice(-2).map((message) => message.text)).toEqual(["Plan mode enabled.", "Plan mode enabled."]);
+    expect(store.getPendingCollaborationMode("codex:1:demo")).toBe("plan");
+
+    await router.handle(textMessage("design after switch"));
+
+    expect(agent.sent.at(-1)).toEqual(sentPrompt("design after switch", "plan", true));
+    expect(store.getPendingCollaborationMode("codex:1:demo")).toBeUndefined();
   });
 
   test("failed Plan turns do not show Plan-ready and preserve the failure", async () => {
@@ -1017,7 +1023,7 @@ describe("relay controller thread commands", () => {
 
     await router.handle({ ...textMessage("/plan design this", 7, undefined, "1"), topic });
 
-    expect(agent.sent.at(-1)).toEqual({ key, text: "design this", options: { collaborationMode: "plan" } });
+    expect(agent.sent.at(-1)).toEqual({ key, text: "design this", options: { collaborationMode: "plan", collaborationModeExplicit: true } });
     expect(adapter.chatActions.at(-1)).toEqual({ conversationId: "1", action: "typing", options: { topic } });
 
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: key, turnId: "turn-1" });
@@ -1035,7 +1041,7 @@ describe("relay controller thread commands", () => {
     await router.handle(callbackMessage(planButton!.callback_data, 7, "cb-plan-topic", planMessage.messageId, "1"));
 
     expect(store.getCollaborationMode(key)).toBe("default");
-    expect(agent.sent.at(-1)).toEqual({ key, text: "Implement the approved plan.", options: { collaborationMode: "default" } });
+    expect(agent.sent.at(-1)).toEqual({ key, text: "Implement the approved plan.", options: { collaborationMode: "default", collaborationModeExplicit: true } });
   });
 
   test("plan ready card stays in the originating Lark thread", async () => {
@@ -1052,7 +1058,7 @@ describe("relay controller thread commands", () => {
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: key, turnId: "turn-1" });
 
     const planMessage = adapter.sent.at(-1)!;
-    expect(agent.sent.at(-1)).toEqual({ key, text: "design this", options: { collaborationMode: "plan" } });
+    expect(agent.sent.at(-1)).toEqual({ key, text: "design this", options: { collaborationMode: "plan", collaborationModeExplicit: true } });
     expect(planMessage).toMatchObject({
       conversationId: "1",
       options: { topic },

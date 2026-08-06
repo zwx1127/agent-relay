@@ -79,12 +79,14 @@ An explicit `gateway stop` writes durable `local` mode before stopping the proce
 ## Threads, workspaces, and multiple clients
 
 - Multiple CLI, Desktop, and Relay clients can connect to one Gateway. Each has an independent WebSocket connection; one app-server remains authoritative.
+- Gateway mode inherits Codex configuration from that shared app-server and the existing thread. Ordinary Relay requests, forks, and side conversations do not override model, reasoning effort, personality, approval, sandbox, or instructions. A new IM-created thread carries only the workspace directory explicitly selected by the user. Relay sends collaboration-mode settings once only after the user explicitly selects Default or Plan; the protocol-required model and reasoning-effort fields reuse the thread's current values, and a steer keeps the mode intent pending for the next new turn. `CODEX_APPROVAL`, `CODEX_SANDBOX`, and Relay instruction-injection settings apply only to local stdio mode.
 - Multiple native clients and multiple IM scopes may `/resume` the same thread. Relay adds no one-writer ownership rule; the user chooses which client sends input.
 - `/resume` uses Codex TUI resume semantics. A resume switch is rejected while the source scope has an active turn, approval, user-input request, or other busy Relay task.
 - After a successful `/resume`, Relay immediately shows an activity card hydrated from the latest turn summary. Active turns continue updating that card; completed, interrupted, failed, and empty threads show their terminal or Idle state.
 - Selecting a workspace in Relay Home only binds that directory. It does not make a running native Codex process change directories and does not auto-attach a thread. An ordinary first message starts fresh; `/resume` explicitly joins existing work.
 - An idle workspace switch releases Relay's old subscription without stopping the thread. A busy switch is rejected.
 - Ordinary IM input during an active turn uses Codex TUI Enter/Steer semantics. Relay work adds no Tab/Queue action, Gateway-level input lock, or thread ownership lock.
+- New user messages entered in a native Codex client or another IM scope are mirrored live to every other IM scope attached to the thread. Relay does not echo a message back to its originating scope. Text is preserved; non-text inputs are represented by attachment counts and are not downloaded or re-uploaded.
 - Approval, user-input, and MCP elicitation requests may appear in all connected clients associated with the thread. The first valid response wins; resolved notifications clear duplicate controls.
 
 Gateway forwards only live events produced while Codex, Gateway, and Relay are running and associated with the same thread. It stores no progress history, consumption cursor, offline queue, replay, or catch-up stream. Resuming reads the latest turn summary only to hydrate the immediate activity-state card; it does not render missed conversation output into IM.

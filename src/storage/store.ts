@@ -25,6 +25,9 @@ export interface RelayStore {
   setSessionThreadId(sessionKey: string, threadId: string): void;
   getCollaborationMode(sessionKey: string): AgentCollaborationMode;
   setCollaborationMode(sessionKey: string, mode: AgentCollaborationMode): void;
+  requestCollaborationMode(sessionKey: string, mode: AgentCollaborationMode): void;
+  getPendingCollaborationMode(sessionKey: string): AgentCollaborationMode | undefined;
+  clearPendingCollaborationMode(sessionKey: string, expectedMode: AgentCollaborationMode): void;
   getSession(sessionKey: string): AgentSessionRow | undefined;
   listRunningSessions(): AgentSessionRow[];
   appendTranscript(event: TranscriptEvent): void;

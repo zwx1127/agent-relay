@@ -214,7 +214,7 @@ export class MediaRelayService {
       });
       return;
     }
-    if (planMatch) this.deps.store.setCollaborationMode(sessionKey(scope.scopeKey, workspace.name), "plan");
+    if (planMatch) this.deps.store.requestCollaborationMode(sessionKey(scope.scopeKey, workspace.name), "plan");
     await this.deps.submitTask(scope.scopeKey, prompt, sorted[0]?.messageId, "auto", {
       text: prompt,
       attachments: images.map((image) => ({ type: "localImage", path: image.path, ...(image.caption ? { caption: image.caption } : {}) })),

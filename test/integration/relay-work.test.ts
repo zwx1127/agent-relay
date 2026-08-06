@@ -198,11 +198,19 @@ describe("experimental relay work behavior", () => {
         options: [{ label: "Yes", description: "Continue" }],
       }],
     });
+    await router.handleAgentOutput({
+      type: "user_message",
+      sessionKey: sourceKey,
+      threadId: "source-thread",
+      itemId: "late-user",
+      input: { text: "late shared input" },
+    });
     await router.handleAgentOutput({ type: "turn_completed", sessionKey: sourceKey, turnId: "late-turn" });
 
     expect(adapter.sent).toHaveLength(sentCount);
     expect(adapter.edited).toHaveLength(editedCount);
     expect(store.latestTranscriptEvent("1", "demo", "agent")).toBeUndefined();
+    expect(store.latestTranscriptEvent("1", "demo", "user")).toBeUndefined();
     expect(store.latestPendingPrompt("1", ["codex_user_input"])).toBeUndefined();
     expect(logLines.join("\n")).toContain("router.agent_event_inactive_workspace");
   });
@@ -256,6 +264,38 @@ describe("experimental relay work behavior", () => {
     expect(agent.getStatus(sessionKey("2", "demo"))?.threadId).toBe("shared-thread");
     expect(store.getSession(sessionKey("1", "demo"))?.thread_id).toBe("shared-thread");
     expect(store.getSession(sessionKey("2", "demo"))?.thread_id).toBe("shared-thread");
+  });
+
+  test("renders shared-thread user messages and records them as user transcript entries", async () => {
+    const { router, store, adapter, agent, path } = experimentalFixture();
+    const key = sessionKey("1", "demo");
+    const status = await agent.start({ conversationId: "1", scopeKey: "1", workspaceName: "demo", workspacePath: path, threadId: "shared-thread" });
+    store.markSessionStarted(key, "1", "demo", 1, status.threadId, "1");
+
+    await router.handleAgentOutput({
+      type: "user_message",
+      sessionKey: key,
+      threadId: "shared-thread",
+      turnId: "external-turn",
+      itemId: "external-user",
+      input: {
+        text: "message from Codex Desktop",
+        attachments: [
+          { type: "localImage", path: "C:/tmp/screenshot.png" },
+          { type: "audio", url: "https://example.test/audio.wav" },
+        ],
+      },
+    });
+
+    expect(adapter.sent.at(-1)?.text).toContain("User \u00b7 shared thread");
+    expect(adapter.sent.at(-1)?.text).toContain("message from Codex Desktop");
+    expect(adapter.sent.at(-1)?.text).toContain("[1 image, 1 audio attached]");
+    expect(store.latestTranscriptEvent("1", "demo", "user")).toMatchObject({
+      conversationId: "1",
+      workspaceName: "demo",
+      role: "user",
+      text: "message from Codex Desktop\n[1 image, 1 audio attached]\n",
+    });
   });
 
   test("removes the legacy thread commands even when Relay Work is enabled", async () => {

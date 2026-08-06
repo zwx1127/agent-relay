@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import packageJson from "../../../../package.json" with { type: "json" };
 import { sessionKey } from "../../../domain/session.ts";
@@ -12,6 +13,7 @@ import type {
   AgentFileSearchResult,
   AgentInterruptResult,
   AgentSendOptions,
+  AgentSendResult,
   AgentDriver,
   AgentExitHandler,
   AgentModelSummary,
@@ -28,7 +30,7 @@ import type {
   AgentThreadSummary,
   StartAgentOptions,
 } from "../../../ports/agent.ts";
-import { applySessionMetadata, applyThreadMetadata, applyThreadSettings, asRecord, collaborationModePayload, getString, getThreadId, getTurnId, imageOutputEvent, isNoActiveTurnToInterruptError, isNoActiveTurnToSteerError, reviewTargetPayload, summarizeUnknown, toModelSummary, toThreadGoal, toThreadSummary, toTokenBreakdown, toTurnCompletedEvent, updateActiveTurnFromResult, userInputPayload } from "./protocol.ts";
+import { applySessionMetadata, applyThreadMetadata, applyThreadSettings, asRecord, collaborationModePayload, getString, getThreadId, getTurnId, imageOutputEvent, isNoActiveTurnToInterruptError, isNoActiveTurnToSteerError, reviewTargetPayload, summarizeUnknown, toModelSummary, toThreadGoal, toThreadSummary, toTokenBreakdown, toTurnCompletedEvent, updateActiveTurnFromResult, userInputPayload, userMessageInput } from "./protocol.ts";
 import { codexAppServerSpawnCommand, codexVersionSpawnCommand, formatCodexSpawnError, isCodexVersionSupported, MINIMUM_CODEX_VERSION, parseCodexVersion, type CodexSpawnCommand } from "./spawn.ts";
 import { BackgroundTerminalTracker } from "./background-terminals.ts";
 import { CodexRpcClient, type JsonRpcMessage, type JsonRpcNotification, type JsonRpcRequest, type JsonRpcResponse } from "./rpc.ts";
@@ -64,6 +66,14 @@ interface PendingInteractiveRequest {
   resolutionEmitted: boolean;
 }
 
+interface PendingUserMessageOrigin {
+  sessionKey: string;
+  createdAt: number;
+}
+
+const USER_MESSAGE_TRACKING_TTL_MS = 10 * 60_000;
+const USER_MESSAGE_TRACKING_LIMIT = 2_048;
+
 export class CodexDriver implements AgentDriver {
   readonly providerId = "codex";
   readonly capabilities = {
@@ -92,9 +102,11 @@ export class CodexDriver implements AgentDriver {
   // Codex notifications are thread-scoped, while relay routing is session-scoped.
   private readonly threadToSessions = new Map<string, Set<string>>();
   private readonly pendingInteractiveRequests = new Map<string, PendingInteractiveRequest>();
+  private readonly pendingUserMessageOrigins = new Map<string, PendingUserMessageOrigin>();
+  private readonly mirroredUserMessageItems = new Map<string, number>();
   // Sends for the same relay session must be ordered so steering input cannot
   // overtake the turn/start request that created the active turn.
-  private readonly inputQueues = new Map<string, Promise<{ turnId?: string }>>();
+  private readonly inputQueues = new Map<string, Promise<AgentSendResult>>();
   private readonly rpc = new CodexRpcClient((message, options) => this.writeMessage(message, options));
   private readonly recentServerStderr = new RecentStderrBuffer();
   private proc?: ChildProcessWithoutNullStreams;
@@ -145,6 +157,7 @@ export class CodexDriver implements AgentDriver {
       ...(options.threadId ? { threadId: options.threadId } : {}),
     };
 
+    const gateway = this.usesGateway();
     this.logger.info("codex.session_starting", {
       session_key: key,
       conversation_id: options.conversationId,
@@ -152,8 +165,8 @@ export class CodexDriver implements AgentDriver {
       workspace_path: options.workspacePath,
       thread_id: options.threadId,
       codex_bin: this.options.codexBin,
-      sandbox: this.options.sandbox,
-      approval: this.options.approval,
+      security_source: gateway ? "shared_codex_config" : "relay_environment",
+      ...(gateway ? {} : { sandbox: this.options.sandbox, approval: this.options.approval }),
     });
 
     const result = await this.request(options.threadId ? "thread/resume" : "thread/start", {
@@ -162,12 +175,16 @@ export class CodexDriver implements AgentDriver {
         excludeTurns: true,
         initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "summary" },
       } : {}),
-      cwd: options.workspacePath,
-      approvalPolicy: this.options.approval,
-      approvalsReviewer: "user",
-      sandbox: this.options.sandbox,
-      ...(this.options.developerInstructions ? { developerInstructions: this.options.developerInstructions } : {}),
-      ...(this.options.baseInstructions ? { baseInstructions: this.options.baseInstructions } : {}),
+      ...(!gateway || !options.threadId ? { cwd: options.workspacePath } : {}),
+      ...(!gateway ? {
+        approvalPolicy: this.options.approval,
+        approvalsReviewer: "user",
+        sandbox: this.options.sandbox,
+      } : {}),
+      ...(!gateway ? {
+        ...(this.options.developerInstructions ? { developerInstructions: this.options.developerInstructions } : {}),
+        ...(this.options.baseInstructions ? { baseInstructions: this.options.baseInstructions } : {}),
+      } : {}),
     });
     const threadId = getThreadId(result) ?? options.threadId;
     if (!threadId) throw new Error("Codex app-server did not return a thread id.");
@@ -196,7 +213,7 @@ export class CodexDriver implements AgentDriver {
     return status;
   }
 
-  async send(key: string, text: string, options?: AgentSendOptions): Promise<{ turnId?: string }> {
+  async send(key: string, text: string, options?: AgentSendOptions): Promise<AgentSendResult> {
     const previous = this.inputQueues.get(key) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(() => this.sendNow(key, text, options));
     this.inputQueues.set(key, current);
@@ -207,7 +224,7 @@ export class CodexDriver implements AgentDriver {
     }
   }
 
-  private async sendNow(key: string, text: string, options?: AgentSendOptions): Promise<{ turnId?: string }> {
+  private async sendNow(key: string, text: string, options?: AgentSendOptions): Promise<AgentSendResult> {
     const running = this.sessions.get(key);
     if (!running?.status.threadId) {
       this.logger.warn("codex.send_without_session", { session_key: key, text_len: text.length });
@@ -216,10 +233,16 @@ export class CodexDriver implements AgentDriver {
 
     const input = userInputPayload(text, options?.attachments, options?.images);
     const method = running.status.activeTurnId ? "turn/steer" : "turn/start";
-    const collaborationMode = options?.collaborationMode ? collaborationModePayload(running.status, options.collaborationMode, this.defaultModel) : undefined;
+    const gateway = this.usesGateway();
+    const collaborationMode = options?.collaborationMode && (!gateway || options.collaborationModeExplicit)
+      ? collaborationModePayload(running.status, options.collaborationMode, this.defaultModel)
+      : undefined;
+    const clientUserMessageId = this.usesGateway() ? `agent-relay:${randomUUID()}` : undefined;
+    if (clientUserMessageId) this.registerUserMessageOrigin(clientUserMessageId, key);
+    const originParams = clientUserMessageId ? { clientUserMessageId } : {};
     const params = running.status.activeTurnId
-      ? { threadId: running.status.threadId, expectedTurnId: running.status.activeTurnId, input }
-      : { threadId: running.status.threadId, input, ...(collaborationMode ? { collaborationMode } : {}) };
+      ? { threadId: running.status.threadId, expectedTurnId: running.status.activeTurnId, input, ...originParams }
+      : { threadId: running.status.threadId, input, ...(collaborationMode ? { collaborationMode } : {}), ...originParams };
     clearRecentError(running);
 
     this.logger.info("codex.input_sent", {
@@ -233,26 +256,33 @@ export class CodexDriver implements AgentDriver {
     });
     this.logger.debug("codex.input_text", { session_key: key, message_text: text });
     let result: unknown;
+    let collaborationModeApplied = method === "turn/start" && Boolean(collaborationMode);
     try {
-      result = await this.request(method, params);
+      try {
+        result = await this.request(method, params);
+      } catch (error) {
+        if (method !== "turn/steer" || !isNoActiveTurnToSteerError(error)) throw error;
+        // The app-server may complete a turn before relay receives the completion
+        // notification. Recover by clearing the stale turn and starting a new one.
+        this.logger.warn("codex.stale_active_turn_recovered", {
+          session_key: key,
+          conversation_id: running.status.conversationId,
+          workspace: running.status.workspaceName,
+          thread_id: running.status.threadId,
+          stale_turn_id: running.status.activeTurnId,
+        });
+        running.status.activeTurnId = undefined;
+        this.mirrorThreadStatus(key);
+        result = await this.request("turn/start", { threadId: running.status.threadId, input, ...(collaborationMode ? { collaborationMode } : {}), ...originParams });
+        collaborationModeApplied = Boolean(collaborationMode);
+      }
     } catch (error) {
-      if (method !== "turn/steer" || !isNoActiveTurnToSteerError(error)) throw error;
-      // The app-server may complete a turn before relay receives the completion
-      // notification. Recover by clearing the stale turn and starting a new one.
-      this.logger.warn("codex.stale_active_turn_recovered", {
-        session_key: key,
-        conversation_id: running.status.conversationId,
-        workspace: running.status.workspaceName,
-        thread_id: running.status.threadId,
-        stale_turn_id: running.status.activeTurnId,
-      });
-      running.status.activeTurnId = undefined;
-      this.mirrorThreadStatus(key);
-      result = await this.request("turn/start", { threadId: running.status.threadId, input, ...(collaborationMode ? { collaborationMode } : {}) });
+      if (clientUserMessageId) this.pendingUserMessageOrigins.delete(clientUserMessageId);
+      throw error;
     }
     updateActiveTurnFromResult(running, result);
     this.mirrorThreadStatus(key);
-    return { turnId: getTurnId(result) };
+    return { turnId: getTurnId(result), ...(collaborationModeApplied ? { collaborationModeApplied: true } : {}) };
   }
 
   private applyResumedTurnState(status: AgentSessionStatus, result: unknown): void {
@@ -304,6 +334,9 @@ export class CodexDriver implements AgentDriver {
     this.sessions.delete(key);
     this.inputQueues.delete(key);
     for (const request of this.pendingInteractiveRequests.values()) request.sessionKeys.delete(key);
+    for (const [clientId, origin] of this.pendingUserMessageOrigins) {
+      if (origin.sessionKey === key) this.pendingUserMessageOrigins.delete(clientId);
+    }
     if (!threadId || !this.unbindSession(threadId, key)) return;
     await this.request("thread/unsubscribe", { threadId }).catch((error) => {
       this.logger.warn("codex.thread_unsubscribe_failed", {
@@ -456,14 +489,17 @@ export class CodexDriver implements AgentDriver {
 
   async forkThread(key: string): Promise<AgentThreadSwitchResult> {
     const running = this.requireRunningSession(key);
+    const gateway = this.usesGateway();
     const result = await this.request("thread/fork", {
       threadId: running.status.threadId,
-      cwd: running.status.workspacePath,
-      approvalPolicy: this.options.approval,
-      approvalsReviewer: "user",
-      sandbox: this.options.sandbox,
-      ...(this.options.developerInstructions ? { developerInstructions: this.options.developerInstructions } : {}),
-      ...(this.options.baseInstructions ? { baseInstructions: this.options.baseInstructions } : {}),
+      ...(!gateway ? {
+        cwd: running.status.workspacePath,
+        approvalPolicy: this.options.approval,
+        approvalsReviewer: "user",
+        sandbox: this.options.sandbox,
+        ...(this.options.developerInstructions ? { developerInstructions: this.options.developerInstructions } : {}),
+        ...(this.options.baseInstructions ? { baseInstructions: this.options.baseInstructions } : {}),
+      } : {}),
       excludeTurns: true,
     });
     const threadId = getThreadId(result);
@@ -489,14 +525,17 @@ export class CodexDriver implements AgentDriver {
 
   async sideConversation(key: string, text: string): Promise<AgentSideConversationResult> {
     const running = this.requireRunningSession(key);
+    const gateway = this.usesGateway();
     const forkResult = await this.request("thread/fork", {
       threadId: running.status.threadId,
-      cwd: running.status.workspacePath,
-      approvalPolicy: this.options.approval,
-      approvalsReviewer: "user",
-      sandbox: this.options.sandbox,
-      developerInstructions: sideDeveloperInstructions(this.options.developerInstructions),
-      ...(this.options.baseInstructions ? { baseInstructions: this.options.baseInstructions } : {}),
+      ...(!gateway ? {
+        cwd: running.status.workspacePath,
+        approvalPolicy: this.options.approval,
+        approvalsReviewer: "user",
+        sandbox: this.options.sandbox,
+        developerInstructions: sideDeveloperInstructions(this.options.developerInstructions),
+        ...(this.options.baseInstructions ? { baseInstructions: this.options.baseInstructions } : {}),
+      } : {}),
       ephemeral: true,
       excludeTurns: true,
     });
@@ -953,6 +992,10 @@ export class CodexDriver implements AgentDriver {
     if (message.method === "item/started") {
       running.backgroundTerminals.started(params);
       const item = asRecord(params?.item);
+      if (this.usesGateway() && item?.type === "userMessage") {
+        await this.emitUserMessage(running.status.threadId, item, params);
+        return;
+      }
       const activity = itemActivity(item, true);
       if (activity) await this.emitActivity(key, activity, params, getString(item, "id"));
       return;
@@ -1268,6 +1311,89 @@ export class CodexDriver implements AgentDriver {
     for (const key of keys) await this.onOutput(createEvent(key));
   }
 
+  private async emitUserMessage(
+    threadId: string | undefined,
+    item: Record<string, unknown>,
+    params: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    if (!threadId) return;
+    const itemId = getString(item, "id");
+    const clientId = getString(item, "clientId");
+    const originSessionKey = clientId ? this.takeUserMessageOrigin(clientId) : undefined;
+    if (!itemId || !this.markUserMessageItem(threadId, itemId)) return;
+    const input = userMessageInput(item);
+    if (!input) {
+      this.logger.debug("codex.shared_user_message_ignored", {
+        thread_id: threadId,
+        item_id: itemId,
+        reason: "empty_or_unsupported_content",
+      });
+      return;
+    }
+    const turnId = getTurnId(params);
+    const targetKeys = this.sessionKeysForThread(threadId).filter((key) => key !== originSessionKey);
+    this.logger.info("codex.shared_user_message_received", {
+      thread_id: threadId,
+      turn_id: turnId,
+      item_id: itemId,
+      client_id: clientId,
+      origin_session_key: originSessionKey,
+      target_count: targetKeys.length,
+    });
+    for (const key of targetKeys) {
+      await this.onOutput({
+        type: "user_message",
+        sessionKey: key,
+        input,
+        threadId,
+        ...(turnId ? { turnId } : {}),
+        itemId,
+      });
+    }
+  }
+
+  private registerUserMessageOrigin(clientId: string, sessionKeyValue: string): void {
+    this.pruneUserMessageTracking();
+    while (this.pendingUserMessageOrigins.size >= USER_MESSAGE_TRACKING_LIMIT) {
+      const oldest = this.pendingUserMessageOrigins.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.pendingUserMessageOrigins.delete(oldest);
+    }
+    this.pendingUserMessageOrigins.set(clientId, { sessionKey: sessionKeyValue, createdAt: Date.now() });
+  }
+
+  private takeUserMessageOrigin(clientId: string): string | undefined {
+    this.pruneUserMessageTracking();
+    const origin = this.pendingUserMessageOrigins.get(clientId);
+    this.pendingUserMessageOrigins.delete(clientId);
+    return origin?.sessionKey;
+  }
+
+  private markUserMessageItem(threadId: string, itemId: string): boolean {
+    this.pruneUserMessageTracking();
+    const key = `${threadId}\0${itemId}`;
+    if (this.mirroredUserMessageItems.has(key)) return false;
+    while (this.mirroredUserMessageItems.size >= USER_MESSAGE_TRACKING_LIMIT) {
+      const oldest = this.mirroredUserMessageItems.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.mirroredUserMessageItems.delete(oldest);
+    }
+    this.mirroredUserMessageItems.set(key, Date.now());
+    return true;
+  }
+
+  private pruneUserMessageTracking(now = Date.now()): void {
+    const cutoff = now - USER_MESSAGE_TRACKING_TTL_MS;
+    for (const [clientId, origin] of this.pendingUserMessageOrigins) {
+      if (origin.createdAt >= cutoff) break;
+      this.pendingUserMessageOrigins.delete(clientId);
+    }
+    for (const [itemKey, createdAt] of this.mirroredUserMessageItems) {
+      if (createdAt >= cutoff) break;
+      this.mirroredUserMessageItems.delete(itemKey);
+    }
+  }
+
   private bindSession(threadId: string, key: string): void {
     const keys = this.threadToSessions.get(threadId) ?? new Set<string>();
     keys.add(key);
@@ -1447,6 +1573,8 @@ export class CodexDriver implements AgentDriver {
     this.sessions.clear();
     this.threadToSessions.clear();
     this.pendingInteractiveRequests.clear();
+    this.pendingUserMessageOrigins.clear();
+    this.mirroredUserMessageItems.clear();
     this.sideConversations.clear();
     this.requestedLifecycle.clear();
     this.requestedGoalMutation.clear();

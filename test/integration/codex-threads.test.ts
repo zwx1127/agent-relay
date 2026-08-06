@@ -26,6 +26,10 @@ describe("CodexDriver thread operations", () => {
     expect(resume.params.developerInstructions).toBe("developer text");
     expect(resume.params.baseInstructions).toBe("base text");
     expect(resume.params.threadId).toBe("resume-thread");
+    expect(resume.params.cwd).toBe(process.cwd());
+    expect(resume.params.approvalPolicy).toBe("on-request");
+    expect(resume.params.approvalsReviewer).toBe("user");
+    expect(resume.params.sandbox).toBe("workspace-write");
     expect(resume.params.initialTurnsPage).toEqual({ limit: 1, sortDirection: "desc", itemsView: "summary" });
     expect(status.latestTurn).toEqual({
       id: "latest-turn",
@@ -142,7 +146,14 @@ describe("CodexDriver thread operations", () => {
     await driver.cleanBackgroundTerminals(status.sessionKey);
 
     const messages = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line));
-    expect(messages.find((message) => message.method === "thread/fork").params.threadId).toBe("thread-1");
+    expect(messages.find((message) => message.method === "thread/fork").params).toMatchObject({
+      threadId: "thread-1",
+      cwd: "/tmp/demo",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      sandbox: "workspace-write",
+      excludeTurns: true,
+    });
     expect(messages.find((message) => message.method === "thread/name/set").params).toEqual({ threadId: "fork-thread", name: "New name" });
     expect(messages.find((message) => message.method === "thread/backgroundTerminals/clean").params).toEqual({ threadId: "fork-thread" });
     expect(forked.threadId).toBe("fork-thread");

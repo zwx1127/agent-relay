@@ -140,10 +140,24 @@ describe("store", () => {
     store.setCollaborationMode("123:demo", "plan");
     expect(store.getCollaborationMode("123:demo")).toBe("plan");
     expect(store.getSession("123:demo")?.collaboration_thread_id).toBe("thread-1");
+    expect(store.getPendingCollaborationMode("123:demo")).toBeUndefined();
+
+    store.requestCollaborationMode("123:demo", "default");
+    expect(store.getCollaborationMode("123:demo")).toBe("default");
+    expect(store.getPendingCollaborationMode("123:demo")).toBe("default");
+    expect(store.getSession("123:demo")?.collaboration_mode_pending).toBe("default");
+    store.clearPendingCollaborationMode("123:demo", "plan");
+    expect(store.getPendingCollaborationMode("123:demo")).toBe("default");
+    store.clearPendingCollaborationMode("123:demo", "default");
+    expect(store.getPendingCollaborationMode("123:demo")).toBeUndefined();
+
+    store.requestCollaborationMode("123:demo", "plan");
+    expect(store.getPendingCollaborationMode("123:demo")).toBe("plan");
 
     store.setSessionThreadId("123:demo", "thread-2");
     expect(store.getCollaborationMode("123:demo")).toBe("default");
     expect(store.getSession("123:demo")?.collaboration_thread_id).toBeNull();
+    expect(store.getPendingCollaborationMode("123:demo")).toBeUndefined();
 
     store.setCollaborationMode("123:demo", "plan");
     expect(store.getCollaborationMode("123:demo")).toBe("plan");

@@ -8,17 +8,20 @@ import type {
   AgentThreadLifecycleEvent,
   AgentTurnCompletedEvent,
   AgentUserInputRequestEvent,
+  AgentUserMessageEvent,
 } from "../ports/agent.ts";
 import type { Logger } from "../domain/logger.ts";
 import { parseSessionKey } from "../domain/session.ts";
 import type { RelayStore } from "../storage/store.ts";
-import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
+import { splitRenderedForTelegram, type RenderedTelegramText } from "../presentation/telegram/text.ts";
 import type { ConversationId } from "../domain/ids.ts";
 import { messageWithTitle } from "./ui/text-parts.ts";
+import { transcriptTextForInput } from "./tasks/input.ts";
+import { PAGE_MAX_CHARS } from "./ui/constants.ts";
 
 export interface RelayAgentEventRouterDeps {
   logger: Logger;
-  store: Pick<RelayStore, "markSessionStopped" | "clearSessionThreadId">;
+  store: Pick<RelayStore, "markSessionStopped" | "clearSessionThreadId" | "appendTranscript">;
   activity: {
     handle(event: AgentActivityEvent): Promise<void>;
     finalize(sessionKey: string, turnId: string | undefined, status: string, error?: string, durationMs?: number): Promise<void>;
@@ -52,6 +55,9 @@ export class RelayAgentEventRouter {
       case "activity":
         await this.deps.activity.handle(event);
         return true;
+      case "user_message":
+        await this.handleUserMessage(event);
+        return true;
       case "image":
         // Preserve transcript ordering by flushing text before an image.
         await this.deps.finalizeOutput(event.sessionKey);
@@ -77,6 +83,33 @@ export class RelayAgentEventRouter {
         return true;
       default:
         return false;
+    }
+  }
+
+  private async handleUserMessage(event: AgentUserMessageEvent): Promise<void> {
+    const parsed = parseSessionKey(event.sessionKey);
+    if (!parsed) return;
+    await this.deps.finalizeOutput(event.sessionKey);
+    if (!event.input.text && !event.input.attachments?.length && !event.input.images?.length) return;
+    const text = transcriptTextForInput(event.input);
+    this.deps.logger.info("router.shared_user_message", {
+      session_key: event.sessionKey,
+      thread_id: event.threadId,
+      turn_id: event.turnId,
+      item_id: event.itemId,
+      text_len: event.input.text.length,
+      attachment_count: event.input.attachments?.length ?? 0,
+    });
+    this.deps.store.appendTranscript({
+      conversationId: parsed.conversationId,
+      scopeKey: parsed.scopeKey,
+      workspaceName: parsed.workspaceName,
+      role: "user",
+      text,
+      createdAt: Date.now(),
+    });
+    for (const page of splitRenderedForTelegram(messageWithTitle("User \u00b7 shared thread", text), PAGE_MAX_CHARS)) {
+      await this.deps.sendRendered(parsed.scopeKey, page);
     }
   }
 

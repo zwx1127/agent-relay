@@ -557,8 +557,33 @@ describe("relay controller tasks and media", () => {
     expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
     expect(agent.sent[0]?.text).toBe("inspect this layout");
     expect(agent.sent[0]?.options?.collaborationMode).toBe("plan");
+    expect(agent.sent[0]?.options?.collaborationModeExplicit).toBe(true);
     expect(agent.sent[0]?.options?.attachments).toHaveLength(1);
     expect(agent.sent[0]?.options?.attachments?.[0]?.type).toBe("localImage");
+  });
+
+  test("an explicit Plan switch remains pending when its input steers an active turn", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    adapter.downloads.set("photo-large", new Uint8Array([1, 2, 3]).buffer);
+
+    await router.handle(textMessage("current work"));
+    expect(agent.getStatus("codex:1:demo")?.activeTurnId).toBe("turn-1");
+
+    await router.handle(mediaMessage("/plan inspect during turn"));
+
+    expect(agent.sent.at(-1)?.options?.collaborationModeExplicit).toBe(true);
+    expect(store.getPendingCollaborationMode("codex:1:demo")).toBe("plan");
+
+    agent.getStatus("codex:1:demo")!.activeTurnId = undefined;
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    await router.handle(textMessage("next plan turn"));
+
+    expect(agent.sent.at(-1)).toEqual(sentPrompt("next plan turn", "plan", true));
+    expect(store.getPendingCollaborationMode("codex:1:demo")).toBeUndefined();
   });
 
   test("photo prompt without caption is saved and asks how to handle it", async () => {

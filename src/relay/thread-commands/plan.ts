@@ -42,11 +42,11 @@ export class PlanCommandService {
     }
     const key = sessionKey(conversationId, workspace.name);
     if (!prompt.trim()) {
-      this.deps.store.setCollaborationMode(key, "plan");
+      this.deps.store.requestCollaborationMode(key, "plan");
       await this.deps.sendRendered(conversationId, messageWithTitle("Plan mode enabled."));
       return;
     }
-    this.deps.store.setCollaborationMode(key, "plan");
+    this.deps.store.requestCollaborationMode(key, "plan");
     await this.deps.submitTask(conversationId, prompt.trim(), userMessageId, "immediate");
   }
 
@@ -105,7 +105,7 @@ export class PlanCommandService {
       }
       await this.deps.renderStrictCallbackPage(message, messageWithTitle("Implementing plan."), { inline_keyboard: [] });
       this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-      this.deps.store.setCollaborationMode(key, "default");
+      this.deps.store.requestCollaborationMode(key, "default");
       this.deps.logger.info("router.plan_callback_implemented", { conversation_id: message.conversationId, session_key: key });
       await this.deps.submitTask(message.conversationId, "Implement the approved plan.", message.messageId, "immediate");
       return;
