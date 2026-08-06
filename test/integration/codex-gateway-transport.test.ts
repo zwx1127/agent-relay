@@ -1,10 +1,42 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { CodexDriver } from "../../src/providers/agents/codex/driver.ts";
-import { cleanupCodexHarness, fakeCodexBin } from "../support/codex-app-server-harness.ts";
+import { writeRelayWorkControl } from "../../src/gateway/control.ts";
+import { cleanupCodexHarness, createCodexTempDir, fakeCodexBin } from "../support/codex-app-server-harness.ts";
 
 afterEach(cleanupCodexHarness);
 
 describe("experimental Codex Gateway transport", () => {
+  test("launcher delegates local mode and fails closed for public remote or missing Gateway runtime", () => {
+    const root = createCodexTempDir("agent-relay-launcher-mode-");
+    const controlPath = join(root, "control.json");
+    const gatewayStatePath = join(root, "gateway-state.json");
+    const configPath = join(root, "launcher.json");
+    const realCodexBin = fakeCodexBin();
+    writeFileSync(configPath, JSON.stringify({ experimental: true, controlStatePath: controlPath, realCodexBin }));
+    const run = (args: string[]) => spawnSync(process.execPath, [resolve("src/gateway/codex-launcher.ts"), ...args], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: { ...process.env, AGENT_RELAY_WORK_LAUNCHER_CONFIG: configPath },
+    });
+
+    writeRelayWorkControl("local", gatewayStatePath, controlPath);
+    const local = run(["--version"]);
+    expect(local.status).toBe(0);
+    expect(local.stdout).toContain("codex-cli 0.145.0");
+
+    const publicRemote = run(["--remote", "ws://127.0.0.1:9999"]);
+    expect(publicRemote.status).not.toBe(0);
+    expect(publicRemote.stderr).toContain("--remote client mode is not available");
+
+    writeRelayWorkControl("gateway", gatewayStatePath, controlPath);
+    const unavailable = run([]);
+    expect(unavailable.status).not.toBe(0);
+    expect(unavailable.stderr).toContain("unexpected exit");
+  });
+
   test("restores current active-turn state and forwards only notifications received while connected", async () => {
     const received: Array<Record<string, unknown>> = [];
     const outputs: Array<Record<string, unknown>> = [];
@@ -59,9 +91,13 @@ describe("experimental Codex Gateway transport", () => {
         },
       },
     });
+    let gatewayResolutions = 0;
     const driver = new CodexDriver({
       codexBin: fakeCodexBin(),
-      gatewayUrl: `ws://127.0.0.1:${server.port}`,
+      gatewayUrlProvider: () => {
+        gatewayResolutions += 1;
+        return `ws://127.0.0.1:${server.port}`;
+      },
       sandbox: "workspace-write",
       approval: "on-request",
     }, (event) => {
@@ -71,6 +107,7 @@ describe("experimental Codex Gateway transport", () => {
     try {
       const status = await driver.start({ conversationId: "1", workspaceName: "demo", workspacePath: process.cwd(), threadId: "shared-thread" });
       expect(status.threadId).toBe("shared-thread");
+      expect(gatewayResolutions).toBe(1);
       expect(status.activeTurnId).toBe("active-turn");
       await Bun.sleep(20);
       await driver.send(status.sessionKey, "steer from IM");

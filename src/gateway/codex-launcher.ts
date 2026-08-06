@@ -2,13 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { codexSpawnCommand } from "../providers/agents/codex/spawn.ts";
-import { readGatewayState } from "./state.ts";
+import { isProcessAlive, readGatewayState } from "./state.ts";
+import { relayWorkControlPath, requireRelayWorkControl } from "./control.ts";
 
 interface LauncherConfig {
   experimental: true;
-  enabled: boolean;
-  gatewayInteractiveCli?: boolean;
-  gatewayStatePath: string;
+  controlStatePath: string;
   realCodexBin: string;
 }
 
@@ -35,29 +34,30 @@ const APP_SERVER_OPTIONS_WITH_VALUE = new Set([
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const config = loadLauncherConfig();
-
-  if (!config.enabled) {
+  assertNoUserRemoteOption(args);
+  const control = requireRelayWorkControl(config.controlStatePath);
+  if (control.mode === "local") {
     await runRealCodex(config.realCodexBin, args);
     return;
   }
-
-  assertNoUserRemoteOption(args);
-  if (config.gatewayInteractiveCli === true && isNonGatewayAgentInvocation(args)) {
+  if (isNonGatewayAgentInvocation(args)) {
     throw new Error(
       "This Codex command starts an independent agent or server that cannot join the shared Gateway and is disabled while experimental relay work is enabled.",
     );
   }
 
   const appServerInvocation = isCodexAppServerProxyInvocation(args);
-  const gatewayCli = config.gatewayInteractiveCli === true && isGatewayCliInvocation(args);
+  const gatewayCli = isGatewayCliInvocation(args);
   const requestsSharedGateway = appServerInvocation || gatewayCli;
 
   if (!requestsSharedGateway) {
     await runRealCodex(config.realCodexBin, args);
     return;
   }
-  const gateway = readGatewayState(config.gatewayStatePath);
-  if (!gateway) throw new Error(`Experimental relay Gateway is unavailable. Missing or invalid state: ${config.gatewayStatePath}`);
+  const gateway = readGatewayState(control.gatewayStatePath);
+  if (!gateway || !isProcessAlive(gateway.pid) || !isProcessAlive(gateway.appServerPid)) {
+    throw new Error(`Experimental relay Gateway is unavailable. Gateway mode remains active after an unexpected exit; run the Gateway start command to recover. State: ${control.gatewayStatePath}`);
+  }
 
   if (appServerInvocation) {
     await proxyStdioToWebSocket(gateway.url);
@@ -88,7 +88,7 @@ export function rewriteCodexRemoteArgs(args: string[], gatewayUrl: string): stri
 export function assertNoUserRemoteOption(args: string[]): void {
   if (args.some((arg) => arg === "--remote" || arg.startsWith("--remote=") || arg === "--remote-auth-token-env" || arg.startsWith("--remote-auth-token-env="))) {
     throw new Error(
-      "The --remote client mode is not available while experimental relay work is enabled. Run codex normally; the launcher connects to the configured Gateway automatically.",
+      "The --remote client mode is not available while the relay work launcher is installed. Run codex normally; the launcher selects local or Gateway mode automatically.",
     );
   }
 }
@@ -140,21 +140,18 @@ function appServerSubcommand(args: string[], commandIndex: number): string | und
 function loadLauncherConfig(): LauncherConfig {
   const candidates = [
     process.env.AGENT_RELAY_WORK_LAUNCHER_CONFIG,
-    join(dirname(process.execPath), "relay-work-launcher.json"),
-    resolve(".data/relay-work-launcher.json"),
+    join(dirname(process.execPath), "launcher.json"),
   ].filter((value): value is string => Boolean(value));
   for (const path of candidates) {
     if (!existsSync(path)) continue;
     const value = JSON.parse(readFileSync(path, "utf8")) as Partial<LauncherConfig>;
-    if (value.experimental === true && value.enabled === true && value.gatewayStatePath && value.realCodexBin) {
+    if (value.experimental === true && value.controlStatePath && value.realCodexBin) {
       return value as LauncherConfig;
     }
   }
   return {
     experimental: true,
-    enabled: process.env.EXPERIMENTAL_RELAY_WORK_ENABLED === "true",
-    gatewayInteractiveCli: true,
-    gatewayStatePath: resolve(process.env.EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH || ".data/agent-relay-gateway.json"),
+    controlStatePath: resolve(process.env.AGENT_RELAY_WORK_CONTROL_PATH || relayWorkControlPath()),
     realCodexBin: process.env.CODEX_REAL_BIN || process.env.CODEX_BIN || "codex",
   };
 }

@@ -140,7 +140,7 @@ $RestartWorkerDelaySeconds = Get-EnvSeconds "AGENT_RELAY_RESTART_WORKER_DELAY_SE
 
 function Show-Usage {
   $name = Split-Path -Leaf $ScriptPath
-  Write-Line "usage: $name <start|stop|restart|status|clean-data|clean|gateway-start|gateway-stop|gateway-status|gateway-install|gateway-uninstall|clients-enable|clients-disable|desktop-enable|desktop-disable>"
+  Write-Line "usage: $name <start|stop|restart|status|clean-data|clean>"
 }
 
 function Test-ExperimentalRelayWorkEnabled {
@@ -488,16 +488,9 @@ function Invoke-RestartSequence {
   if (-not (Test-ExperimentalRelayWorkEnabled)) {
     Clear-RelayData
   } else {
-    Write-Line "experimental relay work enabled; preserving Relay data and the independent Gateway"
+    Write-Line "experimental relay work enabled; preserving Relay data"
   }
   Start-Relay
-}
-
-function Invoke-RelayWorkCommand {
-  param([string]$Subcommand)
-  $bunPath = Ensure-Bun
-  & $bunPath (Join-Path $RootDir "src\gateway\manage.ts") $Subcommand
-  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
 function Restart-Relay {
@@ -557,15 +550,6 @@ switch ($Command) {
   "status" {
     Show-RelayStatus
   }
-  "gateway-start" { Invoke-RelayWorkCommand "start" }
-  "gateway-stop" { Invoke-RelayWorkCommand "stop" }
-  "gateway-status" { Invoke-RelayWorkCommand "status" }
-  "gateway-install" { Invoke-RelayWorkCommand "gateway-install" }
-  "gateway-uninstall" { Invoke-RelayWorkCommand "gateway-uninstall" }
-  "desktop-enable" { Invoke-RelayWorkCommand "desktop-enable" }
-  "desktop-disable" { Invoke-RelayWorkCommand "desktop-disable" }
-  "clients-enable" { Invoke-RelayWorkCommand "clients-enable" }
-  "clients-disable" { Invoke-RelayWorkCommand "clients-disable" }
   { $_ -eq "clean-data" -or $_ -eq "clean" } {
     Clear-RelayData
   }

@@ -3,7 +3,13 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import type { Logger } from "../domain/logger.ts";
-import type { AppConfig } from "../runtime/config.ts";
+
+interface RelayGatewayStartConfig {
+  experimentalRelayWorkEnabled: boolean;
+  experimentalRelayGatewayStatePath: string;
+  experimentalRelayGatewayPort: number;
+  codexBin: string;
+}
 
 export const RELAY_GATEWAY_PROTOCOL_VERSION = 1;
 
@@ -64,7 +70,7 @@ export async function isGatewayReady(state: RelayGatewayState): Promise<boolean>
 }
 
 export async function ensureRelayGateway(
-  config: AppConfig,
+  config: RelayGatewayStartConfig,
   logger: Logger,
   options: { timeoutMs?: number } = {},
 ): Promise<RelayGatewayState> {

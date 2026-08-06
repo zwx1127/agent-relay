@@ -1,97 +1,113 @@
 # Experimental relay work
 
-> **Experimental and disabled by default.** This feature may change incompatibly. Normal Relay, Codex CLI, and Codex Desktop behavior is unchanged until you opt in and explicitly configure each client.
+> **Experimental, disabled by default, and opt-in only.** This feature may change incompatibly before it is stable. Relay, Codex CLI, and Codex Desktop keep their existing behavior until you explicitly enable and set up relay work.
 
-Experimental relay work keeps an independent per-user Codex Gateway running as the local data-plane proxy. The Gateway owns one Codex app-server child process. Relay, native Codex CLI processes, and the Windows or macOS Codex desktop app connect through it and continue the same Codex threads.
+Relay work lets the native Codex CLI, supported Codex Desktop apps, and IM-based Relay continue the same Codex threads through one local Gateway and its authoritative Codex app-server.
 
 ![Experimental relay work architecture: Codex and IM exchange live progress and control bidirectionally through one shared thread](../assets/relay-work-overview.png)
 
-## Enable
+## Setup and manual lifecycle
 
-1. Add the master opt-in to `.env`:
-
-   ```dotenv
-   EXPERIMENTAL_RELAY_WORK_ENABLED=true
-   # Optional; defaults are shown below.
-   EXPERIMENTAL_RELAY_GATEWAY_PORT=18765
-   EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH=.data/agent-relay-gateway.json
-   ```
-
-2. Install user-login startup for the independent Gateway and start it now:
-
-   ```powershell
-   .\scripts\relay.ps1 gateway-install
-   ```
-
-   ```bash
-   ./scripts/relay.sh gateway-install
-   ```
-
-3. Start or restart Relay. In experimental mode, Relay restarts preserve SQLite state and do not stop the Gateway.
-
-Check the two processes independently with `gateway-status` and `status`. The Gateway binds only to `127.0.0.1` and writes its current URL and PIDs to the configured state file.
-
-## Native CLI and Codex Desktop on Windows and macOS
-
-CLI and Desktop integration are a second explicit opt-in:
-
-```powershell
-.\scripts\relay.ps1 clients-enable
-```
-
-```bash
-./scripts/relay.sh clients-enable
-```
-
-The command compiles a local proxy named `codex`, records the previous user `Path` and `CODEX_CLI_PATH`, and prepends the proxy directory to the user `Path`. Open a new terminal and run interactive entrypoints normally:
-
-```bash
-codex -C /path/to/workspace
-codex resume --last
-codex fork --last
-```
-
-These entrypoints discover the one configured Gateway URL automatically. The public `--remote` mode is disabled by the experimental proxy, including custom endpoints and remote-auth options. The proxy uses Codex's WebSocket TUI transport internally; this is an implementation detail rather than a selectable connection path.
-
-Commands that start an independent local agent or server and cannot join the shared app-server are rejected while the integration is enabled. This includes `exec`/`e`, `review`, `mcp-server`, `remote-control`, `exec-server`, and app-server `daemon`/`proxy`. Their help remains available. Non-agent management commands such as login, update, doctor, completion, and protocol schema generation continue to pass through to the real Codex CLI.
-
-Restart Codex Desktop afterward. The same proxy preserves the desktop app-server JSONL protocol while forwarding it to the shared WebSocket Gateway. The older `desktop-enable` and `desktop-disable` commands remain compatibility aliases. Windows uses per-user environment variables; macOS also installs per-user LaunchAgents so the CLI `Path` and Finder-launched apps inherit the proxy configuration after login.
-
-## Multiple Codex processes, threads, and IM scopes
-
-- Multiple desktop, CLI, and Relay clients can connect to one Gateway without starting an app-server per client.
-- Each client has an independent WebSocket connection, while one app-server remains authoritative for thread state.
-- Selecting a different workspace in Relay Home is allowed only while both the current and target workspace are idle. An active turn, approval, user-input request, or waiting/queued/running/blocked Relay task rejects the switch and leaves the current workspace unchanged.
-- An idle switch releases Relay's subscription to the old workspace without stopping its Codex thread, preserves that thread for a later `/resume`, and binds the IM scope to the new directory. Selecting the already-current workspace is a no-op.
-- Workspace selection does not start or resume a thread. The first ordinary IM message starts a fresh thread in the selected directory; use `/resume` explicitly to join an existing thread.
-- Use `/resume [search]`, or **Resume** in Relay Home, to bind an IM scope to an existing thread. Both entrypoints use the same picker and switching semantics as Codex TUI.
-- Relay Work never attaches an active or previously persisted thread merely because an ordinary IM message arrived. Without an explicit `/resume`, that message starts a fresh thread.
-- `/resume` is rejected while the source scope has an active turn, approval, user-input request, or busy Relay task. An idle source scope may resume a target thread that is already active.
-- Multiple native Codex clients and multiple IM scopes may resume the same thread. There is no one-writer or ownership rule; the user controls which connected client sends input.
-- Closing or switching one client releases only that subscription. Relay sends `thread/unsubscribe` after its last logical scope leaves the thread, and releasing a client does not stop shared work. An explicit **Interrupt** or **Stop** still cancels the shared active turn.
-
-The Gateway synchronizes live events only. New progress is forwarded after Codex, Gateway, and Relay are all running and the clients are associated with the same thread. The Gateway stores no progress history, Relay keeps no consumption cursor, and reconnecting does not replay output produced while any process was stopped or not yet running. Resuming inspects only the latest turn summary needed to identify the current active state; it never renders completed history or catches offline output up to IM.
-
-An approval, user-input request, or MCP elicitation can be presented to every connected client associated with that thread. The first valid response wins, later responses are rejected, and the resolved notification removes duplicate controls from the other clients.
-
-Ordinary IM input sent during an active turn has Codex TUI **Enter / Steer** semantics and includes the expected active turn id. Relay Work does not expose a TUI **Tab / Queue** action and adds no Gateway-level or thread-level input lock or queue. Relay only preserves per-scope send ordering.
-
-## Disable and restore defaults
-
-Run the following while the feature is still enabled:
-
-```bash
-bun run relay-work disable
-```
-
-This removes the experimental proxy from the user `Path`, restores the previous desktop `CODEX_CLI_PATH`, removes Gateway user-login startup, and requests Gateway shutdown. Then set:
+Add the experimental gate to `.env`:
 
 ```dotenv
-EXPERIMENTAL_RELAY_WORK_ENABLED=false
+EXPERIMENTAL_RELAY_WORK_ENABLED=true
+# Optional:
+EXPERIMENTAL_RELAY_GATEWAY_PORT=18765
+# EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH=/absolute/path/to/gateway-state.json
 ```
 
-After Relay restarts it uses the original local stdio `CodexDriver` path. It does not read Gateway state, add the Relay Home Resume action, or modify the desktop environment.
+Gateway runtime state, logs, launcher configuration, and installation records default to `~/.agent-relay/experimental-relay-work/`. Relay's repository-local `.data` and `logs` directories are independent; Relay cleanup and restart never delete Gateway data.
 
-## Failure behavior
+Run setup once. Setup installs the permanent Codex launcher and client environment, initializes durable `local` mode, and does **not** start Gateway:
 
-The experimental path fails closed. If its Gateway is unavailable, interactive CLI/Desktop proxy requests and Relay startup report an error rather than silently creating a second app-server. Use `gateway-status`, inspect the `.log` file beside the Gateway state file, and run `gateway-start` after resolving port or Codex CLI errors.
+```powershell
+.\scripts\gateway.ps1 setup
+```
+
+```bash
+./scripts/gateway.sh setup
+```
+
+Open a new terminal afterward; on Windows and macOS, also restart Codex Desktop. Start Relay with its own script, and start Gateway manually whenever shared work is wanted:
+
+```powershell
+.\scripts\relay.ps1 start
+.\scripts\gateway.ps1 start
+```
+
+```bash
+./scripts/relay.sh start
+./scripts/gateway.sh start
+```
+
+Gateway has no login item, service, scheduled task, or automatic startup on any platform. Its lifecycle is separate from Relay:
+
+```text
+gateway setup    install the launcher and initialize local mode; do not start
+gateway start    require setup, health-check Gateway, then select gateway mode
+gateway stop     select local mode first, then stop Gateway; keep setup
+gateway status   report setup, mode, PIDs, health, URL, state, and launcher
+gateway remove   select local, stop, restore the client environment, remove data
+```
+
+Use `bun run gateway <command>` as the package-level equivalent. There are no `gateway-install`, `clients-enable`, `desktop-enable`, or matching disable compatibility aliases.
+
+## Client integration by platform
+
+- **Windows:** setup installs a `codex.exe` launcher, prepends its directory to the per-user `Path`, and points the per-user `CODEX_CLI_PATH` at it for Codex Desktop.
+- **macOS:** setup installs a `codex` launcher plus client-environment LaunchAgents that set `PATH` and `CODEX_CLI_PATH` for terminals and Finder-launched apps. These LaunchAgents only publish environment values; they never start Gateway.
+- **Linux:** setup supports the current Bash, Zsh, or Fish selected by `$SHELL`. It adds one managed, idempotent PATH fragment to `~/.bashrc`, `~/.zshrc`, or Fish `conf.d`. Linux setup targets Codex CLI only. There is no current official Codex Desktop integration to claim; the launcher layout reserves an adapter for a future official Linux app.
+
+The launcher reads durable mode on every new invocation:
+
+- In `local` mode it delegates normal Codex commands to the real CLI unchanged.
+- In `gateway` mode interactive TUI entrypoints and the Desktop app-server connection use Gateway automatically. Users run `codex`, `codex resume`, and `codex fork` normally.
+- User-supplied `--remote` and remote-auth options are rejected while the launcher is installed. The launcher may use Codex's WebSocket transport internally; it is not a public connection mode in relay work.
+- In `gateway` mode, commands that would create an independent agent or server are rejected: `exec`/`e`, `review`, `mcp-server`, `remote-control`, `exec-server`, and app-server `daemon`/`proxy`. Help and non-agent management commands still pass through. Stopping Gateway returns new processes to local mode, where these commands work normally.
+
+Mode changes apply to new processes and new connections. Relaunch Codex CLI/Desktop after a mode change. Existing connected processes are not transparently moved between transports.
+
+## Relay behavior and failure semantics
+
+Relay never starts Gateway. With the experimental gate enabled, Relay itself can remain online in local mode, but an IM action that needs Codex reports that Gateway is stopped and tells the user to run the Gateway start command. After Gateway starts, the next Relay action connects lazily; Relay does not need a restart and never falls back to spawning its own stdio app-server.
+
+An explicit `gateway stop` writes durable `local` mode before stopping the processes. An unexpected Gateway or app-server exit deliberately leaves durable mode as `gateway`; new CLI, Desktop, and Relay connections fail closed until `gateway start` recovers the runtime. This prevents an unnoticed second app-server from diverging from the shared thread.
+
+`gateway start` requires a successful prior setup. `gateway remove` switches to local mode and stops Gateway before changing the client environment. If Gateway cannot stop, removal aborts and preserves the launcher and installation state so the user can retry safely.
+
+## Threads, workspaces, and multiple clients
+
+- Multiple CLI, Desktop, and Relay clients can connect to one Gateway. Each has an independent WebSocket connection; one app-server remains authoritative.
+- Multiple native clients and multiple IM scopes may `/resume` the same thread. Relay adds no one-writer ownership rule; the user chooses which client sends input.
+- `/resume` and Relay Home **Resume** share Codex TUI resume semantics. A resume switch is rejected while the source scope has an active turn, approval, user-input request, or other busy Relay task.
+- Selecting a workspace in Relay Home only binds that directory. It does not make a running native Codex process change directories and does not auto-attach a thread. An ordinary first message starts fresh; `/resume` explicitly joins existing work.
+- An idle workspace switch releases Relay's old subscription without stopping the thread. A busy switch is rejected.
+- Ordinary IM input during an active turn uses Codex TUI Enter/Steer semantics. Relay work adds no Tab/Queue action, Gateway-level input lock, or thread ownership lock.
+- Approval, user-input, and MCP elicitation requests may appear in all connected clients associated with the thread. The first valid response wins; resolved notifications clear duplicate controls.
+
+Gateway forwards only live events produced while Codex, Gateway, and Relay are running and associated with the same thread. It stores no progress history, consumption cursor, offline queue, replay, or catch-up stream. Resuming may inspect the latest turn summary only to identify current active state; it does not render missed completed output into IM.
+
+## Stop or remove
+
+Temporarily return new Codex processes to normal local behavior while keeping setup:
+
+```powershell
+.\scripts\gateway.ps1 stop
+```
+
+```bash
+./scripts/gateway.sh stop
+```
+
+Remove the launcher, restore the previous Windows/macOS environment or remove the managed Linux shell fragment, and delete Gateway user data:
+
+```powershell
+.\scripts\gateway.ps1 remove
+```
+
+```bash
+./scripts/gateway.sh remove
+```
+
+Then set `EXPERIMENTAL_RELAY_WORK_ENABLED=false` and restart Relay to restore its original local stdio driver. The feature remains disabled by default.

@@ -11,6 +11,7 @@ export interface AgentFactoryOptions {
   onExit: AgentExitHandler;
   logger?: Logger;
   gatewayUrl?: string;
+  gatewayUrlProvider?: () => string;
 }
 
 export function createAgentDriver(config: AppConfig, options: AgentFactoryOptions): AgentDriver {
@@ -21,6 +22,7 @@ export function createAgentDriver(config: AppConfig, options: AgentFactoryOption
         {
           codexBin: config.codexBin,
           ...(options.gatewayUrl ? { gatewayUrl: options.gatewayUrl } : {}),
+          ...(options.gatewayUrlProvider ? { gatewayUrlProvider: options.gatewayUrlProvider } : {}),
           sandbox: config.codexSandbox,
           approval: config.codexApproval,
           developerInstructions: composeCodexDeveloperInstructions(config.codexDeveloperInstructions, options.controlInstructions),

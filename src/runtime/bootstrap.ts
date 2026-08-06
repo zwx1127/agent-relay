@@ -14,7 +14,7 @@ import { startControlServer, type RunningControlServer } from "../relay/control/
 import { resolveRelayHelperPath } from "../relay/control/helper.ts";
 import { createImAdapter } from "../providers/im/factory.ts";
 import { createAgentDriver } from "../providers/agents/factory.ts";
-import { ensureRelayGateway } from "../gateway/state.ts";
+import { gatewayUrlForRelay, readRelayWorkControl, relayWorkControlPath } from "../gateway/control.ts";
 
 export async function main(): Promise<void> {
   const config = loadConfig();
@@ -23,8 +23,8 @@ export async function main(): Promise<void> {
   const imAdapter = createImAdapter(config, logger);
   let router: RelayController;
   let control: RunningControlServer | undefined;
-  const gateway = config.experimentalRelayWorkEnabled
-    ? await ensureRelayGateway(config, logger)
+  const gatewayControl = config.experimentalRelayWorkEnabled
+    ? readRelayWorkControl(relayWorkControlPath())
     : undefined;
   const helperPath = resolveRelayHelperPath(dirname(fileURLToPath(import.meta.url)));
   const controlToken = randomBytes(32).toString("hex");
@@ -69,7 +69,7 @@ export async function main(): Promise<void> {
     onOutput: (event) => router.handleAgentOutput(event),
     onExit: (event) => router.handleAgentExit(event.sessionKey, `Agent exited with code ${event.exitCode ?? "unknown"}${event.signalCode ? ` (${event.signalCode})` : ""}.`),
     logger,
-    ...(gateway ? { gatewayUrl: gateway.url } : {}),
+    ...(config.experimentalRelayWorkEnabled ? { gatewayUrlProvider: () => gatewayUrlForRelay() } : {}),
   });
   router = new RelayController({ config, store, adapter: imAdapter, agent, logger });
   if (config.relayControlEnabled) {
@@ -113,7 +113,7 @@ export async function main(): Promise<void> {
     relay_control_enabled: config.relayControlEnabled,
     relay_control_port: config.relayControlPort,
     experimental_relay_work_enabled: config.experimentalRelayWorkEnabled,
-    experimental_relay_gateway_url: gateway?.url,
+    experimental_relay_gateway_mode: gatewayControl?.mode ?? "not_setup",
     relay_agent_name: config.relayAgentName,
     relay_peer_agent_count: config.relayPeerAgents.length,
     allowed_user_count: config.allowedUserIds.size,
@@ -128,7 +128,7 @@ export async function main(): Promise<void> {
   if (config.experimentalRelayWorkEnabled) {
     logger.warn("app.experimental_feature_enabled", {
       feature: "relay_work",
-      gateway_url: gateway?.url,
+      gateway_mode: gatewayControl?.mode ?? "not_setup",
       stability: "experimental",
     });
   }

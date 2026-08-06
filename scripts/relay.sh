@@ -13,7 +13,7 @@ RESTART_WORKER_DELAY_SECONDS="${AGENT_RELAY_RESTART_WORKER_DELAY_SECONDS:-1}"
 
 usage() {
   cat <<USAGE
-usage: $(basename "$0") <start|stop|restart|status|clean-data|clean|gateway-start|gateway-stop|gateway-status|gateway-install|gateway-uninstall|clients-enable|clients-disable|desktop-enable|desktop-disable>
+usage: $(basename "$0") <start|stop|restart|status|clean-data|clean>
 USAGE
 }
 
@@ -248,16 +248,11 @@ restart_worker() {
 restart_sequence() {
   stop
   if experimental_relay_work_enabled; then
-    echo "experimental relay work enabled; preserving Relay data and the independent Gateway"
+    echo "experimental relay work enabled; preserving Relay data"
   else
     clean_data
   fi
   start
-}
-
-relay_work_command() {
-  ensure_bun
-  (cd "$ROOT_DIR" && bun src/gateway/manage.ts "$1")
 }
 
 restart() {
@@ -315,33 +310,6 @@ case "$command" in
     ;;
   status)
     status
-    ;;
-  gateway-start)
-    relay_work_command start
-    ;;
-  gateway-stop)
-    relay_work_command stop
-    ;;
-  gateway-status)
-    relay_work_command status
-    ;;
-  gateway-install)
-    relay_work_command gateway-install
-    ;;
-  gateway-uninstall)
-    relay_work_command gateway-uninstall
-    ;;
-  desktop-enable)
-    relay_work_command desktop-enable
-    ;;
-  desktop-disable)
-    relay_work_command desktop-disable
-    ;;
-  clients-enable)
-    relay_work_command clients-enable
-    ;;
-  clients-disable)
-    relay_work_command clients-disable
     ;;
   clean-data | clean)
     clean_data

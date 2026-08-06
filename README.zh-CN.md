@@ -60,11 +60,11 @@
 
 > **本功能处于实验阶段、默认关闭，并且只能手动开启。** 在正式稳定前，其接口和启用方式可能发生不兼容变化。未手动开启时，它不会启动 Gateway、安装客户端代理，也不会改变现有 Relay、Codex CLI 或 Codex 桌面版的任何行为。
 
-“接力工作”允许你先在原生 Codex CLI 或 Windows/macOS Codex 桌面版开始工作，离开电脑后再通过 Telegram 或 Lark/飞书继续同一个 Codex thread。Relay、交互式 Codex CLI 进程和 Codex 桌面版统一连接一个独立的本地 Gateway，由其唯一 app-server 管理 thread；用户不能选择其他远端入口。
+“接力工作”允许你先在原生 Codex CLI 或 Windows/macOS Codex 桌面版开始工作，离开电脑后再通过 Telegram 或 Lark/飞书继续同一个 Codex thread。Relay、交互式 Codex CLI 进程和 Codex 桌面版统一连接一个独立的本地 Gateway，由其唯一 app-server 管理 thread；用户正常启动 Codex，无需选择远端入口。
 
 ![实验性接力工作架构：Codex 与 IM 通过同一 thread 双向互通实时进度和控制信息](docs/assets/relay-work-overview.png)
 
-使用 `/resume` 或 Relay Home 中的 **Resume** 加入已有 thread。在 Relay Home 中空闲切换 workspace 时，Relay 只释放旧订阅而不停止原 thread，并且只绑定新目录；下一条普通消息会启动新 thread，只有 `/resume` 才会显式加入已有工作。忙碌时会拒绝切换。多个原生 Codex 客户端和 IM scope 可以共享同一个 thread，不设归属限制；活动 turn 中的普通输入使用 Steer 语义，审批或输入请求由第一个回答的客户端胜出。它只同步 Codex、Gateway 和 Relay 都在运行并已连接后产生的最新实时进度，不提供 Queue 操作，也不会保存、重放或事后追赶离线输出。请阅读[实验性接力工作](docs/zh-CN/experimental-relay-work.md)，了解手动开启方法、多客户端行为、限制以及完整关闭和恢复步骤。
+先执行一次 `scripts/gateway.* setup`，需要接力工作时再手动启动 Gateway。Gateway 与 Relay 使用完全独立的脚本和生命周期。使用 `/resume` 或 Relay Home 中的 **Resume** 加入已有 thread。多个原生 Codex 客户端和 IM scope 可以共享同一个 thread，不设归属限制；活动 turn 中的普通输入使用 Steer 语义，审批或输入请求由第一个回答的客户端胜出。它只同步 Codex、Gateway 和 Relay 都在运行并已连接后产生的最新实时进度，不提供 Queue 操作，也不会保存、重放或事后追赶离线输出。请阅读[实验性接力工作](docs/zh-CN/experimental-relay-work.md)，了解 Windows、macOS 和 Linux 设置、生命周期语义以及完整移除方法。
 
 ## 快速开始
 

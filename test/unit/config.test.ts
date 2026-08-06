@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isAuthorized, loadConfig, loadDotEnvFile, parseStringSet } from "../../src/runtime/config.ts";
+import { defaultGatewayStatePath } from "../../src/gateway/control.ts";
 
 describe("config", () => {
   test("parses comma separated ids", () => {
@@ -30,7 +31,7 @@ describe("config", () => {
     expect(config.relayControlPort).toBe(0);
     expect(config.experimentalRelayWorkEnabled).toBe(false);
     expect(config.experimentalRelayGatewayPort).toBe(18765);
-    expect(config.experimentalRelayGatewayStatePath).toBe(".data/agent-relay-gateway.json");
+    expect(config.experimentalRelayGatewayStatePath).toBe(defaultGatewayStatePath());
     expect(config.relayPeerAgents).toEqual([]);
     expect(config.imProvider).toBe("telegram");
     expect(config.agentProvider).toBe("codex");

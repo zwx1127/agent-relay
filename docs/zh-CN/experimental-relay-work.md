@@ -1,99 +1,113 @@
 # 实验性接力工作
 
-> **本功能仍处于实验阶段，并且默认关闭。** 在正式稳定前，接口和启用方式可能发生不兼容变化。只有手动开启后，它才会影响 Relay、Codex CLI 或 Codex 桌面版。
+> **实验功能，默认关闭，必须手动启用。** 在功能稳定前，接口和启用方式可能发生不兼容变化。只有显式启用并完成设置后，才会影响 Relay、Codex CLI 或 Codex 桌面版。
 
-实验性接力工作会为当前操作系统用户长期运行一个独立的 Codex Gateway。Gateway 是本机数据面代理，并拥有唯一的 Codex app-server 子进程；Relay、原生 Codex CLI 进程，以及 Windows/macOS Codex 桌面版都通过它继续处理同一批 Codex thread。
+接力工作让原生 Codex CLI、受支持的 Codex 桌面版和 IM Relay 通过一个本地 Gateway 及其唯一权威 Codex app-server 继续处理同一批 Codex thread。
 
 ![实验性接力工作架构：Codex 与 IM 通过同一 thread 双向互通实时进度和控制信息](../assets/relay-work-overview.png)
 
-## 开启
+## 设置与手动生命周期
 
-先在 `.env` 中显式加入：
+先在 `.env` 中加入实验开关：
 
 ```dotenv
 EXPERIMENTAL_RELAY_WORK_ENABLED=true
-# 以下为可选配置及其默认值。
+# 可选：
 EXPERIMENTAL_RELAY_GATEWAY_PORT=18765
-EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH=.data/agent-relay-gateway.json
+# EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH=/absolute/path/to/gateway-state.json
 ```
 
-安装当前用户登录时的 Gateway 启动项，并立即启动：
+Gateway 的运行状态、日志、启动器配置和安装记录默认位于 `~/.agent-relay/experimental-relay-work/`。Relay 仓库内的 `.data` 和 `logs` 与之独立；Relay 的清理和重启不会删除 Gateway 数据。
+
+只需执行一次 setup。它会安装永久 Codex 启动器和客户端环境、初始化持久 `local` 模式，但**不会启动 Gateway**：
 
 ```powershell
-.\scripts\relay.ps1 gateway-install
+.\scripts\gateway.ps1 setup
 ```
 
 ```bash
-./scripts/relay.sh gateway-install
+./scripts/gateway.sh setup
 ```
 
-随后启动或重启 Relay。实验模式下，Relay 重启会保留 SQLite 数据，也不会停止独立 Gateway。可以分别使用 `gateway-status` 和 `status` 检查两个进程。
-
-Gateway 只监听 `127.0.0.1`。状态文件会记录 Gateway URL、Gateway PID 和其唯一 app-server 子进程 PID。
-
-## 原生 CLI 与 Windows/macOS Codex 桌面版
-
-CLI 和桌面接入需要再次显式开启：
+完成后打开新终端；Windows 和 macOS 还需要重启 Codex 桌面版。Relay 与 Gateway 使用独立脚本，并且都由用户手动启动：
 
 ```powershell
-.\scripts\relay.ps1 clients-enable
+.\scripts\relay.ps1 start
+.\scripts\gateway.ps1 start
 ```
 
 ```bash
-./scripts/relay.sh clients-enable
+./scripts/relay.sh start
+./scripts/gateway.sh start
 ```
 
-命令会编译名为 `codex` 的本地代理、保存原来的用户 `Path` 和 `CODEX_CLI_PATH`，再将代理目录放在用户 `Path` 最前面。打开新终端后可以直接运行：
+所有平台都不会创建 Gateway 登录启动项、服务、计划任务或其他自动启动机制。Gateway 命令语义如下：
+
+```text
+gateway setup    安装启动器并初始化 local 模式，不启动 Gateway
+gateway start    要求先完成 setup；健康检查通过后切换为 gateway 模式
+gateway stop     先切换为 local 模式，再停止 Gateway；保留设置
+gateway status   只读显示设置、模式、PID、健康、URL、状态文件和启动器
+gateway remove   切换 local、停止进程、恢复客户端环境并删除数据
+```
+
+package 级入口为 `bun run gateway <command>`。不保留 `gateway-install`、`clients-enable`、`desktop-enable` 及对应 disable 命令的兼容别名。
+
+## 各平台客户端接入
+
+- **Windows：** setup 安装 `codex.exe` 启动器，将目录加入用户 `Path` 最前方，并把用户级 `CODEX_CLI_PATH` 指向启动器，供 Codex 桌面版使用。
+- **macOS：** setup 安装 `codex` 启动器，并创建只负责设置 `PATH` 和 `CODEX_CLI_PATH` 的客户端环境 LaunchAgent。这些 LaunchAgent 永远不会启动 Gateway。
+- **Linux：** setup 根据 `$SHELL` 仅配置当前 Bash、Zsh 或 Fish，在 `~/.bashrc`、`~/.zshrc` 或 Fish `conf.d` 中加入可重复执行、可移除的受管 PATH 片段。Linux 当前只接入 Codex CLI；不宣称支持尚不存在的官方 Linux Codex 桌面版，仅为未来官方应用预留适配位置。
+
+永久启动器在每次新启动时读取持久模式：
+
+- `local` 模式把普通 Codex 命令原样交给真实 CLI。
+- `gateway` 模式自动把交互式 TUI 和桌面 app-server 连接到 Gateway。用户只需正常运行 `codex`、`codex resume` 或 `codex fork`。
+- 启动器安装期间，用户提供的 `--remote` 和远端认证选项始终被拒绝。启动器内部可以使用 Codex WebSocket 传输，但这不是暴露给用户的连接模式。
+- `gateway` 模式会拒绝无法加入共享 app-server、会创建独立 agent 或 server 的命令，包括 `exec`/`e`、`review`、`mcp-server`、`remote-control`、`exec-server` 和 app-server `daemon`/`proxy`。帮助和管理命令仍会透传。停止 Gateway 后，新进程回到 local 模式，这些命令恢复正常。
+
+模式切换只影响新进程和新连接。切换后应重新启动 Codex CLI/桌面版；已连接进程不会在两种传输之间自动迁移。
+
+## Relay 行为与故障语义
+
+Relay 永远不会启动 Gateway。实验开关启用但当前为 local 模式时，Relay 自身仍可在线；需要 Codex 的 IM 操作会明确提示 Gateway 已停止，并要求用户运行 Gateway start。Gateway 启动后，下一次 Relay 操作会懒连接，无需重启 Relay，也不会回退为自行启动 stdio app-server。
+
+显式执行 `gateway stop` 时，会先把持久模式写为 `local`，再停止进程。Gateway 或 app-server 意外退出时，持久模式故意保留为 `gateway`；新的 CLI、桌面版和 Relay 连接会 fail closed，直到用户运行 `gateway start` 恢复，防止静默创建第二个 app-server 导致 thread 分叉。
+
+`gateway start` 必须在成功 setup 后运行。`gateway remove` 会先切换 local 并停止 Gateway，再修改客户端环境；如果停止失败，remove 会中止并保留启动器与安装状态，方便安全重试。
+
+## Thread、workspace 与多客户端
+
+- 多个 CLI、桌面版和 Relay 客户端可连接同一个 Gateway。每个客户端有独立 WebSocket 连接，但只由一个 app-server 管理权威状态。
+- 多个原生客户端和多个 IM scope 可以 `/resume` 同一个 thread。Relay 不增加单写者或所有权限制，由用户决定哪个客户端发送输入。
+- `/resume` 与 Relay Home 的 **Resume** 复用 Codex TUI 的恢复语义。来源 scope 存在活动 turn、审批、用户输入请求或其他忙碌 Relay task 时，会拒绝切换。
+- Relay Home 选择 workspace 只绑定目录，不会让已运行的原生 Codex 进程切换目录，也不会自动绑定 thread。第一条普通消息会新建 thread；只有 `/resume` 会显式加入已有工作。
+- 空闲 workspace 切换只释放 Relay 的旧订阅，不停止 thread；忙碌时会拒绝切换。
+- 活动 turn 期间的普通 IM 输入采用 Codex TUI Enter/Steer 语义。接力工作不增加 Tab/Queue、Gateway 输入锁或 thread 所有权锁。
+- 审批、用户输入和 MCP elicitation 可以出现在关联同一 thread 的全部已连接客户端中。第一份有效响应胜出，resolved 通知会清除重复控件。
+
+Gateway 只转发 Codex、Gateway、Relay 同时运行且关联同一 thread 后产生的新实时事件。它不保存进度历史、消费游标、离线队列、重放或追赶流。恢复时只可能读取最新 turn 摘要以识别当前活动状态，不会把错过的已完成输出补发到 IM。
+
+## 停止或移除
+
+临时让新的 Codex 进程回到正常本地模式，同时保留设置：
+
+```powershell
+.\scripts\gateway.ps1 stop
+```
 
 ```bash
-codex -C /path/to/workspace
-codex resume --last
-codex fork --last
+./scripts/gateway.sh stop
 ```
 
-这些交互入口会自动取得唯一配置的 Gateway URL。实验代理会禁用公开的 `--remote` 模式，包括自定义地址和远端认证选项。代理只在内部使用 Codex 的 WebSocket TUI 传输；这是实现细节，不是用户可以选择的另一条连接路径。
+移除启动器、恢复 Windows/macOS 原环境或删除 Linux 受管 shell 片段，并删除 Gateway 用户数据：
 
-开启该接入后，凡是会启动独立本地 agent 或服务、又无法加入共享 app-server 的命令都会被拒绝，包括 `exec`/`e`、`review`、`mcp-server`、`remote-control`、`exec-server`，以及 app-server 的 `daemon`/`proxy`。这些命令的帮助仍可查看。登录、更新、诊断、补全、协议结构生成等不会创建 agent 的管理命令仍会直接交给真实 Codex CLI。
-
-完成后还需要重启 Codex 桌面版。相同代理会保持桌面版所需的 app-server JSONL 协议，并把数据转发到共享 WebSocket Gateway。原来的 `desktop-enable`/`desktop-disable` 命令保留为兼容别名。
-
-Windows 使用用户环境变量；macOS 还会创建用户级 LaunchAgent，确保重新登录后 CLI `Path` 和从 Finder 启动的应用都能取得代理配置。
-
-## 多个 Codex 进程和多个 thread
-
-- 多个桌面版、CLI 或 Relay 客户端可以同时连接同一个 Gateway；Gateway 不会为每个客户端再启动 app-server。
-- 每个客户端拥有独立 WebSocket 连接，但 thread 状态仍由同一个 app-server 管理。
-- 只有当前 workspace 和目标 workspace 都空闲时，才能在 Relay Home 中切换 workspace。存在活动 turn、审批、用户输入请求，或处于 waiting/queued/running/blocked 状态的 Relay task 时，切换会被拒绝，当前 workspace 保持不变。
-- 空闲切换只会释放 Relay 对旧 workspace 的订阅，不会停止它的 Codex thread；该 thread 会保留以供之后 `/resume`。随后 IM scope 只绑定到新目录。再次选择当前 workspace 是无操作行为。
-- 选择 workspace 不会启动或恢复 thread。切换后的第一条普通 IM 消息会在所选目录中启动新 thread；只有显式使用 `/resume` 才会加入已有 thread。
-- 使用 `/resume [search]` 或 Relay Home 中的 **Resume**，把 IM scope 绑定到已有 thread。两个入口复用同一个选择器和 Codex TUI 的切换语义。
-- 接力工作不会因为收到普通 IM 消息就自动绑定活动 thread 或之前持久化的 thread。没有显式执行 `/resume` 时，该消息会启动新 thread。
-- 当来源 scope 存在活动 turn、审批、用户输入请求或忙碌的 Relay task 时，`/resume` 会拒绝切换。来源 scope 空闲时，可以恢复一个已经活动的目标 thread。
-- 多个原生 Codex 客户端和多个 IM scope 可以恢复同一个 thread；不存在单写者或归属限制，由用户决定哪个已连接客户端发送输入。
-- 关闭或切换一个客户端只会释放它自己的订阅。Relay 最后一个逻辑 scope 离开后才发送 `thread/unsubscribe`，释放客户端不会停止共享工作；显式使用 **Interrupt** 或 **Stop** 仍会取消共享的活动 turn。
-
-Gateway 只同步实时事件：Codex、Gateway、Relay 都已启动，并且客户端已经关联同一 thread 后产生的新进度才会转发。Gateway 不保存进度历史，Relay 不维护消费游标，也不会在重连后补发任一进程停止或尚未启动期间的输出。恢复时只读取用于识别当前活动状态的最新 turn 摘要，不会渲染已完成历史，也不会把离线输出追赶到 IM。
-
-同一项审批、用户输入请求或 MCP elicitation 可以显示在关联该 thread 的所有已连接客户端上。第一份有效响应胜出，后续响应会被拒绝，resolved 通知会清除其他客户端上的重复控件。
-
-活动 turn 期间发送的普通 IM 输入与 Codex TUI 的 **Enter / Steer** 语义一致，并携带预期的活动 turn id。接力工作不提供 TUI 的 **Tab / Queue** 操作，也不会在 Gateway 或 thread 层增加输入锁或队列；Relay 仅保持每个 scope 内部的发送顺序。
-
-## 关闭并恢复默认行为
-
-保持实验开关开启时先运行：
+```powershell
+.\scripts\gateway.ps1 remove
+```
 
 ```bash
-bun run relay-work disable
+./scripts/gateway.sh remove
 ```
 
-该命令会从用户 `Path` 移除实验代理、恢复之前的桌面 `CODEX_CLI_PATH`、删除 Gateway 登录启动项，并请求关闭 Gateway。然后将配置改回：
-
-```dotenv
-EXPERIMENTAL_RELAY_WORK_ENABLED=false
-```
-
-Relay 重启后会恢复原有本地 stdio `CodexDriver` 路径：不读取 Gateway 状态、不添加 Relay Home Resume 动作，也不修改桌面环境。
-
-## 故障策略
-
-实验链路采用 fail closed。Gateway 不可用时，交互式 CLI、桌面代理和 Relay 会明确报错，不会静默启动第二个 app-server。可使用 `gateway-status` 检查状态，查看 Gateway 状态文件旁的 `.log`，排除端口或 Codex CLI 问题后运行 `gateway-start`。
+最后把 `EXPERIMENTAL_RELAY_WORK_ENABLED=false` 并重启 Relay，即可恢复原有本地 stdio driver。该功能始终默认关闭。

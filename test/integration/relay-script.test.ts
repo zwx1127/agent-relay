@@ -24,6 +24,13 @@ afterEach(() => {
 });
 
 describe("relay lifecycle script", () => {
+  unixOnlyTest("does not expose Gateway lifecycle commands", () => {
+    const root = createFixture();
+    const result = runRelay(root, "gateway-start");
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).not.toContain("gateway-start|");
+  });
+
   unixOnlyTest("restart stops the relay, removes data, and starts a fresh process", async () => {
     const root = createFixture();
     expectSuccess(runRelay(root, "start"));

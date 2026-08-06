@@ -8,6 +8,7 @@ import { loadDotEnvFile, parseBooleanEnv, parsePositiveIntegerEnv } from "../run
 import { codexAppServerWebSocketSpawnCommand } from "../providers/agents/codex/spawn.ts";
 import { GatewayLiveEventSequencer, messageThreadId, type GatewayLiveEvent } from "./live-events.ts";
 import { gatewayLogPath, isProcessAlive, readGatewayState, resolveGatewayStatePath, RELAY_GATEWAY_PROTOCOL_VERSION, type RelayGatewayState } from "./state.ts";
+import { defaultGatewayStatePath } from "./control.ts";
 
 interface GatewayRuntimeConfig {
   codexBin: string;
@@ -54,7 +55,7 @@ async function main(): Promise<void> {
   if (!parseBooleanEnv(env, "EXPERIMENTAL_RELAY_WORK_ENABLED", false)) {
     throw new Error("Experimental relay work is disabled. Set EXPERIMENTAL_RELAY_WORK_ENABLED=true explicitly.");
   }
-  const statePath = resolveGatewayStatePath(env.EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH?.trim() || ".data/agent-relay-gateway.json");
+  const statePath = resolveGatewayStatePath(env.EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH?.trim() || defaultGatewayStatePath());
   const port = parsePositiveIntegerEnv(env, "EXPERIMENTAL_RELAY_GATEWAY_PORT", 18765);
   if (port > 65534) throw new Error("EXPERIMENTAL_RELAY_GATEWAY_PORT must be at most 65534.");
   const config: GatewayRuntimeConfig = {
@@ -510,7 +511,7 @@ function logRaw(path: string, source: string, value: string): void {
 
 if (import.meta.main) {
   void main().catch((error) => {
-    const statePath = resolveGatewayStatePath(process.env.EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH?.trim() || ".data/agent-relay-gateway.json");
+    const statePath = resolveGatewayStatePath(process.env.EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH?.trim() || defaultGatewayStatePath());
     const logPath = gatewayLogPath(statePath);
     mkdirSync(dirname(resolve(logPath)), { recursive: true });
     log(logPath, "gateway failed", { error: error instanceof Error ? error.message : String(error) });

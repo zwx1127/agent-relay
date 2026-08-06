@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { parseLogLevel } from "../domain/logger.ts";
+import { defaultGatewayStatePath } from "../gateway/control.ts";
 import type { AppConfig, Env } from "./config-types.ts";
 import { loadDotEnvFile, parseBooleanEnv, parseNonNegativeIntegerEnv, parsePositiveIntegerEnv, parseStringSet, requireEnv } from "./env.ts";
 import { normalizeTelegramUsername, parsePeerAgentsFile } from "./peer-agents.ts";
@@ -54,7 +56,7 @@ export function loadConfig(env?: Env): AppConfig {
     relayControlPort: parseNonNegativeIntegerEnv(effectiveEnv, "RELAY_CONTROL_PORT", 0),
     experimentalRelayWorkEnabled: parseBooleanEnv(effectiveEnv, "EXPERIMENTAL_RELAY_WORK_ENABLED", false),
     experimentalRelayGatewayPort: parsePositiveIntegerEnv(effectiveEnv, "EXPERIMENTAL_RELAY_GATEWAY_PORT", 18765),
-    experimentalRelayGatewayStatePath: effectiveEnv.EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH?.trim() || ".data/agent-relay-gateway.json",
+    experimentalRelayGatewayStatePath: effectiveEnv.EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH?.trim() || defaultGatewayStatePath(homedir()),
     logLevel: parseLogLevel(effectiveEnv.LOG_LEVEL),
   };
 }

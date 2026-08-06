@@ -44,6 +44,8 @@ export interface CodexDriverOptions {
   codexBin: string;
   /** Connect through the already-running experimental Gateway instead of spawning stdio. */
   gatewayUrl?: string;
+  /** Resolve the manually controlled Gateway only when a connection is needed. */
+  gatewayUrlProvider?: () => string;
   sandbox: string;
   approval: string;
   developerInstructions?: string;
@@ -107,6 +109,7 @@ export class CodexDriver implements AgentDriver {
   private readonly globalNoticeKeys = new Set<string>();
   private appServerVersion?: string;
   private defaultModel?: string;
+  private currentGatewayUrl?: string;
 
   constructor(
     private readonly options: CodexDriverOptions,
@@ -157,7 +160,7 @@ export class CodexDriver implements AgentDriver {
       ...(options.threadId ? {
         threadId: options.threadId,
         excludeTurns: true,
-        ...(this.options.gatewayUrl ? {
+        ...(this.usesGateway() ? {
           initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "summary" },
         } : {}),
       } : {}),
@@ -173,7 +176,7 @@ export class CodexDriver implements AgentDriver {
     status.threadId = threadId;
     status.appServerVersion = this.appServerVersion;
     applySessionMetadata(status, result);
-    if (this.options.gatewayUrl && options.threadId) this.applyResumedTurnState(status, result);
+    if (this.usesGateway() && options.threadId) this.applyResumedTurnState(status, result);
     const sharedSession = this.firstSessionForThread(threadId);
     this.sessions.set(key, { status, backgroundTerminals: sharedSession?.backgroundTerminals ?? new BackgroundTerminalTracker() });
     this.bindSession(threadId, key);
@@ -713,8 +716,10 @@ export class CodexDriver implements AgentDriver {
     this.recentServerStderr.clear();
     let proc: ChildProcessWithoutNullStreams | undefined;
     let socket: WebSocket | undefined;
-    if (this.options.gatewayUrl) {
-      socket = await this.connectGateway(this.options.gatewayUrl);
+    const gatewayUrl = this.options.gatewayUrl ?? this.options.gatewayUrlProvider?.();
+    this.currentGatewayUrl = gatewayUrl;
+    if (gatewayUrl) {
+      socket = await this.connectGateway(gatewayUrl);
     } else {
       const command = codexAppServerSpawnCommand(this.options.codexBin, env);
       this.appServerCommand = command;
@@ -769,8 +774,8 @@ export class CodexDriver implements AgentDriver {
     }
     this.logger.info("codex.app_server_started", {
       version: this.appServerVersion,
-      transport: this.options.gatewayUrl ? "experimental_gateway" : "stdio",
-      gateway_url: this.options.gatewayUrl,
+      transport: gatewayUrl ? "experimental_gateway" : "stdio",
+      gateway_url: gatewayUrl,
     });
   }
 
@@ -1452,8 +1457,8 @@ export class CodexDriver implements AgentDriver {
 
   private handleServerError(error: Error): void {
     if (this.stopping) return;
-    const wrapped = this.options.gatewayUrl
-      ? new Error(`Experimental relay Gateway unavailable at ${this.options.gatewayUrl}. ${error.message}`)
+    const wrapped = this.usesGateway()
+      ? new Error(`Experimental relay Gateway unavailable${this.currentGatewayUrl ? ` at ${this.currentGatewayUrl}` : ""}. ${error.message}`)
       : formatCodexSpawnError(error, this.options.codexBin);
     this.logger.error("codex.app_server_spawn_failed", {
       codex_bin: this.options.codexBin,
@@ -1471,6 +1476,10 @@ export class CodexDriver implements AgentDriver {
 
   private recentServerStderrText(): string {
     return this.recentServerStderr.text();
+  }
+
+  private usesGateway(): boolean {
+    return Boolean(this.options.gatewayUrl || this.options.gatewayUrlProvider);
   }
 
   private appServerExitError(exitCode: number | null, signalCode: NodeJS.Signals | null): Error {

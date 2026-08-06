@@ -35,6 +35,13 @@ afterEach(async () => {
 
 if (process.platform === "win32") {
   describe("relay PowerShell lifecycle script", () => {
+    test("does not expose Gateway lifecycle commands", () => {
+      const root = createFixture();
+      const result = runRelay(root, "gateway-start");
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}${result.stderr}`).not.toContain("gateway-start|");
+    });
+
     test("restart stops the relay, removes data, and starts a fresh process", async () => {
       const root = createFixture();
       expectSuccess(runRelay(root, "start"));
