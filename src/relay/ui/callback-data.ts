@@ -41,7 +41,6 @@ export function workspaceCallbackToken(name: string): string {
 
 export function isConsolePayload(payload: string): boolean {
   return payload === "s"
-    || payload === "r"
     || payload === "w"
     || payload === "n"
     || payload.startsWith("n:")

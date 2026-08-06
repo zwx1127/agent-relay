@@ -51,7 +51,6 @@ describe("relay routers", () => {
       renderStaleConsole: async () => { calls.push("stale"); },
       home: async () => { calls.push("home"); },
       status: async () => { calls.push("status"); },
-      resume: async () => { calls.push("resume"); },
       workspaces: async (_message, pageIndex) => { calls.push(`workspaces:${pageIndex}`); },
       newWorkspace: async (_message, pageIndex) => { calls.push(`new:${pageIndex}`); },
       toggleStatusMode: async () => { calls.push("toggle"); },
@@ -123,6 +122,14 @@ describe("relay routers", () => {
       callbackQueryId: "cb6",
       data: "ar:f:tok:o:1",
     });
+    await expect(router.route({
+      kind: "callback_query",
+      id: "7",
+      conversationId: "c1",
+      userId: "u1",
+      callbackQueryId: "cb7",
+      data: "ar:r",
+    })).rejects.toThrow("Unknown callback.");
 
     expect(calls).toEqual(["home", "workspaces:2", "select:abc", "intro:2:def", "new:3", "question:q:tok:1", "file:f:tok:o:1"]);
   });

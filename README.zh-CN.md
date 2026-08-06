@@ -64,7 +64,7 @@
 
 ![实验性接力工作架构：Codex 与 IM 通过同一 thread 双向互通实时进度和控制信息](docs/assets/relay-work-overview.png)
 
-先执行一次 `scripts/gateway.* setup`，需要接力工作时再手动启动 Gateway。Gateway 与 Relay 使用完全独立的脚本和生命周期。使用 `/resume` 或 Relay Home 中的 **Resume** 加入已有 thread。多个原生 Codex 客户端和 IM scope 可以共享同一个 thread，不设归属限制；活动 turn 中的普通输入使用 Steer 语义，审批或输入请求由第一个回答的客户端胜出。它只同步 Codex、Gateway 和 Relay 都在运行并已连接后产生的最新实时进度，不提供 Queue 操作，也不会保存、重放或事后追赶离线输出。请阅读[实验性接力工作](docs/zh-CN/experimental-relay-work.md)，了解 Windows、macOS 和 Linux 设置、生命周期语义以及完整移除方法。
+先执行一次 `scripts/gateway.* setup`，需要接力工作时再手动启动 Gateway。Gateway 与 Relay 使用完全独立的脚本和生命周期。使用 `/resume` 加入已有 thread。多个原生 Codex 客户端和 IM scope 可以共享同一个 thread，不设归属限制；活动 turn 中的普通输入使用 Steer 语义，审批或输入请求由第一个回答的客户端胜出。它只同步 Codex、Gateway 和 Relay 都在运行并已连接后产生的最新实时进度，不提供 Queue 操作，也不会保存、重放或事后追赶离线输出。请阅读[实验性接力工作](docs/zh-CN/experimental-relay-work.md)，了解 Windows、macOS 和 Linux 设置、生命周期语义以及完整移除方法。
 
 ## 快速开始
 

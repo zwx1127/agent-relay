@@ -80,7 +80,7 @@ An explicit `gateway stop` writes durable `local` mode before stopping the proce
 
 - Multiple CLI, Desktop, and Relay clients can connect to one Gateway. Each has an independent WebSocket connection; one app-server remains authoritative.
 - Multiple native clients and multiple IM scopes may `/resume` the same thread. Relay adds no one-writer ownership rule; the user chooses which client sends input.
-- `/resume` and Relay Home **Resume** share Codex TUI resume semantics. A resume switch is rejected while the source scope has an active turn, approval, user-input request, or other busy Relay task.
+- `/resume` uses Codex TUI resume semantics. A resume switch is rejected while the source scope has an active turn, approval, user-input request, or other busy Relay task.
 - Selecting a workspace in Relay Home only binds that directory. It does not make a running native Codex process change directories and does not auto-attach a thread. An ordinary first message starts fresh; `/resume` explicitly joins existing work.
 - An idle workspace switch releases Relay's old subscription without stopping the thread. A busy switch is rejected.
 - Ordinary IM input during an active turn uses Codex TUI Enter/Steer semantics. Relay work adds no Tab/Queue action, Gateway-level input lock, or thread ownership lock.

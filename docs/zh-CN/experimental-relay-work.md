@@ -80,7 +80,7 @@ Relay 永远不会启动 Gateway。实验开关启用但当前为 local 模式�
 
 - 多个 CLI、桌面版和 Relay 客户端可连接同一个 Gateway。每个客户端有独立 WebSocket 连接，但只由一个 app-server 管理权威状态。
 - 多个原生客户端和多个 IM scope 可以 `/resume` 同一个 thread。Relay 不增加单写者或所有权限制，由用户决定哪个客户端发送输入。
-- `/resume` 与 Relay Home 的 **Resume** 复用 Codex TUI 的恢复语义。来源 scope 存在活动 turn、审批、用户输入请求或其他忙碌 Relay task 时，会拒绝切换。
+- `/resume` 复用 Codex TUI 的恢复语义。来源 scope 存在活动 turn、审批、用户输入请求或其他忙碌 Relay task 时，会拒绝切换。
 - Relay Home 选择 workspace 只绑定目录，不会让已运行的原生 Codex 进程切换目录，也不会自动绑定 thread。第一条普通消息会新建 thread；只有 `/resume` 会显式加入已有工作。
 - 空闲 workspace 切换只释放 Relay 的旧订阅，不停止 thread；忙碌时会拒绝切换。
 - 活动 turn 期间的普通 IM 输入采用 Codex TUI Enter/Steer 语义。接力工作不增加 Tab/Queue、Gateway 输入锁或 thread 所有权锁。

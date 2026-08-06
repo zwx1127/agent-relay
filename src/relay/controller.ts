@@ -260,7 +260,6 @@ export class RelayController {
       },
       home: (message) => this.renderConsole(message.conversationId),
       status: (message) => this.renderHomeCallback(message),
-      resume: (message) => this.threadCommands.renderResumePicker(message.conversationId, ""),
       workspaces: (message, pageIndex) => this.workspaceFlow.renderWorkspacesCallback(message, pageIndex),
       newWorkspace: (message, pageIndex) => this.workspaceFlow.promptForWorkspaceName(message, pageIndex),
       toggleStatusMode: (message) => this.toggleStatusModeCallback(message),
@@ -561,7 +560,7 @@ export class RelayController {
     const status = this.statusView(message.conversationId);
     const mode = this.deps.store.getHomeStatusMode(message.conversationId);
     const previousConsoleMessageId = this.deps.store.getConsoleMessageId(message.conversationId);
-    const result = await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode, this.deps.config.experimentalRelayWorkEnabled));
+    const result = await this.renderCallbackPage(message, formatHomeMessage(status, mode), consoleKeyboard(status, mode));
     if (result.messageId) this.deps.store.setConsoleMessageId(message.conversationId, result.messageId);
     this.logger.info("router.home_callback_rendered", {
       conversation_id: message.conversationId,
@@ -584,7 +583,7 @@ export class RelayController {
     this.deps.store.setHomeStatusMode(message.conversationId, nextMode);
     const status = this.statusView(message.conversationId);
     try {
-      const result = await this.renderCallbackPage(message, formatHomeMessage(status, nextMode), consoleKeyboard(status, nextMode, this.deps.config.experimentalRelayWorkEnabled));
+      const result = await this.renderCallbackPage(message, formatHomeMessage(status, nextMode), consoleKeyboard(status, nextMode));
       if (result.messageId) this.deps.store.setConsoleMessageId(message.conversationId, result.messageId);
       this.logger.info("router.home_status_mode_toggled", {
         conversation_id: message.conversationId,
@@ -671,7 +670,7 @@ export class RelayController {
   }
 
   private consoleKeyboard(conversationId: ConversationId): InlineKeyboardMarkup {
-    return consoleKeyboard(this.statusView(conversationId), this.deps.store.getHomeStatusMode(conversationId), this.deps.config.experimentalRelayWorkEnabled);
+    return consoleKeyboard(this.statusView(conversationId), this.deps.store.getHomeStatusMode(conversationId));
   }
 
   private async renderConsole(conversationId: ConversationId, options: { forceNewMessage?: boolean } = {}): Promise<void> {
@@ -688,7 +687,7 @@ export class RelayController {
       try {
         await this.editRendered(conversationId, body, {
           messageId: previousMessageId,
-          replyMarkup: consoleKeyboard(status, mode, this.deps.config.experimentalRelayWorkEnabled),
+          replyMarkup: consoleKeyboard(status, mode),
         });
         return;
       } catch (error) {
@@ -699,7 +698,7 @@ export class RelayController {
         });
       }
     }
-    const result = await this.sendRendered(conversationId, body, { replyMarkup: consoleKeyboard(status, mode, this.deps.config.experimentalRelayWorkEnabled) });
+    const result = await this.sendRendered(conversationId, body, { replyMarkup: consoleKeyboard(status, mode) });
     if (result.messageId) this.deps.store.setConsoleMessageId(conversationId, result.messageId);
   }
 

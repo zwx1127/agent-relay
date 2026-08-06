@@ -65,7 +65,7 @@ Experimental relay work lets you begin in the native Codex CLI or the Windows/ma
 
 ![Experimental relay work architecture: Codex and IM exchange live progress and control bidirectionally through one shared thread](docs/assets/relay-work-overview.png)
 
-Run `scripts/gateway.* setup` once, then start Gateway manually whenever relay work is needed. Gateway and Relay have separate scripts and lifecycles. Use `/resume` or **Resume** in Relay Home to join an existing thread. Multiple native Codex clients and IM scopes can share a thread without ownership restrictions; ordinary input during an active turn uses Steer semantics, and the first client to answer an approval or input request wins. Only new live progress produced while Codex, Gateway, and Relay are running is synchronized—there is no Queue action, offline replay, or catch-up. See [Experimental relay work](docs/en/experimental-relay-work.md) for the Windows, macOS, and Linux setup, lifecycle semantics, and complete removal instructions.
+Run `scripts/gateway.* setup` once, then start Gateway manually whenever relay work is needed. Gateway and Relay have separate scripts and lifecycles. Use `/resume` to join an existing thread. Multiple native Codex clients and IM scopes can share a thread without ownership restrictions; ordinary input during an active turn uses Steer semantics, and the first client to answer an approval or input request wins. Only new live progress produced while Codex, Gateway, and Relay are running is synchronized—there is no Queue action, offline replay, or catch-up. See [Experimental relay work](docs/en/experimental-relay-work.md) for the Windows, macOS, and Linux setup, lifecycle semantics, and complete removal instructions.
 
 ## Quick start
 

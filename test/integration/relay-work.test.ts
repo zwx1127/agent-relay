@@ -230,18 +230,13 @@ describe("experimental relay work behavior", () => {
     expect(store.getCollaborationMode(sourceKey)).toBe("plan");
   });
 
-  test("Relay Home Resume reuses the /resume picker", async () => {
-    const { router, adapter, agent } = experimentalFixture();
-    agent.threads = [{ id: "thread-a", name: "A", status: "active" }];
-
+  test("Relay Home does not expose a Resume button when Relay Work is enabled", async () => {
+    const { router, adapter } = experimentalFixture();
     await router.handle(textMessage("/relay"));
     const home = adapter.sent.at(-1)!;
-    const resume = home.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.callback_data === "ar:r");
-    expect(resume?.text).toBe("Resume");
-    await router.handle(callbackMessage("ar:r", 7, "cb-resume-home", home.messageId));
-
-    expect(adapter.sent.at(-1)?.text).toContain("Resume chat");
-    expect(adapter.sent.at(-1)?.text).toContain("A");
+    const buttons = home.options?.replyMarkup?.inline_keyboard.flat() ?? [];
+    expect(buttons.some((button) => button.callback_data === "ar:r")).toBe(false);
+    expect(buttons.some((button) => button.callback_data === "ar:stop")).toBe(true);
   });
 
   test("allows two IM scopes to resume the same thread", async () => {

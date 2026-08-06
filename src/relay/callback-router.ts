@@ -10,7 +10,6 @@ export interface CallbackHandlers {
   renderStaleConsole(message: CallbackMessage): Promise<CallbackResult>;
   home(message: CallbackMessage): Promise<CallbackResult>;
   status(message: CallbackMessage): Promise<CallbackResult>;
-  resume(message: CallbackMessage): Promise<CallbackResult>;
   workspaces(message: CallbackMessage, pageIndex: number): Promise<CallbackResult>;
   newWorkspace(message: CallbackMessage, pageIndex: number): Promise<CallbackResult>;
   toggleStatusMode(message: CallbackMessage): Promise<CallbackResult>;
@@ -42,9 +41,6 @@ export class CallbackRouter {
     }
     if (payload === "s") {
       return callbackText(await this.handlers.status(message));
-    }
-    if (payload === "r") {
-      return callbackText(await this.handlers.resume(message));
     }
     if (payload === "w") {
       return callbackText(await this.handlers.workspaces(message, 0));
