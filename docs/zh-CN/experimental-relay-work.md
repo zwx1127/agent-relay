@@ -81,12 +81,13 @@ Relay 永远不会启动 Gateway。实验开关启用但当前为 local 模式�
 - 多个 CLI、桌面版和 Relay 客户端可连接同一个 Gateway。每个客户端有独立 WebSocket 连接，但只由一个 app-server 管理权威状态。
 - 多个原生客户端和多个 IM scope 可以 `/resume` 同一个 thread。Relay 不增加单写者或所有权限制，由用户决定哪个客户端发送输入。
 - `/resume` 复用 Codex TUI 的恢复语义。来源 scope 存在活动 turn、审批、用户输入请求或其他忙碌 Relay task 时，会拒绝切换。
+- `/resume` 成功后，Relay 会根据最近 turn 摘要立即显示活动卡片。活动 turn 会继续更新同一张卡；已完成、中断、失败或没有 turn 的 thread 会显示对应终态或 Idle 状态。
 - Relay Home 选择 workspace 只绑定目录，不会让已运行的原生 Codex 进程切换目录，也不会自动绑定 thread。第一条普通消息会新建 thread；只有 `/resume` 会显式加入已有工作。
 - 空闲 workspace 切换只释放 Relay 的旧订阅，不停止 thread；忙碌时会拒绝切换。
 - 活动 turn 期间的普通 IM 输入采用 Codex TUI Enter/Steer 语义。接力工作不增加 Tab/Queue、Gateway 输入锁或 thread 所有权锁。
 - 审批、用户输入和 MCP elicitation 可以出现在关联同一 thread 的全部已连接客户端中。第一份有效响应胜出，resolved 通知会清除重复控件。
 
-Gateway 只转发 Codex、Gateway、Relay 同时运行且关联同一 thread 后产生的新实时事件。它不保存进度历史、消费游标、离线队列、重放或追赶流。恢复时只可能读取最新 turn 摘要以识别当前活动状态，不会把错过的已完成输出补发到 IM。
+Gateway 只转发 Codex、Gateway、Relay 同时运行且关联同一 thread 后产生的新实时事件。它不保存进度历史、消费游标、离线队列、重放或追赶流。恢复时只读取最新 turn 摘要来生成即时活动状态卡，不会把错过的对话输出补发到 IM。
 
 ## 停止或移除
 

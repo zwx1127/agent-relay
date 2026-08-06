@@ -635,7 +635,68 @@ describe("relay controller thread commands", () => {
     expect(agent.released).toEqual(["codex:1:demo"]);
     expect(agent.getStatus("codex:1:demo")?.threadId).toBe("saved-thread");
     expect(store.getSession("codex:1:demo")?.thread_id).toBe("saved-thread");
+    expect(adapter.sent.at(-1)?.text).toContain("Idle");
+    expect(adapter.sent.at(-1)?.text).toContain("Chat saved");
     expect(adapter.edited.at(-1)?.text).toContain("Resumed chat.");
+  });
+
+  test("/resume immediately hydrates the latest active and terminal turn states", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "source-thread" });
+
+    agent.threads = [{ id: "active-thread", name: "Active work", cwd: path, updatedAt: 2 }];
+    agent.resumeSnapshots.set("active-thread", {
+      id: "active-turn",
+      status: "inProgress",
+      activities: [{ itemId: "existing", activity: { kind: "item", category: "command", label: "Existing command", status: "inProgress" } }],
+    });
+    await router.handle(textMessage("/resume"));
+    let picker = adapter.sent.at(-1)!;
+    let button = picker.options?.replyMarkup?.inline_keyboard.flat()[0]!;
+    await router.handle(callbackMessage(button.callback_data, 7, "resume-active", picker.messageId));
+
+    const activeCard = adapter.sent.at(-1)!;
+    expect(activeCard.text).toContain("Working");
+    expect(activeCard.text).toContain("Existing command");
+    expect(activeCard.options?.replyMarkup?.inline_keyboard.flat().map((candidate) => candidate.text)).toContain("Interrupt");
+
+    agent.getStatus("codex:1:demo")!.activeTurnId = undefined;
+    agent.threads = [{ id: "failed-thread", name: "Failed work", cwd: path, updatedAt: 3 }];
+    agent.resumeSnapshots.set("failed-thread", { id: "failed-turn", status: "failed", activities: [], durationMs: 2000, error: { message: "latest failure" } });
+    await router.handle(textMessage("/resume"));
+    picker = adapter.sent.at(-1)!;
+    button = picker.options?.replyMarkup?.inline_keyboard.flat()[0]!;
+    await router.handle(callbackMessage(button.callback_data, 7, "resume-failed", picker.messageId));
+
+    const failedCard = adapter.sent.at(-1)!;
+    expect(failedCard.text).toContain("Failed");
+    expect(failedCard.text).toContain("latest failure");
+    expect(failedCard.options?.replyMarkup?.inline_keyboard.flat().map((candidate) => candidate.text)).not.toContain("Interrupt");
+  });
+
+  test("activity snapshot delivery failure does not roll back a successful resume", async () => {
+    const { router, store, adapter, agent, root, logLines } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path, threadId: "source-thread" });
+    agent.threads = [{ id: "saved-thread", name: "Saved work", cwd: path, updatedAt: 1 }];
+
+    await router.handle(textMessage("/resume"));
+    const picker = adapter.sent.at(-1)!;
+    const button = picker.options?.replyMarkup?.inline_keyboard.flat()[0]!;
+    adapter.failSendMessage = new Error("snapshot unavailable");
+    await router.handle(callbackMessage(button.callback_data, 7, "resume-send-failed", picker.messageId));
+
+    expect(agent.getStatus("codex:1:demo")?.threadId).toBe("saved-thread");
+    expect(store.getSession("codex:1:demo")?.thread_id).toBe("saved-thread");
+    expect(adapter.edited.at(-1)?.text).toContain("Resumed chat.");
+    expect(logLines.join("\n")).toContain("router.resume_activity_snapshot_failed");
   });
 
   test("repeated resume freezes the old activity card and stale lifecycle events cannot close the new chat", async () => {

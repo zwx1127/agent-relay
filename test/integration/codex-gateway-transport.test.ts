@@ -63,7 +63,7 @@ describe("experimental Codex Gateway transport", () => {
               id: params?.threadId,
               status: { type: "active" },
             },
-            initialTurnsPage: { data: [{ id: "active-turn", status: "inProgress", items: [] }], nextCursor: null },
+            initialTurnsPage: { data: [{ id: "active-turn", status: "inProgress", items: [{ type: "reasoning", id: "reason", summary: ["Already working"] }], startedAt: 1 }], nextCursor: null },
             model: "gpt-test",
           });
           else if (method === "thread/backgroundTerminals/list") {
@@ -109,6 +109,12 @@ describe("experimental Codex Gateway transport", () => {
       expect(status.threadId).toBe("shared-thread");
       expect(gatewayResolutions).toBe(1);
       expect(status.activeTurnId).toBe("active-turn");
+      expect(status.latestTurn).toMatchObject({
+        id: "active-turn",
+        status: "inProgress",
+        startedAt: 1000,
+        activities: [{ itemId: "reason", activity: { kind: "reasoning", summary: "Already working" } }],
+      });
       await Bun.sleep(20);
       await driver.send(status.sessionKey, "steer from IM");
       const resume = received.find((message) => message.method === "thread/resume");

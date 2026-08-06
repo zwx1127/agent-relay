@@ -1,6 +1,6 @@
 import { sessionKey } from "../../src/domain/session.ts";
 import type { ConversationId, MessageId } from "../../src/domain/ids.ts";
-import type { AgentBackgroundTerminalSummary, AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentDriverCapabilities, AgentFileSearchOptions, AgentFileSearchResult, AgentInterruptResult, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentSkillListOptions, AgentSkillSummary, AgentThreadGoal, AgentThreadGoalSetOptions, AgentThreadListOptions, AgentThreadSummary } from "../../src/ports/agent.ts";
+import type { AgentBackgroundTerminalSummary, AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentDriverCapabilities, AgentFileSearchOptions, AgentFileSearchResult, AgentInterruptResult, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentSkillListOptions, AgentSkillSummary, AgentThreadGoal, AgentThreadGoalSetOptions, AgentThreadListOptions, AgentThreadSummary, AgentTurnSnapshot } from "../../src/ports/agent.ts";
 import type { EditMessageTextOptions, MessageReactionOptions, SendMessageOptions } from "../../src/ports/im.ts";
 
 export class FakeImAdapter {
@@ -120,6 +120,7 @@ export class FakeAgent implements AgentDriver {
   failSend?: Error;
   staleInterrupt = false;
   failStartForThreadIds = new Map<string, Error>();
+  resumeSnapshots = new Map<string, AgentTurnSnapshot>();
 
   async start(options: { conversationId: ConversationId; scopeKey?: string; workspaceName: string; workspacePath: string; threadId?: string }): Promise<AgentSessionStatus> {
     if (options.threadId && this.failStartForThreadIds.has(options.threadId)) {
@@ -127,7 +128,8 @@ export class FakeAgent implements AgentDriver {
     }
     const scopeKey = options.scopeKey ?? String(options.conversationId);
     const key = sessionKey(scopeKey, options.workspaceName);
-    const status = {
+    const latestTurn = options.threadId ? this.resumeSnapshots.get(options.threadId) : undefined;
+    const status: AgentSessionStatus = {
       sessionKey: key,
       conversationId: options.conversationId,
       scopeKey,
@@ -136,6 +138,8 @@ export class FakeAgent implements AgentDriver {
       running: true,
       startedAt: 1,
       threadId: options.threadId ?? `thread-${this.statuses.size + 1}`,
+      ...(latestTurn ? { latestTurn } : {}),
+      ...(latestTurn?.status === "inProgress" ? { activeTurnId: latestTurn.id } : {}),
     };
     this.statuses.set(key, status);
     return status;

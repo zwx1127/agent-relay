@@ -1,4 +1,4 @@
-import type { AgentActivity } from "../../../ports/agent.ts";
+import type { AgentActivity, AgentTurnSnapshot, AgentTurnStatus } from "../../../ports/agent.ts";
 import { asRecord, getString, summarizeUnknown } from "./protocol.ts";
 
 export function planStepStatus(value: string | undefined): "pending" | "inProgress" | "completed" | undefined {
@@ -83,6 +83,73 @@ export function itemActivity(item: Record<string, unknown> | undefined, started:
     default:
       return undefined;
   }
+}
+
+export function turnSnapshot(value: unknown): AgentTurnSnapshot | undefined {
+  const turn = asRecord(value);
+  const id = getString(turn, "id");
+  const status = normalizedTurnStatus(getString(turn, "status"));
+  if (!id || !status) return undefined;
+
+  const activities = (Array.isArray(turn?.items) ? turn.items : []).map((value) => {
+    const item = asRecord(value);
+    const itemId = getString(item, "id");
+    const type = getString(item, "type");
+    let activity: AgentActivity | undefined;
+    if (type === "reasoning") {
+      const summary = Array.isArray(item?.summary)
+        ? item.summary.filter((part): part is string => typeof part === "string").join("\n")
+        : getString(item, "summary");
+      if (summary) activity = { kind: "reasoning", summary };
+    } else if (type === "plan") {
+      const text = getString(item, "text");
+      if (text) {
+        activity = {
+          kind: "item",
+          category: "other",
+          label: "Plan snapshot",
+          detail: truncateSummary(text),
+          status: status === "inProgress" ? "inProgress" : "completed",
+        };
+      }
+    } else {
+      activity = itemActivity(item, status === "inProgress");
+    }
+    return activity ? { ...(itemId ? { itemId } : {}), activity } : undefined;
+  }).filter((entry): entry is AgentTurnSnapshot["activities"][number] => Boolean(entry));
+
+  const errorRecord = asRecord(turn?.error);
+  const errorMessage = getString(errorRecord, "message");
+  const startedAt = unixSecondsToMilliseconds(turn?.startedAt);
+  const completedAt = unixSecondsToMilliseconds(turn?.completedAt);
+  const durationMs = typeof turn?.durationMs === "number"
+    ? turn.durationMs
+    : startedAt !== undefined && completedAt !== undefined
+      ? Math.max(0, completedAt - startedAt)
+      : undefined;
+  return {
+    id,
+    status,
+    activities,
+    ...(startedAt !== undefined ? { startedAt } : {}),
+    ...(completedAt !== undefined ? { completedAt } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(errorMessage ? {
+      error: {
+        message: errorMessage,
+        ...(errorRecord?.codexErrorInfo !== undefined && errorRecord.codexErrorInfo !== null ? { codexErrorInfo: errorRecord.codexErrorInfo } : {}),
+        ...(getString(errorRecord, "additionalDetails") ? { additionalDetails: getString(errorRecord, "additionalDetails") } : {}),
+      },
+    } : {}),
+  };
+}
+
+function normalizedTurnStatus(value: string | undefined): AgentTurnStatus | undefined {
+  return value === "completed" || value === "interrupted" || value === "failed" || value === "inProgress" ? value : undefined;
+}
+
+function unixSecondsToMilliseconds(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value * 1000 : undefined;
 }
 
 function truncateSummary(value: string, max = 500): string {

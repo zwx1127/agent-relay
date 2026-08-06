@@ -6,6 +6,109 @@ import { ActivityStreamer, type ActivitySessionContext } from "../../src/relay/a
 import { sleep } from "../support/fakes.ts";
 
 describe("activity streamer lifecycle", () => {
+  test("resume snapshots flush immediately and active snapshots keep the same card for live updates", async () => {
+    const sent: string[] = [];
+    const edited: string[] = [];
+    const context: ActivitySessionContext = {
+      threadId: "thread-a",
+      threadName: "Saved work",
+      collaborationMode: "default",
+      goal: null,
+      activeTurnId: "turn-a",
+    };
+    const streamer = activityStreamer(context, sent, edited, { quietMs: 10_000, minEditMs: 10_000, maxMs: 20_000 });
+
+    await streamer.bootstrapResume({
+      sessionKey: "codex:1:demo",
+      conversationId: "1",
+      workspaceName: "demo",
+      workspacePath: "/demo",
+      running: true,
+      startedAt: 1,
+      threadId: "thread-a",
+      activeTurnId: "turn-a",
+      latestTurn: {
+        id: "turn-a",
+        status: "inProgress",
+        activities: [{ itemId: "command", activity: { kind: "item", category: "command", label: "Existing work", status: "inProgress" } }],
+      },
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("Working");
+    expect(sent[0]).toContain("Saved work");
+    expect(sent[0]).toContain("Existing work");
+
+    await streamer.handle({ type: "activity", sessionKey: "codex:1:demo", threadId: "thread-a", turnId: "turn-a", activity: { kind: "plan", steps: [{ step: "Continue live", status: "inProgress" }] } });
+
+    expect(sent).toHaveLength(1);
+    expect(edited.at(-1)).toContain("Continue live");
+  });
+
+  test("resume snapshots render terminal, waiting, and empty-thread phases immediately", async () => {
+    const cases = [
+      { status: "completed" as const, expected: "Completed" },
+      { status: "interrupted" as const, expected: "Interrupted" },
+      { status: "failed" as const, expected: "Failed", error: { message: "resume boom" } },
+    ];
+    for (const entry of cases) {
+      const sent: string[] = [];
+      const context: ActivitySessionContext = { threadId: `thread-${entry.status}`, collaborationMode: "default", goal: null };
+      const streamer = activityStreamer(context, sent, [], { quietMs: 10_000, minEditMs: 10_000, maxMs: 20_000 });
+      await streamer.bootstrapResume({
+        sessionKey: `codex:1:${entry.status}`,
+        conversationId: "1",
+        workspaceName: entry.status,
+        workspacePath: "/demo",
+        running: true,
+        startedAt: 1,
+        threadId: context.threadId,
+        latestTurn: { id: `turn-${entry.status}`, status: entry.status, activities: [], durationMs: 2500, ...(entry.error ? { error: entry.error } : {}) },
+      });
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toContain(entry.expected);
+      if (entry.error) expect(sent[0]).toContain("resume boom");
+    }
+
+    for (const waitingCase of [
+      { flag: "waitingForApproval" as const, expected: "Waiting for approval" },
+      { flag: "waitingForUserInput" as const, expected: "Waiting for input" },
+    ]) {
+      const waitingSent: string[] = [];
+      const waitingContext: ActivitySessionContext = { threadId: `thread-${waitingCase.flag}`, collaborationMode: "default", goal: null, activeTurnId: `turn-${waitingCase.flag}` };
+      const waiting = activityStreamer(waitingContext, waitingSent, [], { quietMs: 10_000, minEditMs: 10_000, maxMs: 20_000 });
+      await waiting.bootstrapResume({
+        sessionKey: `codex:1:${waitingCase.flag}`,
+        conversationId: "1",
+        workspaceName: waitingCase.flag,
+        workspacePath: "/demo",
+        running: true,
+        startedAt: 1,
+        threadId: waitingContext.threadId,
+        activeTurnId: waitingContext.activeTurnId,
+        [waitingCase.flag]: true,
+        latestTurn: { id: waitingContext.activeTurnId!, status: "inProgress", activities: [] },
+      });
+      expect(waitingSent[0]).toContain(waitingCase.expected);
+    }
+
+    const idleSent: string[] = [];
+    const idleContext: ActivitySessionContext = { threadId: "thread-idle", collaborationMode: "default", goal: null };
+    const idle = activityStreamer(idleContext, idleSent, [], { quietMs: 10_000, minEditMs: 10_000, maxMs: 20_000 });
+    await idle.bootstrapResume({
+      sessionKey: "codex:1:idle",
+      conversationId: "1",
+      workspaceName: "idle",
+      workspacePath: "/demo",
+      running: true,
+      startedAt: 1,
+      threadId: "thread-idle",
+    });
+    expect(idleSent).toHaveLength(1);
+    expect(idleSent[0]).toContain("Idle");
+    expect(idleSent[0]).toContain("No turns yet");
+  });
+
   test("no-turn metadata cannot create a card", async () => {
     const sent: string[] = [];
     const context: ActivitySessionContext = {

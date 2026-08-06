@@ -26,6 +26,18 @@ describe("CodexDriver thread operations", () => {
     expect(resume.params.developerInstructions).toBe("developer text");
     expect(resume.params.baseInstructions).toBe("base text");
     expect(resume.params.threadId).toBe("resume-thread");
+    expect(resume.params.initialTurnsPage).toEqual({ limit: 1, sortDirection: "desc", itemsView: "summary" });
+    expect(status.latestTurn).toEqual({
+      id: "latest-turn",
+      status: "completed",
+      activities: [{
+        itemId: "resume-command",
+        activity: { kind: "item", category: "command", label: "git status", status: "completed", detail: "Exit 0", durationMs: 12 },
+      }],
+      startedAt: 1000,
+      completedAt: 2000,
+      durationMs: 1000,
+    });
     await driver.stop(status.sessionKey);
   });
 

@@ -1,5 +1,24 @@
 import type { ConversationId } from "../../domain/ids.ts";
+import type { AgentActivity, AgentTurnError, AgentTurnStatus } from "./events.ts";
 import type { AgentThreadGoal, AgentTokenUsage } from "./thread.ts";
+
+export interface AgentTurnActivitySnapshot {
+  itemId?: string;
+  activity: AgentActivity;
+}
+
+/** Provider-neutral summary of the latest turn returned while resuming a thread. */
+export interface AgentTurnSnapshot {
+  id: string;
+  status: AgentTurnStatus;
+  activities: AgentTurnActivitySnapshot[];
+  /** Unix timestamp in milliseconds. */
+  startedAt?: number;
+  /** Unix timestamp in milliseconds. */
+  completedAt?: number;
+  durationMs?: number;
+  error?: AgentTurnError;
+}
 
 export interface AgentSessionStatus {
   sessionKey: string;
@@ -15,6 +34,8 @@ export interface AgentSessionStatus {
   threadStatus?: string;
   /** Present while the provider believes subsequent input should steer an in-flight turn. */
   activeTurnId?: string;
+  /** Latest provider-normalized turn snapshot, used to hydrate resume presentation. */
+  latestTurn?: AgentTurnSnapshot;
   /** App-server hint that the thread can accept direct input while it is active. */
   canAcceptDirectInput?: boolean;
   model?: string;

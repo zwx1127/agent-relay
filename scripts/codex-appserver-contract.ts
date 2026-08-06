@@ -55,11 +55,15 @@ function assertGeneratedProtocol(schemaDir: string): void {
   const capabilitiesPath = join(schemaDir, "InitializeCapabilities.ts");
   const userInputPath = join(schemaDir, "v2", "UserInput.ts");
   const notificationsPath = join(schemaDir, "ServerNotification.ts");
-  if (![clientRequestPath, capabilitiesPath, userInputPath, notificationsPath].every(existsSync)) throw new Error("Experimental TypeScript schema was not generated.");
+  const threadResumePath = join(schemaDir, "v2", "ThreadResumeParams.ts");
+  const turnPath = join(schemaDir, "v2", "Turn.ts");
+  if (![clientRequestPath, capabilitiesPath, userInputPath, notificationsPath, threadResumePath, turnPath].every(existsSync)) throw new Error("Experimental TypeScript schema was not generated.");
   const requests = readFileSync(clientRequestPath, "utf8");
   const capabilities = readFileSync(capabilitiesPath, "utf8");
   const userInput = readFileSync(userInputPath, "utf8");
   const notifications = readFileSync(notificationsPath, "utf8");
+  const threadResume = readFileSync(threadResumePath, "utf8");
+  const turn = readFileSync(turnPath, "utf8");
   for (const method of ["model/list", "collaborationMode/list", "thread/backgroundTerminals/list", "skills/list", "fuzzyFileSearch"]) {
     if (!requests.includes(`\"method\": \"${method}\"`)) throw new Error(`Generated schema is missing ${method}.`);
   }
@@ -71,6 +75,10 @@ function assertGeneratedProtocol(schemaDir: string): void {
   }
   for (const method of ["item/reasoning/summaryTextDelta", "turn/plan/updated", "turn/diff/updated", "hook/started", "guardianWarning", "configWarning"]) {
     if (!notifications.includes(`\"method\": \"${method}\"`)) throw new Error(`Generated notifications are missing ${method}.`);
+  }
+  if (!threadResume.includes("initialTurnsPage") || !threadResume.includes("excludeTurns")) throw new Error("Generated thread/resume schema is missing latest-turn bootstrap fields.");
+  for (const field of ["items", "status", "error", "startedAt", "completedAt", "durationMs"]) {
+    if (!turn.includes(field)) throw new Error(`Generated Turn is missing ${field}.`);
   }
 }
 

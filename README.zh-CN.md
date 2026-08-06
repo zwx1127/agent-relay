@@ -112,7 +112,7 @@ bun run start
 | `/review` | 审查当前工作区改动。 |
 | `/plan <prompt>` | 用 Plan mode 执行提示词。 |
 | `/goal <objective>` | 为当前 Codex 线程设置目标。 |
-| `/resume` | 选择最近的 Codex 线程。 |
+| `/resume` | 选择最近的 Codex 线程，并立即显示其最新 turn 状态。 |
 | `/side <prompt>` | 发起临时 side conversation。 |
 | Activity/Goal 卡片按钮 | 中断当前 turn 或管理 Goal；按钮文案保持英文。 |
 | `/ps` | 查看 Codex 后台终端。 |

@@ -113,7 +113,7 @@ Common commands:
 | `/review` | Review current workspace changes. |
 | `/plan <prompt>` | Run a prompt in Plan mode. |
 | `/goal <objective>` | Set a goal for the current Codex thread. |
-| `/resume` | Pick a recent Codex thread. |
+| `/resume` | Pick a recent Codex thread and immediately show its latest turn state. |
 | `/side <prompt>` | Ask in a temporary side conversation. |
 | Activity/Goal card buttons | Interrupt the active turn or manage the goal. Button labels stay in English. |
 | `/ps` | List Codex background terminals. |

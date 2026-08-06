@@ -745,22 +745,15 @@ export class RelayController {
   }
 
   private async bootstrapResumedActivity(status: AgentSessionStatus): Promise<void> {
-    if (!status.activeTurnId) return;
-    await this.activityStreamer.handle({
-      type: "activity",
-      sessionKey: status.sessionKey,
-      ...(status.threadId ? { threadId: status.threadId } : {}),
-      turnId: status.activeTurnId,
-      itemId: `resume:${status.activeTurnId}`,
-      activity: {
-        kind: "item",
-        category: "other",
-        label: "Joined active Codex turn",
-        status: "inProgress",
-      },
-    });
-    if (status.waitingForApproval) await this.activityStreamer.setPhase(status.sessionKey, "waitingForApproval");
-    else if (status.waitingForUserInput) await this.activityStreamer.setPhase(status.sessionKey, "waitingForInput");
+    try {
+      await this.activityStreamer.bootstrapResume(status);
+    } catch (error) {
+      this.logger.warn("router.resume_activity_snapshot_failed", {
+        session_key: status.sessionKey,
+        thread_id: status.threadId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
   }
 
   private async resetSessionPresentation(sessionKeyValue: string, options: { deletePages?: boolean } = {}): Promise<void> {

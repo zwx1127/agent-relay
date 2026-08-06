@@ -33,7 +33,7 @@ import { codexAppServerSpawnCommand, codexVersionSpawnCommand, formatCodexSpawnE
 import { BackgroundTerminalTracker } from "./background-terminals.ts";
 import { CodexRpcClient, type JsonRpcMessage, type JsonRpcNotification, type JsonRpcRequest, type JsonRpcResponse } from "./rpc.ts";
 import { RecentStderrBuffer } from "./stderr-buffer.ts";
-import { activityStatus, itemActivity, planStepStatus } from "./activity.ts";
+import { activityStatus, itemActivity, planStepStatus, turnSnapshot } from "./activity.ts";
 import { changedSettings, globalNoticeFor, nullableNumber, settingsSnapshot } from "./notices.ts";
 import { runCommandForOutput } from "./process.ts";
 import { sideBoundaryPromptItem, sideDeveloperInstructions } from "./side-conversation.ts";
@@ -160,9 +160,7 @@ export class CodexDriver implements AgentDriver {
       ...(options.threadId ? {
         threadId: options.threadId,
         excludeTurns: true,
-        ...(this.usesGateway() ? {
-          initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "summary" },
-        } : {}),
+        initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "summary" },
       } : {}),
       cwd: options.workspacePath,
       approvalPolicy: this.options.approval,
@@ -176,7 +174,7 @@ export class CodexDriver implements AgentDriver {
     status.threadId = threadId;
     status.appServerVersion = this.appServerVersion;
     applySessionMetadata(status, result);
-    if (this.usesGateway() && options.threadId) this.applyResumedTurnState(status, result);
+    if (options.threadId) this.applyResumedTurnState(status, result);
     const sharedSession = this.firstSessionForThread(threadId);
     this.sessions.set(key, { status, backgroundTerminals: sharedSession?.backgroundTerminals ?? new BackgroundTerminalTracker() });
     this.bindSession(threadId, key);
@@ -260,17 +258,12 @@ export class CodexDriver implements AgentDriver {
   private applyResumedTurnState(status: AgentSessionStatus, result: unknown): void {
     const thread = asRecord(asRecord(result)?.thread);
     const initialTurnsPage = asRecord(asRecord(result)?.initialTurnsPage);
-    const turns = Array.isArray(initialTurnsPage?.data)
-      ? initialTurnsPage.data
-      : Array.isArray(thread?.turns)
-        ? thread.turns
-        : [];
-    for (let index = turns.length - 1; index >= 0; index -= 1) {
-      const turn = asRecord(turns[index]);
-      if (getString(turn, "status") !== "inProgress") continue;
-      status.activeTurnId = getString(turn, "id");
-      break;
-    }
+    const initialTurns = Array.isArray(initialTurnsPage?.data) ? initialTurnsPage.data : [];
+    const embeddedTurns = Array.isArray(thread?.turns) ? thread.turns : [];
+    const latest = turnSnapshot(initialTurns[0] ?? embeddedTurns.at(-1));
+    if (!latest) return;
+    status.latestTurn = latest;
+    if (latest.status === "inProgress") status.activeTurnId = latest.id;
   }
 
   async stop(key: string): Promise<void> {
@@ -1004,8 +997,11 @@ export class CodexDriver implements AgentDriver {
     }
 
     if (message.method === "turn/started") {
-      const turnId = getTurnId({ turn: params?.turn });
+      const snapshot = turnSnapshot(params?.turn);
+      const turnId = snapshot?.id ?? getTurnId({ turn: params?.turn });
       if (turnId) running.status.activeTurnId = turnId;
+      if (snapshot) running.status.latestTurn = snapshot;
+      else if (turnId) running.status.latestTurn = { id: turnId, status: "inProgress", activities: [] };
       running.status.waitingForApproval = false;
       running.status.waitingForUserInput = false;
       clearRecentError(running);
@@ -1058,6 +1054,17 @@ export class CodexDriver implements AgentDriver {
         return;
       }
       running.status.activeTurnId = undefined;
+      const snapshot = turnSnapshot(params?.turn);
+      if (snapshot) running.status.latestTurn = snapshot;
+      else if (completed.turnId) {
+        running.status.latestTurn = {
+          id: completed.turnId,
+          status: completed.status ?? "failed",
+          activities: running.status.latestTurn?.id === completed.turnId ? running.status.latestTurn.activities : [],
+          ...(completed.durationMs !== undefined ? { durationMs: completed.durationMs } : {}),
+          ...(completed.error ? { error: completed.error } : {}),
+        };
+      }
       running.status.waitingForApproval = false;
       running.status.waitingForUserInput = false;
       if (running.reviewTurnId === completed.turnId) {

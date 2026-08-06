@@ -45,7 +45,7 @@ rl.on("line", (line) => {
   if (msg.method === "initialize") {
     send({ id: msg.id, result: { userAgent: "codex-cli 0.145.0", codexHome: "/tmp", platformFamily: "unix", platformOs: "linux" } });
   } else if (msg.method === "thread/start" || msg.method === "thread/resume") {
-    send({ id: msg.id, result: { thread: { id: "thread-1", name: "Initial thread", status: { type: "idle" } }, model: "gpt-5.2", modelProvider: "openai", reasoningEffort: "medium", approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: { type: "workspaceWrite" } } });
+    send({ id: msg.id, result: { thread: { id: "thread-1", name: "Initial thread", status: { type: "idle" } }, initialTurnsPage: msg.method === "thread/resume" ? { data: [{ id: "latest-turn", status: "completed", items: [{ type: "commandExecution", id: "resume-command", command: "git status", status: "completed", exitCode: 0, durationMs: 12 }], startedAt: 1, completedAt: 2, durationMs: 1000 }], nextCursor: null } : null, model: "gpt-5.2", modelProvider: "openai", reasoningEffort: "medium", approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: { type: "workspaceWrite" } } });
   } else if (msg.method === "turn/start") {
     const turnId = "turn-" + (++turnCount);
     const threadId = msg.params.threadId;

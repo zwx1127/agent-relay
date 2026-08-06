@@ -6,6 +6,7 @@ import type {
   AgentActivityEvent,
   AgentCollaborationMode,
   AgentPlanStep,
+  AgentSessionStatus,
   AgentThreadGoal,
   AgentTurnStatus,
 } from "../ports/agent.ts";
@@ -33,7 +34,7 @@ export interface ActivitySessionContext {
   activeTurnId?: string;
 }
 
-export type ActivityPhase = "working" | "waitingForInput" | "waitingForApproval" | "done" | "interrupted" | "failed";
+export type ActivityPhase = "idle" | "working" | "waitingForInput" | "waitingForApproval" | "done" | "interrupted" | "failed";
 
 interface ActivityItemState {
   key: string;
@@ -229,6 +230,41 @@ export class ActivityStreamer {
     if (!state) return;
     this.apply(state, event.activity, event.itemId);
     await this.schedule(state, isImmediate(event.activity));
+  }
+
+  async bootstrapResume(status: AgentSessionStatus): Promise<void> {
+    const context = this.deps.getSessionContext(status.sessionKey);
+    const snapshot = status.latestTurn;
+    const turnId = snapshot?.id ?? `resume-idle:${status.threadId ?? status.sessionKey}`;
+    const state = await this.stateFor({
+      type: "activity",
+      sessionKey: status.sessionKey,
+      ...(status.threadId ? { threadId: status.threadId } : {}),
+      turnId,
+      activity: { kind: "notice", level: "info", title: "Resumed thread snapshot" },
+    }, context);
+    if (!state) return;
+
+    if (snapshot?.startedAt !== undefined) state.startedAt = snapshot.startedAt;
+    state.durationMs = snapshot?.durationMs;
+    state.error = snapshot?.error?.message;
+    state.phaseDetail = snapshot ? "Latest turn snapshot" : "No turns yet";
+    for (const entry of snapshot?.activities ?? []) this.apply(state, entry.activity, entry.itemId);
+
+    if (!snapshot) state.phase = "idle";
+    else if (snapshot.status === "completed") state.phase = "done";
+    else if (snapshot.status === "interrupted") state.phase = "interrupted";
+    else if (snapshot.status === "failed") state.phase = "failed";
+    else if (status.waitingForApproval) state.phase = "waitingForApproval";
+    else if (status.waitingForUserInput) state.phase = "waitingForInput";
+    else state.phase = "working";
+    this.markDirty(state);
+
+    if (state.phase === "working" || state.phase === "waitingForInput" || state.phase === "waitingForApproval") {
+      await this.schedule(state, true);
+      return;
+    }
+    await this.finish(state);
   }
 
   async finalize(sessionKey: string, turnId: string | undefined, status: AgentTurnStatus, error?: string, durationMs?: number): Promise<void> {
@@ -754,6 +790,7 @@ function recentLines(state: ActivityState, limit: 0 | 1 | 2 | 3, total: number):
 
 function header(state: ActivityState): string {
   const phase: Record<ActivityPhase, [string, string]> = {
+    idle: ["○", "Idle"],
     working: ["●", "Working"],
     waitingForInput: ["●", "Waiting for input"],
     waitingForApproval: ["●", "Waiting for approval"],
