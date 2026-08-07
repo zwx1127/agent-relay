@@ -36,6 +36,8 @@ import type {
   AgentThreadSwitchResult,
   AgentThreadListOptions,
   AgentThreadSummary,
+  AgentTurnCompletedEvent,
+  AgentTurnSnapshot,
   StartAgentOptions,
 } from "../../../ports/agent.ts";
 import {
@@ -71,6 +73,8 @@ export interface CodexDriverOptions {
   developerInstructions?: string;
   baseInstructions?: string;
   env?: Record<string, string>;
+  /** Test override; production uses the fixed five-minute failed-command stall threshold. */
+  stallTimeoutMs?: number;
 }
 
 function relayCommandState(record: Record<string, unknown> | undefined): AgentRelayCommandState | undefined {
@@ -137,6 +141,11 @@ function interactiveRequestKey(requestId: string | number): string {
   return `${typeof requestId}:${String(requestId)}`;
 }
 
+function commandExecutionFailed(item: Record<string, unknown>): boolean {
+  return getString(item, "status") === "failed"
+    || (typeof item.exitCode === "number" && item.exitCode !== 0);
+}
+
 interface PendingInteractiveRequest {
   threadId: string;
   sessionKeys: Set<string>;
@@ -156,6 +165,17 @@ interface PendingRelayCommandOrigin {
 
 const USER_MESSAGE_TRACKING_TTL_MS = 10 * 60_000;
 const USER_MESSAGE_TRACKING_LIMIT = 2_048;
+const FAILED_COMMAND_STALL_MS = 5 * 60_000;
+const TERMINAL_TURN_TRACKING_LIMIT = 2_048;
+
+interface TurnStallWatch {
+  threadId: string;
+  turnId: string;
+  stalled: boolean;
+  timer?: Timer;
+}
+
+type TurnReconcileResult = "terminal" | "active" | "unknown";
 
 export class CodexDriver implements AgentDriver {
   readonly providerId = "codex";
@@ -205,6 +225,8 @@ export class CodexDriver implements AgentDriver {
   private readonly requestedGoalMutation = new Map<string, { action: "updated" | "cleared"; objective?: string; expiresAt: number }>();
   private readonly pendingGlobalNotices: PendingGlobalNotice[] = [];
   private readonly globalNoticeKeys = new Set<string>();
+  private readonly terminalTurns = new Map<string, number>();
+  private readonly turnStallWatches = new Map<string, TurnStallWatch>();
   private appServerVersion?: string;
   private defaultModel?: string;
   private currentGatewayUrl?: string;
@@ -289,6 +311,7 @@ export class CodexDriver implements AgentDriver {
     this.sessions.set(key, { status, backgroundTerminals: sharedSession?.backgroundTerminals ?? new BackgroundTerminalTracker() });
     this.bindSession(threadId, key);
     this.mirrorThreadStatus(key);
+    if (options.threadId && status.activeTurnId) await this.reconcileActiveTurn(key, "resume");
     try {
       const [terminals, goalResult] = await Promise.all([
         this.request("thread/backgroundTerminals/list", { threadId, limit: 1 }).then(asRecord),
@@ -328,6 +351,8 @@ export class CodexDriver implements AgentDriver {
       this.logger.warn("codex.send_without_session", { session_key: key, text_len: text.length });
       throw new Error("Codex session is not running.");
     }
+
+    if (running.status.activeTurnId) await this.reconcileActiveTurn(key, "before_send");
 
     const input = userInputPayload(text, options?.attachments, options?.images);
     const method = running.status.activeTurnId ? "turn/steer" : "turn/start";
@@ -369,6 +394,7 @@ export class CodexDriver implements AgentDriver {
           thread_id: running.status.threadId,
           stale_turn_id: running.status.activeTurnId,
         });
+        if (running.status.activeTurnId) this.clearTurnStallWatch(running.status.threadId, running.status.activeTurnId);
         running.status.activeTurnId = undefined;
         this.mirrorThreadStatus(key);
         result = await this.request("turn/start", { threadId: running.status.threadId, input, ...(collaborationMode ? { collaborationMode } : {}), ...originParams });
@@ -379,8 +405,10 @@ export class CodexDriver implements AgentDriver {
       throw error;
     }
     updateActiveTurnFromResult(running, result);
+    const resultTurnId = getTurnId(result);
+    if (method === "turn/steer" && resultTurnId) await this.noteTurnProgress(running.status.threadId, resultTurnId);
     this.mirrorThreadStatus(key);
-    return { turnId: getTurnId(result), ...(collaborationModeApplied ? { collaborationModeApplied: true } : {}) };
+    return { turnId: resultTurnId, ...(collaborationModeApplied ? { collaborationModeApplied: true } : {}) };
   }
 
   private applyResumedTurnState(status: AgentSessionStatus, result: unknown): void {
@@ -392,6 +420,168 @@ export class CodexDriver implements AgentDriver {
     if (!latest) return;
     status.latestTurn = latest;
     if (latest.status === "inProgress") status.activeTurnId = latest.id;
+  }
+
+  private async reconcileActiveTurn(key: string, reason: string): Promise<TurnReconcileResult> {
+    const running = this.sessions.get(key);
+    const threadId = running?.status.threadId;
+    const activeTurnId = running?.status.activeTurnId;
+    if (!running || !threadId || !activeTurnId) return "unknown";
+
+    this.logger.info("codex.turn_reconcile_started", {
+      session_key: key,
+      thread_id: threadId,
+      turn_id: activeTurnId,
+      reason,
+    });
+    let result: Record<string, unknown> | undefined;
+    try {
+      result = asRecord(await this.request("thread/read", { threadId, includeTurns: true }));
+    } catch (error) {
+      this.logger.warn("codex.turn_reconcile_failed", {
+        session_key: key,
+        thread_id: threadId,
+        turn_id: activeTurnId,
+        reason,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+      return "unknown";
+    }
+
+    const current = this.sessions.get(key);
+    if (!current || current.status.threadId !== threadId || current.status.activeTurnId !== activeTurnId) return "unknown";
+    const thread = asRecord(result?.thread);
+    applyThreadMetadata(current.status, thread);
+    const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+    const matchingRaw = turns.find((value) => getTurnId({ turn: value }) === activeTurnId);
+    const matchingSnapshot = turnSnapshot(matchingRaw);
+    if (matchingSnapshot && matchingSnapshot.status !== "inProgress") {
+      const completed = toTurnCompletedEvent(key, { turn: matchingRaw });
+      this.logger.warn("codex.turn_reconcile_recovered", {
+        session_key: key,
+        thread_id: threadId,
+        turn_id: activeTurnId,
+        turn_status: matchingSnapshot.status,
+        reason,
+      });
+      await this.handleTerminalTurn(key, completed, matchingSnapshot, "reconcile");
+      return "terminal";
+    }
+
+    if (matchingSnapshot) current.status.latestTurn = matchingSnapshot;
+    const runtimeStatus = getString(asRecord(thread?.status), "type");
+    if (runtimeStatus === "idle" || runtimeStatus === "systemError" || runtimeStatus === "notLoaded") {
+      const detail = `Codex thread is ${runtimeStatus}, but turn ${activeTurnId} is still marked in progress. Relay recovered the stale turn because its terminal event is missing.`;
+      const snapshot: AgentTurnSnapshot = {
+        id: activeTurnId,
+        status: "failed",
+        activities: matchingSnapshot?.activities ?? current.status.latestTurn?.activities ?? [],
+        ...(matchingSnapshot?.startedAt !== undefined ? { startedAt: matchingSnapshot.startedAt } : {}),
+        ...(matchingSnapshot?.durationMs !== undefined ? { durationMs: matchingSnapshot.durationMs } : {}),
+        error: { message: detail },
+      };
+      this.logger.warn("codex.turn_reconcile_inconsistent", {
+        session_key: key,
+        thread_id: threadId,
+        turn_id: activeTurnId,
+        thread_status: runtimeStatus,
+        reason,
+      });
+      await this.handleTerminalTurn(key, {
+        type: "turn_completed",
+        sessionKey: key,
+        turnId: activeTurnId,
+        status: "failed",
+        error: snapshot.error,
+        ...(snapshot.durationMs !== undefined ? { durationMs: snapshot.durationMs } : {}),
+      }, snapshot, "reconcile_inconsistent");
+      return "terminal";
+    }
+
+    this.mirrorThreadStatus(key);
+    this.logger.info("codex.turn_reconcile_still_active", {
+      session_key: key,
+      thread_id: threadId,
+      turn_id: activeTurnId,
+      thread_status: runtimeStatus,
+      reason,
+    });
+    return "active";
+  }
+
+  private async handleTerminalTurn(
+    key: string,
+    completed: AgentTurnCompletedEvent,
+    snapshot: AgentTurnSnapshot | undefined,
+    source: string,
+  ): Promise<boolean> {
+    if (completed.status === "inProgress") {
+      this.logger.warn("codex.turn_completed_in_progress", { session_key: key, turn_id: completed.turnId, source });
+      return false;
+    }
+    const running = this.sessions.get(key);
+    const threadId = running?.status.threadId;
+    if (!running || !threadId) return false;
+    const terminalKey = completed.turnId ? this.turnTrackingKey(threadId, completed.turnId) : undefined;
+    if (terminalKey && this.terminalTurns.has(terminalKey)) {
+      this.logger.info("codex.turn_terminal_late_duplicate_ignored", {
+        session_key: key,
+        thread_id: threadId,
+        turn_id: completed.turnId,
+        source,
+      });
+      return false;
+    }
+    if (terminalKey) {
+      while (this.terminalTurns.size >= TERMINAL_TURN_TRACKING_LIMIT) {
+        const oldest = this.terminalTurns.keys().next().value;
+        if (typeof oldest !== "string") break;
+        this.terminalTurns.delete(oldest);
+      }
+      this.terminalTurns.set(terminalKey, Date.now());
+    }
+
+    const hadNoLatest = !running.status.latestTurn;
+    const matchesActive = Boolean(completed.turnId && running.status.activeTurnId === completed.turnId);
+    const matchesLatest = Boolean(completed.turnId && running.status.latestTurn?.id === completed.turnId);
+    const hasDifferentActive = Boolean(running.status.activeTurnId && running.status.activeTurnId !== completed.turnId);
+    if (hasDifferentActive) {
+      this.logger.info("codex.turn_terminal_late_scoped", {
+        session_key: key,
+        thread_id: threadId,
+        turn_id: completed.turnId,
+        active_turn_id: running.status.activeTurnId,
+        source,
+      });
+    }
+    if (matchesActive) {
+      running.status.activeTurnId = undefined;
+      running.status.waitingForApproval = false;
+      running.status.waitingForUserInput = false;
+    }
+    if (snapshot && !hasDifferentActive && (matchesActive || matchesLatest || hadNoLatest)) {
+      running.status.latestTurn = snapshot;
+    } else if (completed.turnId && !hasDifferentActive && (matchesActive || matchesLatest || hadNoLatest)) {
+      running.status.latestTurn = {
+        id: completed.turnId,
+        status: completed.status ?? "failed",
+        activities: matchesLatest ? running.status.latestTurn?.activities ?? [] : [],
+        ...(completed.durationMs !== undefined ? { durationMs: completed.durationMs } : {}),
+        ...(completed.error ? { error: completed.error } : {}),
+      };
+    }
+    if (running.reviewTurnId === completed.turnId) {
+      running.reviewTurnId = undefined;
+      running.status.reviewInProgress = false;
+    }
+    if (!hasDifferentActive && (matchesActive || matchesLatest || hadNoLatest)) {
+      if (completed.status === "failed") running.status.recentError = completed.error?.message ?? "Codex turn failed.";
+      else clearRecentError(running);
+    }
+    if (completed.turnId) this.clearTurnStallWatch(threadId, completed.turnId);
+    this.mirrorThreadStatus(key);
+    await this.emitOutputForSessions(key, (sessionKeyValue) => ({ ...completed, sessionKey: sessionKeyValue }));
+    return true;
   }
 
   async syncThreadCollaborationMode(
@@ -459,6 +649,7 @@ export class CodexDriver implements AgentDriver {
       if (origin.sessionKey === key) this.pendingUserMessageOrigins.delete(clientId);
     }
     if (!threadId || !this.unbindSession(threadId, key)) return;
+    this.clearThreadStallWatches(threadId);
     await this.request("thread/unsubscribe", { threadId }).catch((error) => {
       this.logger.warn("codex.thread_unsubscribe_failed", {
         session_key: key,
@@ -1079,6 +1270,10 @@ export class CodexDriver implements AgentDriver {
     const running = this.sessions.get(key);
     if (!running) return;
     await this.flushGlobalNotices(key);
+    const notificationTurnId = getTurnId(params);
+    if (notificationTurnId && message.method !== "turn/completed") {
+      await this.noteTurnProgress(threadId!, notificationTurnId);
+    }
     try {
 
     if (message.method === "item/reasoning/summaryTextDelta") {
@@ -1164,6 +1359,9 @@ export class CodexDriver implements AgentDriver {
       if (item?.type === "commandExecution") running.backgroundTerminals.completed(item);
       const activity = itemActivity(item, false);
       if (activity) await this.emitActivity(key, activity, params, getString(item, "id"));
+      if (item?.type === "commandExecution" && notificationTurnId && commandExecutionFailed(item)) {
+        this.armTurnStallWatch(threadId!, notificationTurnId);
+      }
       if (item?.type === "exitedReviewMode" && typeof item.review === "string" && item.review) {
         const review = item.review;
         await this.emitOutputForSessions(key, (sessionKeyValue) => ({ type: "message", sessionKey: sessionKeyValue, chunk: review, turnId: getTurnId(params), itemId: getString(item, "id") }));
@@ -1235,34 +1433,8 @@ export class CodexDriver implements AgentDriver {
 
     if (message.method === "turn/completed") {
       const completed = toTurnCompletedEvent(key, params);
-      if (completed.status === "inProgress") {
-        this.logger.warn("codex.turn_completed_in_progress", { session_key: key, turn_id: completed.turnId });
-        return;
-      }
-      running.status.activeTurnId = undefined;
       const snapshot = turnSnapshot(params?.turn);
-      if (snapshot) running.status.latestTurn = snapshot;
-      else if (completed.turnId) {
-        running.status.latestTurn = {
-          id: completed.turnId,
-          status: completed.status ?? "failed",
-          activities: running.status.latestTurn?.id === completed.turnId ? running.status.latestTurn.activities : [],
-          ...(completed.durationMs !== undefined ? { durationMs: completed.durationMs } : {}),
-          ...(completed.error ? { error: completed.error } : {}),
-        };
-      }
-      running.status.waitingForApproval = false;
-      running.status.waitingForUserInput = false;
-      if (running.reviewTurnId === completed.turnId) {
-        running.reviewTurnId = undefined;
-        running.status.reviewInProgress = false;
-      }
-      if (completed.status === "failed") {
-        running.status.recentError = completed.error?.message ?? "Codex turn failed.";
-      } else {
-        clearRecentError(running);
-      }
-      await this.emitOutputForSessions(key, (sessionKeyValue) => ({ ...completed, sessionKey: sessionKeyValue }));
+      await this.handleTerminalTurn(key, completed, snapshot, "notification");
       return;
     }
 
@@ -1297,6 +1469,7 @@ export class CodexDriver implements AgentDriver {
       const initiatedByClient = this.requestedLifecycle.get(threadId!) === action;
       this.requestedLifecycle.delete(threadId!);
       this.requestedGoalMutation.delete(threadId!);
+      this.clearThreadStallWatches(threadId!);
       this.threadToSessions.delete(threadId!);
       for (const sessionKeyValue of keys) {
         const session = this.sessions.get(sessionKeyValue);
@@ -1687,6 +1860,101 @@ export class CodexDriver implements AgentDriver {
     return key ? this.sessions.get(key) : undefined;
   }
 
+  private turnTrackingKey(threadId: string, turnId: string): string {
+    return `${threadId}\0${turnId}`;
+  }
+
+  private armTurnStallWatch(threadId: string, turnId: string): void {
+    const watchKey = this.turnTrackingKey(threadId, turnId);
+    const existing = this.turnStallWatches.get(watchKey);
+    if (existing?.timer) clearTimeout(existing.timer);
+    const watch = existing ?? { threadId, turnId, stalled: false };
+    this.turnStallWatches.set(watchKey, watch);
+    this.scheduleTurnStallCheck(watchKey, watch);
+  }
+
+  private scheduleTurnStallCheck(watchKey: string, watch: TurnStallWatch): void {
+    const timeoutMs = this.options.stallTimeoutMs ?? FAILED_COMMAND_STALL_MS;
+    watch.timer = setTimeout(() => {
+      watch.timer = undefined;
+      void this.checkTurnStall(watchKey, watch).catch((error) => {
+        this.logger.warn("codex.turn_stall_check_failed", {
+          thread_id: watch.threadId,
+          turn_id: watch.turnId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+        if (this.turnStallWatches.get(watchKey) === watch) this.scheduleTurnStallCheck(watchKey, watch);
+      });
+    }, Math.max(1, timeoutMs));
+    watch.timer.unref();
+  }
+
+  private async checkTurnStall(watchKey: string, watch: TurnStallWatch): Promise<void> {
+    if (this.turnStallWatches.get(watchKey) !== watch) return;
+    const key = this.sessionKeysForThread(watch.threadId)
+      .find((sessionKeyValue) => this.sessions.get(sessionKeyValue)?.status.activeTurnId === watch.turnId);
+    if (!key) {
+      this.clearTurnStallWatch(watch.threadId, watch.turnId);
+      return;
+    }
+    const result = await this.reconcileActiveTurn(key, "failed_command_stall");
+    if (result === "terminal" || this.turnStallWatches.get(watchKey) !== watch) return;
+    const stillActive = this.sessionKeysForThread(watch.threadId)
+      .some((sessionKeyValue) => this.sessions.get(sessionKeyValue)?.status.activeTurnId === watch.turnId);
+    if (!stillActive) {
+      this.clearTurnStallWatch(watch.threadId, watch.turnId);
+      return;
+    }
+    if (!watch.stalled) {
+      watch.stalled = true;
+      const detail = "No Codex events for 5 minutes after a failed command. The turn is still active; interrupt it if needed.";
+      this.logger.warn("codex.turn_stalled", {
+        thread_id: watch.threadId,
+        turn_id: watch.turnId,
+        reconcile_result: result,
+      });
+      for (const sessionKeyValue of this.sessionKeysForThread(watch.threadId)) {
+        await this.onOutput({
+          type: "turn_stalled",
+          sessionKey: sessionKeyValue,
+          threadId: watch.threadId,
+          turnId: watch.turnId,
+          detail,
+        });
+      }
+    }
+    this.scheduleTurnStallCheck(watchKey, watch);
+  }
+
+  private async noteTurnProgress(threadId: string, turnId: string): Promise<void> {
+    const watchKey = this.turnTrackingKey(threadId, turnId);
+    const watch = this.turnStallWatches.get(watchKey);
+    if (!watch) return;
+    const wasStalled = watch.stalled;
+    this.clearTurnStallWatch(threadId, turnId);
+    if (!wasStalled) return;
+    this.logger.info("codex.turn_stall_cleared", { thread_id: threadId, turn_id: turnId });
+    for (const sessionKeyValue of this.sessionKeysForThread(threadId)) {
+      await this.onOutput({ type: "turn_progressed", sessionKey: sessionKeyValue, threadId, turnId });
+    }
+  }
+
+  private clearTurnStallWatch(threadId: string, turnId: string): void {
+    const key = this.turnTrackingKey(threadId, turnId);
+    const watch = this.turnStallWatches.get(key);
+    if (watch?.timer) clearTimeout(watch.timer);
+    this.turnStallWatches.delete(key);
+  }
+
+  private clearThreadStallWatches(threadId: string): void {
+    const prefix = `${threadId}\0`;
+    for (const [key, watch] of this.turnStallWatches) {
+      if (!key.startsWith(prefix)) continue;
+      if (watch.timer) clearTimeout(watch.timer);
+      this.turnStallWatches.delete(key);
+    }
+  }
+
   private mirrorThreadStatus(sourceKey: string): void {
     const source = this.sessions.get(sourceKey);
     const threadId = source?.status.threadId;
@@ -1715,6 +1983,7 @@ export class CodexDriver implements AgentDriver {
 
   private clearThreadBusyState(threadId: string | undefined): void {
     if (!threadId) return;
+    this.clearThreadStallWatches(threadId);
     for (const key of this.sessionKeysForThread(threadId)) {
       const running = this.sessions.get(key);
       if (!running) continue;
@@ -1866,6 +2135,11 @@ export class CodexDriver implements AgentDriver {
     this.rpc.rejectPending(this.appServerExitError(exitCode, signalCode));
     const sessions = [...this.sessions.values()];
     const sideConversations = [...this.sideConversations.values()];
+    for (const watch of this.turnStallWatches.values()) {
+      if (watch.timer) clearTimeout(watch.timer);
+    }
+    this.turnStallWatches.clear();
+    this.terminalTurns.clear();
     this.sessions.clear();
     this.threadToSessions.clear();
     this.pendingInteractiveRequests.clear();

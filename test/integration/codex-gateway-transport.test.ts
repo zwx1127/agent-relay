@@ -88,6 +88,13 @@ describe("experimental Codex Gateway transport", () => {
             initialTurnsPage: { data: [{ id: "active-turn", status: "inProgress", items: [{ type: "reasoning", id: "reason", summary: ["Already working"] }], startedAt: 1 }], nextCursor: null },
             model: "gpt-test",
           });
+          else if (method === "thread/read") send({
+            thread: {
+              id: params?.threadId,
+              status: { type: "active", activeFlags: [] },
+              turns: [{ id: "active-turn", status: "inProgress", items: [{ type: "reasoning", id: "reason", summary: ["Already working"] }], startedAt: 1 }],
+            },
+          });
           else if (method === "thread/backgroundTerminals/list") {
             send({ data: [] });
             socket.send(JSON.stringify({
@@ -178,6 +185,9 @@ describe("experimental Codex Gateway transport", () => {
       const resumeParams = resume?.params as Record<string, unknown>;
       expect(resumeParams.excludeTurns).toBe(true);
       expect(resumeParams.initialTurnsPage).toEqual({ limit: 1, sortDirection: "desc", itemsView: "full" });
+      const reads = received.filter((message) => message.method === "thread/read");
+      expect(reads.length).toBeGreaterThanOrEqual(2);
+      expect(reads.every((message) => (message.params as Record<string, unknown>)?.includeTurns === true)).toBe(true);
       expect(status.threadGoal).toBeNull();
       expect(status.collaborationMode).toBe("default");
       expect(status.relayStateConsistency).toBe("live");

@@ -9,6 +9,8 @@ export type AgentOutputEvent =
   | AgentMessageOutputEvent
   | AgentImageOutputEvent
   | AgentActivityEvent
+  | AgentTurnStalledEvent
+  | AgentTurnProgressedEvent
   | AgentTurnCompletedEvent
   | AgentUserInputRequestEvent
   | AgentApprovalRequestEvent
@@ -94,6 +96,21 @@ export interface AgentTurnCompletedEvent {
   status?: AgentTurnStatus;
   error?: AgentTurnError;
   durationMs?: number;
+}
+
+export interface AgentTurnStalledEvent {
+  type: "turn_stalled";
+  sessionKey: string;
+  threadId: string;
+  turnId: string;
+  detail: string;
+}
+
+export interface AgentTurnProgressedEvent {
+  type: "turn_progressed";
+  sessionKey: string;
+  threadId: string;
+  turnId: string;
 }
 
 export interface AgentActivityEvent {

@@ -29,6 +29,8 @@ const log = ${JSON.stringify(log)};
 const rl = readline.createInterface({ input: process.stdin });
 let turnCount = 0;
 let initialized = false;
+let currentTurn;
+let threadRuntimeStatus = { type: "idle" };
 const terminals = new Map();
 function send(message) { process.stdout.write(JSON.stringify(message) + "\\n"); }
 rl.on("line", (line) => {
@@ -46,17 +48,38 @@ rl.on("line", (line) => {
     send({ id: msg.id, result: { userAgent: "codex-cli 0.145.0", codexHome: "/tmp", platformFamily: "unix", platformOs: "linux" } });
   } else if (msg.method === "thread/start" || msg.method === "thread/resume") {
     send({ id: msg.id, result: { thread: { id: "thread-1", name: "Initial thread", status: { type: "idle" } }, initialTurnsPage: msg.method === "thread/resume" ? { data: [{ id: "latest-turn", status: "completed", items: [{ type: "commandExecution", id: "resume-command", command: "git status", status: "completed", exitCode: 0, durationMs: 12 }], startedAt: 1, completedAt: 2, durationMs: 1000 }], nextCursor: null } : null, model: "gpt-5.2", modelProvider: "openai", reasoningEffort: "medium", approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: { type: "workspaceWrite" } } });
+  } else if (msg.method === "thread/read") {
+    send({ id: msg.id, result: { thread: { id: "thread-1", name: "Initial thread", status: threadRuntimeStatus, turns: currentTurn ? [currentTurn] : [] } } });
   } else if (msg.method === "turn/start") {
     const turnId = "turn-" + (++turnCount);
     const threadId = msg.params.threadId;
     const inputText = msg.params.input[0].text;
-    const startTurn = () => send({ id: msg.id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });
+    const previousTurnId = currentTurn && currentTurn.id;
+    currentTurn = { id: turnId, status: "inProgress", items: [] };
+    threadRuntimeStatus = { type: "active", activeFlags: [] };
+    const startTurn = () => send({ id: msg.id, result: { turn: currentTurn } });
     if (inputText === "slow active") {
       setTimeout(startTurn, 50);
     } else {
       startTurn();
     }
-    if (inputText === "status please") {
+    if (inputText === "missing terminal completed") {
+      currentTurn = { id: turnId, status: "completed", items: [], startedAt: 1, completedAt: 2, durationMs: 1000 };
+      threadRuntimeStatus = { type: "idle" };
+    } else if (inputText === "inconsistent idle turn") {
+      threadRuntimeStatus = { type: "idle" };
+    } else if (inputText === "failed command stalls") {
+      send({ method: "turn/started", params: { threadId, turn: currentTurn } });
+      send({ method: "item/completed", params: { threadId, turnId, item: { type: "commandExecution", id: "failed-command", command: "false", status: "failed", exitCode: 1, durationMs: 5, commandActions: [] } } });
+    } else if (inputText === "late old setup") {
+      // Keep the first turn active. The next steer request intentionally fails.
+    } else if (inputText === "new turn with late old completion") {
+      if (previousTurnId) send({ method: "turn/completed", params: { threadId, turn: { id: previousTurnId, status: "completed", items: [] } } });
+    } else if (inputText === "duplicate completion") {
+      const terminal = { method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } };
+      send(terminal);
+      send(terminal);
+    } else if (inputText === "status please") {
       send({ method: "thread/name/updated", params: { threadId, threadName: "Demo thread" } });
       send({ method: "thread/status/changed", params: { threadId, status: { type: "active", activeFlags: ["waitingOnApproval"] } } });
       send({ method: "thread/tokenUsage/updated", params: { threadId, turnId, tokenUsage: { last: { totalTokens: 7 }, total: { totalTokens: 42 }, modelContextWindow: 100 } } });
@@ -106,7 +129,7 @@ rl.on("line", (line) => {
     } else if (inputText === "side question") {
       send({ method: "item/agentMessage/delta", params: { threadId, turnId, itemId: "side-message", delta: "side answer" } });
       send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
-    } else if (inputText !== "slow active") {
+    } else if (inputText !== "slow active" && inputText !== "missing terminal completed" && inputText !== "inconsistent idle turn" && inputText !== "failed command stalls" && inputText !== "late old setup" && inputText !== "new turn with late old completion" && inputText !== "duplicate completion") {
       send({ method: "item/agentMessage/delta", params: { threadId, turnId, itemId: "m1", delta: "hello " } });
       send({ method: "item/commandExecution/outputDelta", params: { threadId, turnId, itemId: "c1", delta: "raw stdout" } });
       send({ method: "item/commandExecution/terminalInteraction", params: { threadId, turnId, itemId: "t1", processId: "p1", stdin: "raw stdin" } });

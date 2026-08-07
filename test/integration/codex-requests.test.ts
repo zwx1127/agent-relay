@@ -135,6 +135,121 @@ describe("CodexDriver request ordering", () => {
     await driver.stop(status.sessionKey);
   });
 
+  test("reconciles a missed terminal event before starting the next turn", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => { events.push(event); },
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "missing terminal completed");
+    expect(driver.getStatus(status.sessionKey)?.activeTurnId).toBe("turn-1");
+
+    await driver.send(status.sessionKey, "say hello");
+    await sleep(100);
+
+    expect(events.filter((event) => event.type === "turn_completed" && event.turnId === "turn-1")).toEqual([{
+      type: "turn_completed",
+      sessionKey: status.sessionKey,
+      turnId: "turn-1",
+      status: "completed",
+      durationMs: 1000,
+    }]);
+    const methods = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line).method);
+    expect(methods).toContain("thread/read");
+    expect(methods.filter((method) => method === "turn/start")).toHaveLength(2);
+    await driver.stop(status.sessionKey);
+  });
+
+  test("fails an orphaned in-progress turn when the authoritative thread is idle", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => { events.push(event); },
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "inconsistent idle turn");
+    await driver.send(status.sessionKey, "say hello");
+    await sleep(100);
+
+    const recovered = events.find((event) => event.type === "turn_completed" && event.turnId === "turn-1");
+    expect(recovered).toMatchObject({ type: "turn_completed", status: "failed" });
+    expect(recovered?.type === "turn_completed" ? recovered.error?.message : "").toContain("terminal event is missing");
+    await driver.stop(status.sessionKey);
+  });
+
+  test("ignores duplicate terminal notifications", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => { events.push(event); },
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "duplicate completion");
+    await sleep(100);
+
+    expect(events.filter((event) => event.type === "turn_completed" && event.turnId === "turn-1")).toHaveLength(1);
+    await driver.stop(status.sessionKey);
+  });
+
+  test("a late old completion does not clear a newer active turn", async () => {
+    const fake = fakeCodexBin();
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      () => undefined,
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "late old setup");
+    await driver.send(status.sessionKey, "new turn with late old completion");
+    await sleep(100);
+
+    expect(driver.getStatus(status.sessionKey)?.activeTurnId).toBe("turn-2");
+    await driver.stop(status.sessionKey);
+  });
+
+  test("marks a quiet failed-command turn stalled and restores working on progress", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request", stallTimeoutMs: 30 },
+      (event) => { events.push(event); },
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    await driver.send(status.sessionKey, "failed command stalls");
+    await sleep(100);
+
+    expect(events).toContainEqual({
+      type: "turn_stalled",
+      sessionKey: status.sessionKey,
+      threadId: "thread-1",
+      turnId: "turn-1",
+      detail: "No Codex events for 5 minutes after a failed command. The turn is still active; interrupt it if needed.",
+    });
+    expect(driver.getStatus(status.sessionKey)?.activeTurnId).toBe("turn-1");
+
+    await driver.send(status.sessionKey, "second while active");
+    expect(events).toContainEqual({
+      type: "turn_progressed",
+      sessionKey: status.sessionKey,
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+    await driver.stop(status.sessionKey);
+  });
+
   test("interrupts an active turn without stopping the session", async () => {
     const fake = fakeCodexBin();
     const driver = new CodexDriver(

@@ -38,6 +38,8 @@ describe("activity streamer lifecycle", () => {
     expect(sent[0]).toContain("Working");
     expect(sent[0]).toContain("Saved work");
     expect(sent[0]).toContain("Existing work");
+    expect(sent[0]).toContain("unknown");
+    expect(sent[0]).not.toContain("0s");
     expect(sent[0]).not.toContain("Latest turn snapshot");
 
     await streamer.handle({ type: "activity", sessionKey: "codex:1:demo", threadId: "thread-a", turnId: "turn-a", activity: { kind: "plan", steps: [{ step: "Continue live", status: "inProgress" }] } });
@@ -127,6 +129,44 @@ describe("activity streamer lifecycle", () => {
     await sleep(10);
 
     expect(sent).toEqual([]);
+  });
+
+  test("stalled turns keep interrupt controls and later activity restores working", async () => {
+    const sent: string[] = [];
+    const edited: Array<{ text: string; buttons: unknown }> = [];
+    const context: ActivitySessionContext = {
+      threadId: "thread-a",
+      collaborationMode: "default",
+      goal: null,
+      activeTurnId: "turn-a",
+    };
+    const streamer = new ActivityStreamer({
+      store: activityStore(),
+      logger: noopLogger,
+      canEdit: true,
+      getReplyToMessageId: () => undefined,
+      getSessionContext: () => context,
+      sendRendered: async (_conversationId, rendered) => {
+        sent.push(rendered.text);
+        return { messageId: 1 };
+      },
+      editRendered: async (_conversationId, rendered, options) => {
+        edited.push({ text: rendered.text, buttons: options.replyMarkup?.inline_keyboard });
+      },
+      timing: { quietMs: 1, minEditMs: 0, maxMs: 10 },
+    });
+
+    await streamer.handle({ type: "activity", sessionKey: "codex:1:demo", threadId: "thread-a", turnId: "turn-a", activity: { kind: "plan", steps: [{ step: "Wait", status: "inProgress" }] } });
+    await streamer.setPhase("codex:1:demo", "stalled", "No new events.");
+
+    expect(edited.at(-1)?.text).toContain("Stalled");
+    expect(edited.at(-1)?.text).toContain("No new events.");
+    expect(JSON.stringify(edited.at(-1)?.buttons)).toContain("Interrupt");
+
+    await streamer.handle({ type: "activity", sessionKey: "codex:1:demo", threadId: "thread-a", turnId: "turn-a", activity: { kind: "plan", steps: [{ step: "Continued", status: "inProgress" }] } });
+    expect(edited.at(-1)?.text).toContain("Working");
+    expect(edited.at(-1)?.text).toContain("Continued");
+    expect(edited.at(-1)?.text).not.toContain("No new events.");
   });
 
   test("routine edits are coalesced behind the minimum edit interval", async () => {

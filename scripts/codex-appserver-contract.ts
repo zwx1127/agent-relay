@@ -56,16 +56,22 @@ function assertGeneratedProtocol(schemaDir: string): void {
   const userInputPath = join(schemaDir, "v2", "UserInput.ts");
   const notificationsPath = join(schemaDir, "ServerNotification.ts");
   const threadResumePath = join(schemaDir, "v2", "ThreadResumeParams.ts");
+  const threadReadPath = join(schemaDir, "v2", "ThreadReadParams.ts");
+  const threadPath = join(schemaDir, "v2", "Thread.ts");
+  const threadStatusPath = join(schemaDir, "v2", "ThreadStatus.ts");
   const threadItemPath = join(schemaDir, "v2", "ThreadItem.ts");
   const turnPath = join(schemaDir, "v2", "Turn.ts");
   const turnStartPath = join(schemaDir, "v2", "TurnStartParams.ts");
   const turnSteerPath = join(schemaDir, "v2", "TurnSteerParams.ts");
-  if (![clientRequestPath, capabilitiesPath, userInputPath, notificationsPath, threadResumePath, threadItemPath, turnPath, turnStartPath, turnSteerPath].every(existsSync)) throw new Error("Experimental TypeScript schema was not generated.");
+  if (![clientRequestPath, capabilitiesPath, userInputPath, notificationsPath, threadResumePath, threadReadPath, threadPath, threadStatusPath, threadItemPath, turnPath, turnStartPath, turnSteerPath].every(existsSync)) throw new Error("Experimental TypeScript schema was not generated.");
   const requests = readFileSync(clientRequestPath, "utf8");
   const capabilities = readFileSync(capabilitiesPath, "utf8");
   const userInput = readFileSync(userInputPath, "utf8");
   const notifications = readFileSync(notificationsPath, "utf8");
   const threadResume = readFileSync(threadResumePath, "utf8");
+  const threadRead = readFileSync(threadReadPath, "utf8");
+  const thread = readFileSync(threadPath, "utf8");
+  const threadStatus = readFileSync(threadStatusPath, "utf8");
   const threadItem = readFileSync(threadItemPath, "utf8");
   const turn = readFileSync(turnPath, "utf8");
   const turnStart = readFileSync(turnStartPath, "utf8");
@@ -75,6 +81,7 @@ function assertGeneratedProtocol(schemaDir: string): void {
     "collaborationMode/list",
     "review/start",
     "thread/compact/start",
+    "thread/read",
     "thread/name/set",
     "thread/goal/set",
     "thread/goal/clear",
@@ -113,6 +120,11 @@ function assertGeneratedProtocol(schemaDir: string): void {
     if (!notifications.includes(`\"method\": \"${method}\"`)) throw new Error(`Generated notifications are missing ${method}.`);
   }
   if (!threadResume.includes("initialTurnsPage") || !threadResume.includes("excludeTurns")) throw new Error("Generated thread/resume schema is missing latest-turn bootstrap fields.");
+  if (!threadRead.includes("includeTurns")) throw new Error("Generated thread/read schema is missing includeTurns.");
+  if (!thread.includes("status") || !thread.includes("turns")) throw new Error("Generated Thread is missing status or turns.");
+  for (const status of ["notLoaded", "idle", "systemError", "active", "activeFlags"]) {
+    if (!threadStatus.includes(status)) throw new Error(`Generated ThreadStatus is missing ${status}.`);
+  }
   if (!threadItem.includes('"type": "userMessage"') || !threadItem.includes("clientId") || !threadItem.includes("content")) {
     throw new Error("Generated ThreadItem is missing shared user-message fields.");
   }

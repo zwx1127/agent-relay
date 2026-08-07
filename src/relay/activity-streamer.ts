@@ -34,7 +34,7 @@ export interface ActivitySessionContext {
   activeTurnId?: string;
 }
 
-export type ActivityPhase = "idle" | "working" | "waitingForInput" | "waitingForApproval" | "done" | "interrupted" | "failed";
+export type ActivityPhase = "idle" | "working" | "stalled" | "waitingForInput" | "waitingForApproval" | "done" | "interrupted" | "failed";
 
 interface ActivityItemState {
   key: string;
@@ -59,7 +59,7 @@ interface ActivityState {
   threadId?: string;
   threadName?: string;
   turnId: string;
-  startedAt: number;
+  startedAt?: number;
   lastFlushAt: number;
   dirtySince?: number;
   revision: number;
@@ -206,7 +206,7 @@ export class ActivityStreamer {
     if (this.controlCards.has(sessionKey)) return false;
     const context = this.deps.getSessionContext(sessionKey);
     if (context.activeTurnId !== state.turnId) return false;
-    if (state.phase !== "working" && state.phase !== "waitingForInput" && state.phase !== "waitingForApproval") return false;
+    if (state.phase !== "working" && state.phase !== "stalled" && state.phase !== "waitingForInput" && state.phase !== "waitingForApproval") return false;
     state.controlsSuppressed = false;
     state.presentationFrozen = false;
     state.lastControls = undefined;
@@ -228,6 +228,10 @@ export class ActivityStreamer {
     }
     const state = await this.stateFor(event, context);
     if (!state) return;
+    if (state.phase === "stalled") {
+      state.phase = "working";
+      state.phaseDetail = undefined;
+    }
     this.apply(state, event.activity, event.itemId);
     await this.schedule(state, isImmediate(event.activity));
   }
@@ -246,6 +250,7 @@ export class ActivityStreamer {
     if (!state) return;
 
     if (snapshot?.startedAt !== undefined) state.startedAt = snapshot.startedAt;
+    else if (snapshot && snapshot.durationMs === undefined) state.startedAt = undefined;
     state.durationMs = snapshot?.durationMs;
     state.error = snapshot?.error?.message;
     state.phaseDetail = snapshot ? undefined : "No turns yet";
@@ -292,7 +297,7 @@ export class ActivityStreamer {
     await this.finish(state);
   }
 
-  async setPhase(sessionKey: string, phase: "working" | "waitingForInput" | "waitingForApproval", detail?: string): Promise<void> {
+  async setPhase(sessionKey: string, phase: "working" | "stalled" | "waitingForInput" | "waitingForApproval", detail?: string): Promise<void> {
     const state = this.states.get(sessionKey);
     if (!state) return;
     const context = this.deps.getSessionContext(sessionKey);
@@ -632,7 +637,7 @@ export class ActivityStreamer {
 
   private controlsFor(state: ActivityState, context: ActivitySessionContext): ActivityControlAction[] {
     if (state.controlsSuppressed) return [];
-    const activePhase = state.phase === "working" || state.phase === "waitingForInput" || state.phase === "waitingForApproval";
+    const activePhase = state.phase === "working" || state.phase === "stalled" || state.phase === "waitingForInput" || state.phase === "waitingForApproval";
     const cancellableTurn = activePhase && context.activeTurnId === state.turnId;
     return activityControlActions(state.goal, cancellableTurn);
   }
@@ -792,6 +797,7 @@ function header(state: ActivityState): string {
   const phase: Record<ActivityPhase, [string, string]> = {
     idle: ["○", "Idle"],
     working: ["●", "Working"],
+    stalled: ["!", "Stalled"],
     waitingForInput: ["●", "Waiting for input"],
     waitingForApproval: ["●", "Waiting for approval"],
     done: ["✓", "Completed"],
@@ -804,7 +810,11 @@ function header(state: ActivityState): string {
 
 function contextLine(state: ActivityState): string {
   const mode = modeLabel(state.mode, state.goalTurn);
-  const duration = formatDuration(state.durationMs ?? Date.now() - state.startedAt);
+  const duration = state.durationMs !== undefined
+    ? formatDuration(state.durationMs)
+    : state.startedAt !== undefined
+      ? formatDuration(Date.now() - state.startedAt)
+      : "unknown";
   const suffix = ` · Mode ${mode} · ${duration}`;
   const labelBudget = Math.max(4, ACTIVITY_ROW_COLUMNS - displayWidth("Chat ") - displayWidth(suffix));
   return `Chat ${truncateDisplay(threadLabel(state), labelBudget)}${suffix}`;

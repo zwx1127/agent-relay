@@ -30,7 +30,7 @@ export interface RelayAgentEventRouterDeps {
   activity: {
     handle(event: AgentActivityEvent): Promise<void>;
     finalize(sessionKey: string, turnId: string | undefined, status: string, error?: string, durationMs?: number): Promise<void>;
-    setPhase(sessionKey: string, phase: "working" | "waitingForInput" | "waitingForApproval", detail?: string): Promise<void>;
+    setPhase(sessionKey: string, phase: "working" | "stalled" | "waitingForInput" | "waitingForApproval", detail?: string): Promise<void>;
     terminate(sessionKey: string, phase: "interrupted" | "failed", detail?: string): Promise<void>;
   };
   media: { sendAgentImageOutput(event: AgentImageOutputEvent): Promise<void> };
@@ -74,6 +74,16 @@ export class RelayAgentEventRouter {
     switch (event.type) {
       case "activity":
         await this.deps.activity.handle(event);
+        return true;
+      case "turn_stalled":
+        if (this.deps.currentThreadId(event.sessionKey) === event.threadId) {
+          await this.deps.activity.setPhase(event.sessionKey, "stalled", event.detail);
+        }
+        return true;
+      case "turn_progressed":
+        if (this.deps.currentThreadId(event.sessionKey) === event.threadId) {
+          await this.deps.activity.setPhase(event.sessionKey, "working");
+        }
         return true;
       case "user_message":
         await this.handleUserMessage(event);
