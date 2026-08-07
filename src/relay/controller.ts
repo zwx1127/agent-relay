@@ -94,7 +94,7 @@ export class RelayController {
         return {
           threadId: status?.threadId ?? stored?.thread_id ?? undefined,
           threadName: status?.threadName,
-          collaborationMode: deps.store.getCollaborationMode(sessionKeyValue),
+          collaborationMode: status?.collaborationMode ?? deps.store.getCollaborationMode(sessionKeyValue),
           goal: status?.threadGoal,
           activeTurnId: status?.activeTurnId,
         };
@@ -214,6 +214,7 @@ export class RelayController {
       sendPlanReadyPrompt: (sessionKeyValue, turnId) => this.threadCommands.sendPlanReadyPrompt(sessionKeyValue, turnId),
       appendSystem: (conversationId, text) => this.appendSystem(conversationId, text),
       sendRendered: (conversationId, rendered) => this.sendRendered(conversationId, rendered),
+      editRendered: (conversationId, rendered, options) => this.editRendered(conversationId, rendered, options),
       completeTask: (sessionKeyValue, turnId, status) => this.completeTaskAndDispatchNext(sessionKeyValue, turnId, status),
       markActiveTask: (sessionKeyValue, status, turnId) => this.markActiveTask(sessionKeyValue, status, turnId),
       cancelActiveTasks: (sessionKeyValue) => this.cancelActiveTasks(sessionKeyValue),

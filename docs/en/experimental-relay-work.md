@@ -74,6 +74,8 @@ Relay never starts Gateway. With the experimental gate enabled, Relay itself can
 
 An explicit `gateway stop` writes durable `local` mode before stopping the processes. An unexpected Gateway or app-server exit deliberately leaves durable mode as `gateway`; new CLI, Desktop, and Relay connections fail closed until `gateway start` recovers the runtime. This prevents an unnoticed second app-server from diverging from the shared thread.
 
+Gateway and its app-server are one failure domain. Normal shutdown terminates both, a detached watchdog terminates an orphaned app-server after an abnormal Gateway exit, and startup refuses an inconsistent live Gateway/app-server pair. Relay restart or `clean-data` does not stop either process. No thread-semantic journal is added: Gateway's state file contains lifecycle discovery data only.
+
 `gateway start` requires a successful prior setup. `gateway remove` switches to local mode and stops Gateway before changing the client environment. If Gateway cannot stop, removal aborts and preserves the launcher and installation state so the user can retry safely.
 
 ## Threads, workspaces, and multiple clients
@@ -82,14 +84,25 @@ An explicit `gateway stop` writes durable `local` mode before stopping the proce
 - Gateway mode inherits Codex configuration from that shared app-server and the existing thread. Ordinary Relay requests, forks, and side conversations do not override model, reasoning effort, personality, approval, sandbox, or instructions. A new IM-created thread carries only the workspace directory explicitly selected by the user. Relay sends collaboration-mode settings once only after the user explicitly selects Default or Plan; the protocol-required model and reasoning-effort fields reuse the thread's current values, and a steer keeps the mode intent pending for the next new turn. `CODEX_APPROVAL`, `CODEX_SANDBOX`, and Relay instruction-injection settings apply only to local stdio mode.
 - Multiple native clients and multiple IM scopes may `/resume` the same thread. Relay adds no one-writer ownership rule; the user chooses which client sends input.
 - `/resume` uses Codex TUI resume semantics. A resume switch is rejected while the source scope has an active turn, approval, user-input request, or other busy Relay task.
-- After a successful `/resume`, Relay immediately shows an activity card hydrated from the latest turn summary. Active turns continue updating that card; completed, interrupted, failed, and empty threads show their terminal or Idle state.
+- After a successful `/resume`, Relay immediately shows an activity card hydrated from the latest complete turn representation and reads the current Goal and background-terminal state before returning. Active turns continue updating that card; completed, interrupted, failed, and empty threads show their terminal or Idle state.
 - Selecting a workspace in Relay Home only binds that directory. It does not make a running native Codex process change directories and does not auto-attach a thread. An ordinary first message starts fresh; `/resume` explicitly joins existing work.
 - An idle workspace switch releases Relay's old subscription without stopping the thread. A busy switch is rejected.
 - Ordinary IM input during an active turn uses Codex TUI Enter/Steer semantics. Relay work adds no Tab/Queue action, Gateway-level input lock, or thread ownership lock.
 - New user messages entered in a native Codex client or another IM scope are mirrored live to every other IM scope attached to the thread. Relay does not echo a message back to its originating scope. Text is preserved; non-text inputs are represented by attachment counts and are not downloaded or re-uploaded.
 - Approval, user-input, and MCP elicitation requests may appear in all connected clients associated with the thread. The first valid response wins; resolved notifications clear duplicate controls.
+- Relay-supported thread operations are mirrored as command state to other Relay scopes on the same thread. This includes review, compaction, rename, Goal mutations, archive/delete, background-terminal cleanup, and Plan-mode state. The operation executes only in its originating client; peers never re-run a mirrored command.
+- `/side` and `/btw` remain ephemeral forks. Their question and answer deltas are visible live to other attached Relay scopes and retained in the bounded Gateway-memory snapshot, but they never enter the parent transcript. `/new`, `/clear`, `/resume`, and `/fork` remain local navigation and never force another client to switch threads.
+- `/plan` toggles the synchronized mode; `/plan --on` and `/plan --off` select it explicitly. After a Gateway/app-server restart, native Codex restart semantics apply and Plan resumes as Default instead of being reconstructed from Relay storage.
 
-Gateway forwards only live events produced while Codex, Gateway, and Relay are running and associated with the same thread. It stores no progress history, consumption cursor, offline queue, replay, or catch-up stream. Resuming reads the latest turn summary only to hydrate the immediate activity-state card; it does not render missed conversation output into IM.
+Gateway uses an internal observer connection to keep already-seen threads subscribed while every Relay frontend is disconnected. A per-Gateway epoch, per-thread revision, ACK, and resync snapshot prevent a reconnecting Relay from treating a partial event suffix as complete. This control plane is private to Gateway and does not extend the Codex app-server protocol.
+
+The recovery boundary deliberately matches native Codex App/CLI process-restart behavior:
+
+- If Relay disconnects, restarts, or clears its local data while Gateway/app-server stays alive, `/resume` rebuilds the latest full turn, Goal, background terminals, replayed pending approval/input requests, Plan/Default state, and Relay-supported command or `/btw` state from the live app-server plus Gateway memory.
+- If Gateway/app-server restarts, only state recoverable by native Codex resume/query is restored. Relay-only command projections and ephemeral `/btw` state disappear, in-process callbacks disappear, and Plan becomes Default.
+- Live text/activity deltas are eventually consistent during a reconnect window. A terminal `turn/completed` plus the full resumed turn is authoritative; Relay never claims exactly-once delta delivery.
+
+There is no progress-history database, consumption cursor, semantic JSON journal, offline output queue, or persisted replay. The bounded command snapshot—including side questions and accumulated answers—exists only in Gateway memory and expires/prunes there. Gateway restart clears it.
 
 ## Stop or remove
 

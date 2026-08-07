@@ -1,5 +1,6 @@
 import type { AgentTaskInput } from "./input.ts";
 import type { AgentThreadGoal } from "./thread.ts";
+import type { AgentRelayCommandContent, AgentRelayCommandState, AgentRelayThreadState } from "./control.ts";
 
 export type AgentOutputHandler = (event: AgentOutputEvent) => void | Promise<void>;
 export type AgentExitHandler = (event: AgentExitEvent) => void | Promise<void>;
@@ -14,7 +15,36 @@ export type AgentOutputEvent =
   | AgentMcpElicitationRequestEvent
   | AgentServerRequestResolvedEvent
   | AgentUserMessageEvent
+  | AgentRelayCommandStateEvent
+  | AgentRelayThreadStateEvent
+  | AgentRelayControlSnapshotEvent
   | AgentThreadLifecycleEvent;
+
+export interface AgentRelayCommandStateEvent extends AgentRelayCommandState {
+  type: "relay_command_state";
+  sessionKey: string;
+  gatewayEpoch: string;
+  threadRevision: number;
+  content?: AgentRelayCommandContent;
+}
+
+export interface AgentRelayThreadStateEvent extends AgentRelayThreadState {
+  type: "relay_thread_state";
+  sessionKey: string;
+  gatewayEpoch: string;
+  threadRevision: number;
+}
+
+export interface AgentRelayControlSnapshotEvent {
+  type: "relay_control_snapshot";
+  sessionKey: string;
+  threadId: string;
+  gatewayEpoch: string;
+  revision: number;
+  consistency: "live";
+  threadState: AgentRelayThreadState;
+  commands: AgentRelayCommandState[];
+}
 
 export interface AgentUserMessageEvent {
   type: "user_message";

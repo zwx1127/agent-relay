@@ -64,7 +64,7 @@
 
 ![实验性接力工作架构：Codex 与 IM 通过同一 thread 双向互通实时进度和控制信息](docs/assets/relay-work-overview.png)
 
-先执行一次 `scripts/gateway.* setup`，需要接力工作时再手动启动 Gateway。Gateway 与 Relay 使用完全独立的脚本和生命周期。使用 `/resume` 加入已有 thread。多个原生 Codex 客户端和 IM scope 可以共享同一个 thread，不设归属限制；新的用户消息与 agent 进度会实时同步到其他已加入的 scope，活动 turn 中的普通输入使用 Steer 语义，审批或输入请求由第一个回答的客户端胜出。Gateway 模式继承共享 Codex app-server 的配置；Relay 请求不会覆盖这些配置，唯一例外是用户明确选择 Default 或 Plan 后的一次性模式切换。它只同步 Codex、Gateway 和 Relay 都在运行并已连接后产生的新实时事件，不提供 Queue 操作，也不会保存、重放或事后追赶离线输出。请阅读[实验性接力工作](docs/zh-CN/experimental-relay-work.md)，了解 Windows、macOS 和 Linux 设置、生命周期语义以及完整移除方法。
+先执行一次 `scripts/gateway.* setup`，需要接力工作时再手动启动 Gateway。Gateway 与 Relay 使用完全独立的脚本和生命周期，而 Gateway 与唯一 app-server 属于同一故障域。使用 `/resume` 加入已有 thread。多个原生 Codex 客户端和 IM scope 可以共享同一个 thread，不设归属限制；新的用户消息、agent 进度和 Relay 支持的 thread 指令状态会同步到其他已加入的 scope，活动 turn 中的普通输入使用 Steer 语义，审批或输入请求由第一个回答的客户端胜出。Gateway 模式继承共享 Codex app-server 的配置；Relay 请求不会覆盖这些配置，唯一例外是用户明确选择 Default 或 Plan 后的一次性模式切换。有界指令快照只存在于 Gateway 内存中，可跨 Relay 重启/清理恢复，但不能跨 Gateway/app-server 重启；此时采用 Codex 原生重启语义，包括 Plan 回到 Default。它不提供 Queue 操作，不增加语义状态 journal，也不重放或事后追赶离线输出。请阅读[实验性接力工作](docs/zh-CN/experimental-relay-work.md)，了解 Windows、macOS 和 Linux 设置、生命周期语义以及完整移除方法。
 
 ## 快速开始
 
@@ -111,6 +111,7 @@ bun run start
 | `/relay` | 打开 Relay Home。 |
 | `/review` | 审查当前工作区改动。 |
 | `/plan` | 为当前 Codex 线程切换 Plan mode。 |
+| `/plan --on` / `/plan --off` | 显式选择 Plan 或 Default mode。 |
 | `/plan <prompt>` | 进入 Plan mode 并执行提示词。 |
 | `/goal <objective>` | 为当前 Codex 线程设置目标。 |
 | `/resume` | 选择最近的 Codex 线程，并立即显示其最新 turn 状态。 |

@@ -30,7 +30,7 @@ describe("CodexDriver thread operations", () => {
     expect(resume.params.approvalPolicy).toBe("on-request");
     expect(resume.params.approvalsReviewer).toBe("user");
     expect(resume.params.sandbox).toBe("workspace-write");
-    expect(resume.params.initialTurnsPage).toEqual({ limit: 1, sortDirection: "desc", itemsView: "summary" });
+    expect(resume.params.initialTurnsPage).toEqual({ limit: 1, sortDirection: "desc", itemsView: "full" });
     expect(status.latestTurn).toEqual({
       id: "latest-turn",
       status: "completed",

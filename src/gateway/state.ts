@@ -11,7 +11,7 @@ interface RelayGatewayStartConfig {
   codexBin: string;
 }
 
-export const RELAY_GATEWAY_PROTOCOL_VERSION = 1;
+export const RELAY_GATEWAY_PROTOCOL_VERSION = 2;
 
 export interface RelayGatewayState {
   experimental: true;

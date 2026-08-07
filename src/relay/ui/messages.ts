@@ -23,6 +23,7 @@ export function formatHelpMessage(): RenderedTelegramText {
     "- ", code("/side <prompt>"), ", ", code("/btw <prompt>"), " - Ask in an ephemeral side conversation.\n",
     "- ", code("/rename <name>"), " - Rename the current thread.\n",
     "- ", code("/plan"), " - Toggle Plan mode.\n",
+    "- ", code("/plan --on|--off"), " - Select Plan or Default mode explicitly.\n",
     "- ", code("/plan <prompt>"), " - Run a prompt in Plan mode.\n",
     "- ", code("/goal"), " - Show the current goal.\n",
     "- ", code("/goal <objective>"), " - Set the current goal.\n",

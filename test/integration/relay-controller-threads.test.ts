@@ -992,6 +992,29 @@ describe("relay controller thread commands", () => {
     expect(store.getPendingCollaborationMode("codex:1:demo")).toBeUndefined();
   });
 
+  test("/plan --on and --off select a deterministic mode without submitting a prompt", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/plan --on"));
+    await router.handle(textMessage("/plan --on"));
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+
+    await router.handle(textMessage("/plan --off"));
+    await router.handle(textMessage("/plan --off"));
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.slice(-4).map((message) => message.text)).toEqual([
+      "Plan mode enabled.",
+      "Plan mode enabled.",
+      "Plan mode disabled.",
+      "Plan mode disabled.",
+    ]);
+  });
+
   test("empty /plan keeps Plan mode while Codex is busy or waiting", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");

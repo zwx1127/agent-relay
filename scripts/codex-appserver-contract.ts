@@ -70,7 +70,23 @@ function assertGeneratedProtocol(schemaDir: string): void {
   const turn = readFileSync(turnPath, "utf8");
   const turnStart = readFileSync(turnStartPath, "utf8");
   const turnSteer = readFileSync(turnSteerPath, "utf8");
-  for (const method of ["model/list", "collaborationMode/list", "thread/backgroundTerminals/list", "skills/list", "fuzzyFileSearch"]) {
+  for (const method of [
+    "model/list",
+    "collaborationMode/list",
+    "review/start",
+    "thread/compact/start",
+    "thread/name/set",
+    "thread/goal/set",
+    "thread/goal/clear",
+    "thread/archive",
+    "thread/delete",
+    "thread/fork",
+    "thread/backgroundTerminals/list",
+    "thread/backgroundTerminals/clean",
+    "thread/backgroundTerminals/terminate",
+    "skills/list",
+    "fuzzyFileSearch",
+  ]) {
     if (!requests.includes(`\"method\": \"${method}\"`)) throw new Error(`Generated schema is missing ${method}.`);
   }
   for (const capability of ["experimentalApi", "requestAttestation", "mcpServerOpenaiFormElicitation"]) {
@@ -79,7 +95,21 @@ function assertGeneratedProtocol(schemaDir: string): void {
   for (const variant of ["text", "image", "localImage", "audio", "localAudio", "skill", "mention"]) {
     if (!userInput.includes(`\"type\": \"${variant}\"`)) throw new Error(`Generated UserInput is missing ${variant}.`);
   }
-  for (const method of ["item/reasoning/summaryTextDelta", "turn/plan/updated", "turn/diff/updated", "hook/started", "guardianWarning", "configWarning"]) {
+  for (const method of [
+    "item/reasoning/summaryTextDelta",
+    "turn/plan/updated",
+    "turn/diff/updated",
+    "thread/compacted",
+    "thread/name/updated",
+    "thread/goal/updated",
+    "thread/goal/cleared",
+    "thread/status/changed",
+    "thread/archived",
+    "thread/deleted",
+    "hook/started",
+    "guardianWarning",
+    "configWarning",
+  ]) {
     if (!notifications.includes(`\"method\": \"${method}\"`)) throw new Error(`Generated notifications are missing ${method}.`);
   }
   if (!threadResume.includes("initialTurnsPage") || !threadResume.includes("excludeTurns")) throw new Error("Generated thread/resume schema is missing latest-turn bootstrap fields.");

@@ -2,6 +2,7 @@ export interface JsonRpcRequest {
   id: number;
   method: string;
   params?: unknown;
+  relayControl?: unknown;
 }
 
 export interface JsonRpcResponse {
@@ -36,7 +37,7 @@ export class CodexRpcClient {
     private readonly write: (message: JsonRpcMessage, options?: { ensureWritable?: boolean }) => Promise<void>,
   ) {}
 
-  request(method: string, params?: unknown, options: { ensureWritable?: boolean } = {}): Promise<unknown> {
+  request(method: string, params?: unknown, options: { ensureWritable?: boolean; relayControl?: unknown } = {}): Promise<unknown> {
     const id = this.nextRequestId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -45,7 +46,7 @@ export class CodexRpcClient {
         reject(new Error(`Codex ${method} timed out.`));
       }, 120_000);
       this.pending.set(id, { resolve, reject, method, timer });
-      void this.write({ id, method, params }, { ensureWritable: options.ensureWritable }).catch((error) => {
+      void this.write({ id, method, params, ...(options.relayControl ? { relayControl: options.relayControl } : {}) }, { ensureWritable: options.ensureWritable }).catch((error) => {
         const pending = this.pending.get(id);
         if (pending) clearTimeout(pending.timer);
         this.pending.delete(id);

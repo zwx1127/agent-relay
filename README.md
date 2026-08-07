@@ -65,7 +65,7 @@ Experimental relay work lets you begin in the native Codex CLI or the Windows/ma
 
 ![Experimental relay work architecture: Codex and IM exchange live progress and control bidirectionally through one shared thread](docs/assets/relay-work-overview.png)
 
-Run `scripts/gateway.* setup` once, then start Gateway manually whenever relay work is needed. Gateway and Relay have separate scripts and lifecycles. Use `/resume` to join an existing thread. Multiple native Codex clients and IM scopes can share a thread without ownership restrictions; new user messages and agent progress are mirrored live to the other attached scopes, ordinary input during an active turn uses Steer semantics, and the first client to answer an approval or input request wins. Gateway mode inherits Codex configuration from the shared app-server; Relay requests do not override it, except for a one-shot mode switch after the user explicitly selects Default or Plan. Only new live events produced while Codex, Gateway, and Relay are running are synchronized—there is no Queue action, offline replay, or catch-up. See [Experimental relay work](docs/en/experimental-relay-work.md) for the Windows, macOS, and Linux setup, lifecycle semantics, and complete removal instructions.
+Run `scripts/gateway.* setup` once, then start Gateway manually whenever relay work is needed. Gateway and Relay have separate scripts and lifecycles, while Gateway and its one app-server form a single failure domain. Use `/resume` to join an existing thread. Multiple native Codex clients and IM scopes can share a thread without ownership restrictions; new user messages, agent progress, and Relay-supported thread command state are mirrored to the other attached scopes, ordinary input during an active turn uses Steer semantics, and the first client to answer an approval or input request wins. Gateway mode inherits Codex configuration from the shared app-server; Relay requests do not override it, except for a one-shot mode switch after the user explicitly selects Default or Plan. A bounded command snapshot exists only in Gateway memory and survives Relay restart/cleanup, but not Gateway/app-server restart; native restart semantics then apply, including Plan returning to Default. There is no Queue action, semantic state journal, offline output replay, or catch-up. See [Experimental relay work](docs/en/experimental-relay-work.md) for the Windows, macOS, and Linux setup, lifecycle semantics, and complete removal instructions.
 
 ## Quick start
 
@@ -112,6 +112,7 @@ Common commands:
 | `/relay` | Open Relay Home. |
 | `/review` | Review current workspace changes. |
 | `/plan` | Toggle Plan mode for the current Codex thread. |
+| `/plan --on` / `/plan --off` | Select Plan or Default mode explicitly. |
 | `/plan <prompt>` | Enter Plan mode and run a prompt. |
 | `/goal <objective>` | Set a goal for the current Codex thread. |
 | `/resume` | Pick a recent Codex thread and immediately show its latest turn state. |

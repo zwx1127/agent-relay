@@ -56,6 +56,28 @@ describe("experimental Codex Gateway transport", () => {
           const params = message.params as Record<string, unknown> | undefined;
           const send = (result: unknown) => socket.send(JSON.stringify({ id, result }));
           if (method === "initialize") send({ userAgent: "codex-cli 0.145.0" });
+          else if (method === "agent-relay/control/hello") send({ version: 2, gatewayEpoch: "test-gateway" });
+          else if (method === "agent-relay/control/resync") {
+            socket.send(JSON.stringify({
+              method: "agent-relay/control/snapshot",
+              params: {
+                gatewayEpoch: "test-gateway",
+                threadId: params?.threadId,
+                revision: 0,
+                consistency: "live",
+                threadState: { threadId: params?.threadId, collaborationMode: "default", collaborationModeApplied: true, revision: 0, updatedAt: Date.now() },
+                commands: [],
+              },
+            }));
+            send({ gatewayEpoch: "test-gateway", revision: 0 });
+          }
+          else if (method === "agent-relay/control/threadState/update") send({
+            threadId: params?.threadId,
+            collaborationMode: params?.mode ?? "plan",
+            collaborationModeApplied: false,
+            revision: 1,
+            updatedAt: Date.now(),
+          });
           else if (method === "model/list") send({ data: [{ id: "gpt-test", model: "gpt-test", isDefault: true }] });
           else if (method === "collaborationMode/list") send({ data: [{ mode: "default" }, { mode: "plan" }] });
           else if (method === "thread/resume") send({
@@ -118,6 +140,7 @@ describe("experimental Codex Gateway transport", () => {
               },
             }));
           }
+          else if (method === "thread/goal/get") send({ goal: null });
           else if (method === "thread/list") send({ data: [{ id: "shared-thread", status: { type: "active" } }] });
         },
       },
@@ -154,7 +177,10 @@ describe("experimental Codex Gateway transport", () => {
       const resume = received.find((message) => message.method === "thread/resume");
       const resumeParams = resume?.params as Record<string, unknown>;
       expect(resumeParams.excludeTurns).toBe(true);
-      expect(resumeParams.initialTurnsPage).toEqual({ limit: 1, sortDirection: "desc", itemsView: "summary" });
+      expect(resumeParams.initialTurnsPage).toEqual({ limit: 1, sortDirection: "desc", itemsView: "full" });
+      expect(status.threadGoal).toBeNull();
+      expect(status.collaborationMode).toBe("default");
+      expect(status.relayStateConsistency).toBe("live");
       for (const field of ["cwd", "approvalPolicy", "approvalsReviewer", "sandbox", "developerInstructions", "baseInstructions"]) {
         expect(resumeParams).not.toHaveProperty(field);
       }
@@ -201,6 +227,28 @@ describe("experimental Codex Gateway transport", () => {
           const params = message.params as Record<string, unknown> | undefined;
           const send = (result: unknown) => socket.send(JSON.stringify({ id, result }));
           if (method === "initialize") send({ userAgent: "codex-cli 0.145.0" });
+          else if (method === "agent-relay/control/hello") send({ version: 2, gatewayEpoch: "test-gateway" });
+          else if (method === "agent-relay/control/resync") {
+            socket.send(JSON.stringify({
+              method: "agent-relay/control/snapshot",
+              params: {
+                gatewayEpoch: "test-gateway",
+                threadId: params?.threadId,
+                revision: 0,
+                consistency: "live",
+                threadState: { threadId: params?.threadId, collaborationMode: "default", collaborationModeApplied: true, revision: 0, updatedAt: Date.now() },
+                commands: [],
+              },
+            }));
+            send({ gatewayEpoch: "test-gateway", revision: 0 });
+          }
+          else if (method === "agent-relay/control/threadState/update") send({
+            threadId: params?.threadId,
+            collaborationMode: params?.mode ?? "plan",
+            collaborationModeApplied: false,
+            revision: 1,
+            updatedAt: Date.now(),
+          });
           else if (method === "model/list") send({ data: [{ id: "gpt-test", model: "gpt-test", isDefault: true }] });
           else if (method === "collaborationMode/list") send({ data: [{ mode: "default" }, { mode: "plan" }] });
           else if (method === "thread/resume") send({ thread: { id: params?.threadId, status: { type: "idle" } }, initialTurnsPage: { data: [], nextCursor: null } });
@@ -211,6 +259,7 @@ describe("experimental Codex Gateway transport", () => {
           });
           else if (method === "thread/fork") send({ thread: { id: params?.ephemeral ? "side-thread" : "forked-thread", status: { type: "idle" } } });
           else if (method === "thread/backgroundTerminals/list") send({ data: [] });
+          else if (method === "thread/goal/get") send({ goal: null });
           else if (method === "thread/unsubscribe") send({});
           else if (method === "thread/inject_items") send({});
           else if (method === "turn/start") {
@@ -287,12 +336,51 @@ describe("experimental Codex Gateway transport", () => {
       const sideFork = received.find((message) => message.method === "thread/fork" && (message.params as Record<string, unknown>)?.ephemeral === true);
       const sideForkParams = sideFork?.params as Record<string, unknown>;
       expect(sideForkParams).toMatchObject({ threadId: "shared-thread", ephemeral: true, excludeTurns: true });
+      const sideRelayControl = sideFork?.relayControl as Record<string, unknown>;
+      expect(sideRelayControl).toMatchObject({ version: 2, kind: "side" });
+      expect(sideRelayControl.commandId).toMatch(/^agent-relay:/);
+      expect(sideRelayControl.originToken).toMatch(/^agent-relay:/);
       for (const field of ["cwd", "approvalPolicy", "approvalsReviewer", "sandbox", "developerInstructions", "baseInstructions"]) {
         expect(sideForkParams).not.toHaveProperty(field);
       }
       const sideBoundary = received.find((message) => message.method === "thread/inject_items"
         && (message.params as Record<string, unknown>)?.threadId === "side-thread");
       expect(JSON.stringify(sideBoundary?.params)).toContain("side conversation");
+
+      outputs.length = 0;
+      sendNotification?.({
+        method: "agent-relay/control/command",
+        params: {
+          gatewayEpoch: "test-gateway",
+          threadRevision: 1,
+          commandId: sideRelayControl.commandId,
+          threadId: "shared-thread",
+          childThreadId: "side-thread",
+          kind: "side",
+          phase: "completed",
+          source: "relay",
+          revision: 1,
+          createdAt: 1,
+          updatedAt: 2,
+          originToken: sideRelayControl.originToken,
+          content: { type: "side_delta", text: "mirrored peer answer" },
+        },
+      });
+      await Bun.sleep(10);
+      expect(outputs).toContainEqual(expect.objectContaining({
+        type: "relay_command_state",
+        sessionKey: second.sessionKey,
+        commandId: sideRelayControl.commandId,
+        content: { type: "side_delta", text: "mirrored peer answer" },
+      }));
+      expect(outputs).not.toContainEqual(expect.objectContaining({ type: "relay_command_state", sessionKey: first.sessionKey }));
+
+      expect(await driver.syncThreadCollaborationMode(first.sessionKey, "default", { operation: "set", mode: "plan" })).toBe("plan");
+      expect(received.find((message) => message.method === "agent-relay/control/threadState/update")?.params).toMatchObject({
+        threadId: "shared-thread",
+        operation: "set",
+        mode: "plan",
+      });
 
       const fresh = await driver.start({ conversationId: "3", scopeKey: "3", workspaceName: "demo", workspacePath: "C:/work/fresh" });
       const threadStart = received.find((message) => message.method === "thread/start");

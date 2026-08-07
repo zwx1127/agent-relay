@@ -9,6 +9,7 @@ import type {
   AgentActivity,
   AgentBuiltinCommand,
   AgentBuiltinResult,
+  AgentCollaborationMode,
   AgentFileSearchOptions,
   AgentFileSearchResult,
   AgentInterruptResult,
@@ -19,6 +20,13 @@ import type {
   AgentModelSummary,
   AgentOutputEvent,
   AgentOutputHandler,
+  AgentRelayCommandContent,
+  AgentRelayCommandKind,
+  AgentRelayCommandMetadata,
+  AgentRelayCommandPhase,
+  AgentRelayCommandState,
+  AgentRelayThreadState,
+  AgentRelayThreadStateUpdate,
   AgentSessionStatus,
   AgentSideConversationResult,
   AgentSkillListOptions,
@@ -30,6 +38,16 @@ import type {
   AgentThreadSummary,
   StartAgentOptions,
 } from "../../../ports/agent.ts";
+import {
+  RELAY_CONTROL_COMMAND_METHOD,
+  RELAY_CONTROL_ACK_METHOD,
+  RELAY_CONTROL_HELLO_METHOD,
+  RELAY_CONTROL_PROTOCOL_VERSION,
+  RELAY_CONTROL_RESYNC_METHOD,
+  RELAY_CONTROL_SNAPSHOT_METHOD,
+  RELAY_CONTROL_THREAD_STATE_METHOD,
+  RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
+} from "../../../ports/agent/control.ts";
 import { applySessionMetadata, applyThreadMetadata, applyThreadSettings, asRecord, collaborationModePayload, getString, getThreadId, getTurnId, imageOutputEvent, isNoActiveTurnToInterruptError, isNoActiveTurnToSteerError, reviewTargetPayload, summarizeUnknown, toModelSummary, toThreadGoal, toThreadSummary, toTokenBreakdown, toTurnCompletedEvent, updateActiveTurnFromResult, userInputPayload, userMessageInput } from "./protocol.ts";
 import { codexAppServerSpawnCommand, codexVersionSpawnCommand, formatCodexSpawnError, isCodexVersionSupported, MINIMUM_CODEX_VERSION, parseCodexVersion, type CodexSpawnCommand } from "./spawn.ts";
 import { BackgroundTerminalTracker } from "./background-terminals.ts";
@@ -55,6 +73,66 @@ export interface CodexDriverOptions {
   env?: Record<string, string>;
 }
 
+function relayCommandState(record: Record<string, unknown> | undefined): AgentRelayCommandState | undefined {
+  const commandId = getString(record, "commandId");
+  const threadId = getString(record, "threadId");
+  const childThreadId = getString(record, "childThreadId");
+  const kind = relayCommandKind(getString(record, "kind"));
+  const phase = relayCommandPhase(getString(record, "phase"));
+  const source = getString(record, "source");
+  if (!commandId || !threadId || !kind || !phase || (source !== "relay" && source !== "codex")) return undefined;
+  if (typeof record?.revision !== "number" || typeof record.createdAt !== "number" || typeof record.updatedAt !== "number") return undefined;
+  return {
+    commandId,
+    threadId,
+    ...(childThreadId ? { childThreadId } : {}),
+    kind,
+    phase,
+    source,
+    revision: record.revision,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    ...(typeof record.question === "string" ? { question: record.question } : {}),
+    ...(typeof record.answer === "string" ? { answer: record.answer } : {}),
+  };
+}
+
+function relayThreadState(value: unknown): AgentRelayThreadState | undefined {
+  const record = asRecord(value);
+  const threadId = getString(record, "threadId");
+  const mode = getString(record, "collaborationMode");
+  if (!threadId || (mode !== "default" && mode !== "plan") || typeof record?.collaborationModeApplied !== "boolean") return undefined;
+  if (typeof record.revision !== "number" || typeof record.updatedAt !== "number") return undefined;
+  return {
+    threadId,
+    collaborationMode: mode,
+    collaborationModeApplied: record.collaborationModeApplied,
+    revision: record.revision,
+    updatedAt: record.updatedAt,
+  };
+}
+
+function relayCommandContent(value: unknown): AgentRelayCommandContent | undefined {
+  const record = asRecord(value);
+  const type = getString(record, "type");
+  const text = getString(record, "text");
+  return text && (type === "side_question" || type === "side_delta") ? { type, text } : undefined;
+}
+
+function relayCommandKind(value: string | undefined): AgentRelayCommandKind | undefined {
+  return value === "review" || value === "compact" || value === "side" || value === "rename"
+    || value === "goal_update" || value === "goal_clear" || value === "archive" || value === "delete"
+    || value === "terminals_clean" || value === "terminal_stop" ? value : undefined;
+}
+
+function relayCommandPhase(value: string | undefined): AgentRelayCommandPhase | undefined {
+  return value === "accepted" || value === "running" || value === "completed" || value === "failed" || value === "interrupted" ? value : undefined;
+}
+
+function isRelayCommandTerminal(phase: AgentRelayCommandPhase): boolean {
+  return phase === "completed" || phase === "failed" || phase === "interrupted";
+}
+
 function interactiveRequestKey(requestId: string | number): string {
   return `${typeof requestId}:${String(requestId)}`;
 }
@@ -67,6 +145,11 @@ interface PendingInteractiveRequest {
 }
 
 interface PendingUserMessageOrigin {
+  sessionKey: string;
+  createdAt: number;
+}
+
+interface PendingRelayCommandOrigin {
   sessionKey: string;
   createdAt: number;
 }
@@ -104,6 +187,9 @@ export class CodexDriver implements AgentDriver {
   private readonly pendingInteractiveRequests = new Map<string, PendingInteractiveRequest>();
   private readonly pendingUserMessageOrigins = new Map<string, PendingUserMessageOrigin>();
   private readonly mirroredUserMessageItems = new Map<string, number>();
+  private readonly relayCommandOrigins = new Map<string, PendingRelayCommandOrigin>();
+  private readonly relayControlRevisions = new Map<string, { gatewayEpoch: string; revision: number }>();
+  private readonly relayResyncRequested = new Set<string>();
   // Sends for the same relay session must be ordered so steering input cannot
   // overtake the turn/start request that created the active turn.
   private readonly inputQueues = new Map<string, Promise<AgentSendResult>>();
@@ -122,6 +208,8 @@ export class CodexDriver implements AgentDriver {
   private appServerVersion?: string;
   private defaultModel?: string;
   private currentGatewayUrl?: string;
+  private readonly relayInstanceId = randomUUID();
+  private gatewayEpoch?: string;
 
   constructor(
     private readonly options: CodexDriverOptions,
@@ -155,6 +243,11 @@ export class CodexDriver implements AgentDriver {
       running: true,
       startedAt: Date.now(),
       ...(options.threadId ? { threadId: options.threadId } : {}),
+      ...(this.usesGateway() ? {
+        collaborationMode: "default" as const,
+        collaborationModeApplied: true,
+        relayStateConsistency: "resyncing" as const,
+      } : {}),
     };
 
     const gateway = this.usesGateway();
@@ -173,7 +266,7 @@ export class CodexDriver implements AgentDriver {
       ...(options.threadId ? {
         threadId: options.threadId,
         excludeTurns: true,
-        initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "summary" },
+        initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "full" },
       } : {}),
       ...(!gateway || !options.threadId ? { cwd: options.workspacePath } : {}),
       ...(!gateway ? {
@@ -197,8 +290,13 @@ export class CodexDriver implements AgentDriver {
     this.bindSession(threadId, key);
     this.mirrorThreadStatus(key);
     try {
-      const terminals = asRecord(await this.request("thread/backgroundTerminals/list", { threadId, limit: 1 }));
+      const [terminals, goalResult] = await Promise.all([
+        this.request("thread/backgroundTerminals/list", { threadId, limit: 1 }).then(asRecord),
+        this.request("thread/goal/get", { threadId }).then(asRecord),
+      ]);
       if (!Array.isArray(terminals?.data)) throw new Error("thread/backgroundTerminals/list returned an invalid response.");
+      status.threadGoal = toThreadGoal(goalResult?.goal) ?? null;
+      if (gateway) await this.requestRelayControlResync(threadId);
     } catch (error) {
       await this.release(key);
       throw new Error(`Codex ${this.appServerVersion ?? "unknown"} is missing required background-terminal APIs: ${error instanceof Error ? error.message : String(error)}`);
@@ -294,6 +392,29 @@ export class CodexDriver implements AgentDriver {
     if (!latest) return;
     status.latestTurn = latest;
     if (latest.status === "inProgress") status.activeTurnId = latest.id;
+  }
+
+  async syncThreadCollaborationMode(
+    key: string,
+    currentMode: AgentCollaborationMode,
+    update: AgentRelayThreadStateUpdate,
+  ): Promise<AgentCollaborationMode> {
+    const running = this.requireRunningSession(key);
+    if (!this.usesGateway()) {
+      return update.operation === "toggle"
+        ? currentMode === "plan" ? "default" : "plan"
+        : update.mode ?? currentMode;
+    }
+    const result = asRecord(await this.request(RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD, {
+      threadId: running.status.threadId,
+      operation: update.operation,
+      ...(update.mode ? { mode: update.mode } : {}),
+    }));
+    const mode = getString(result, "collaborationMode");
+    if (mode !== "plan" && mode !== "default") throw new Error("Relay Gateway returned an invalid collaboration mode.");
+    running.status.collaborationMode = mode;
+    running.status.collaborationModeApplied = result?.collaborationModeApplied === true;
+    return mode;
   }
 
   async stop(key: string): Promise<void> {
@@ -424,7 +545,7 @@ export class CodexDriver implements AgentDriver {
         threadId: running.status.threadId,
         target: reviewTargetPayload(command.target ?? { type: "uncommittedChanges" }),
         delivery: "inline",
-      });
+      }, this.relayCommandRequestOptions(key, "review"));
       updateActiveTurnFromResult(running, result);
       running.reviewTurnId = getTurnId(result);
       running.status.reviewInProgress = true;
@@ -435,7 +556,7 @@ export class CodexDriver implements AgentDriver {
       };
     }
 
-    const result = await this.request("thread/compact/start", { threadId: running.status.threadId });
+    const result = await this.request("thread/compact/start", { threadId: running.status.threadId }, this.relayCommandRequestOptions(key, "compact"));
     updateActiveTurnFromResult(running, result);
     return { message: "Compaction started.", threadId: running.status.threadId, turnId: getTurnId(result) };
   }
@@ -459,7 +580,7 @@ export class CodexDriver implements AgentDriver {
         ...(goal.objective !== undefined ? { objective: goal.objective } : {}),
         ...(goal.status !== undefined ? { status: goal.status } : {}),
         ...(goal.tokenBudget !== undefined ? { tokenBudget: goal.tokenBudget } : {}),
-      });
+      }, this.relayCommandRequestOptions(key, "goal_update"));
     } catch (error) {
       this.requestedGoalMutation.delete(threadId);
       throw error;
@@ -476,7 +597,7 @@ export class CodexDriver implements AgentDriver {
     this.requestedGoalMutation.set(threadId, { action: "cleared", expiresAt: Date.now() + 30_000 });
     let result: unknown;
     try {
-      result = await this.request("thread/goal/clear", { threadId });
+      result = await this.request("thread/goal/clear", { threadId }, this.relayCommandRequestOptions(key, "goal_clear"));
     } catch (error) {
       this.requestedGoalMutation.delete(threadId);
       throw error;
@@ -538,7 +659,7 @@ export class CodexDriver implements AgentDriver {
       } : {}),
       ephemeral: true,
       excludeTurns: true,
-    });
+    }, this.relayCommandRequestOptions(key, "side"));
     const threadId = getThreadId(forkResult);
     if (!threadId) throw new Error("Codex app-server did not return a side conversation thread id.");
 
@@ -583,7 +704,7 @@ export class CodexDriver implements AgentDriver {
 
   async renameThread(key: string, name: string): Promise<void> {
     const running = this.requireRunningSession(key);
-    await this.request("thread/name/set", { threadId: running.status.threadId, name });
+    await this.request("thread/name/set", { threadId: running.status.threadId, name }, this.relayCommandRequestOptions(key, "rename"));
     running.status.threadName = name;
   }
 
@@ -592,7 +713,7 @@ export class CodexDriver implements AgentDriver {
     const threadId = running.status.threadId!;
     this.requestedLifecycle.set(threadId, "archived");
     try {
-      await this.request("thread/archive", { threadId });
+      await this.request("thread/archive", { threadId }, this.relayCommandRequestOptions(key, "archive"));
     } catch (error) {
       this.requestedLifecycle.delete(threadId);
       throw error;
@@ -604,7 +725,7 @@ export class CodexDriver implements AgentDriver {
     const threadId = running.status.threadId!;
     this.requestedLifecycle.set(threadId, "deleted");
     try {
-      await this.request("thread/delete", { threadId });
+      await this.request("thread/delete", { threadId }, this.relayCommandRequestOptions(key, "delete"));
     } catch (error) {
       this.requestedLifecycle.delete(threadId);
       throw error;
@@ -613,13 +734,13 @@ export class CodexDriver implements AgentDriver {
 
   async cleanBackgroundTerminals(key: string): Promise<void> {
     const running = this.requireRunningSession(key);
-    await this.request("thread/backgroundTerminals/clean", { threadId: running.status.threadId });
+    await this.request("thread/backgroundTerminals/clean", { threadId: running.status.threadId }, this.relayCommandRequestOptions(key, "terminals_clean"));
     running.backgroundTerminals.clear();
   }
 
   async terminateBackgroundTerminal(key: string, processId: string): Promise<boolean> {
     const running = this.requireRunningSession(key);
-    const result = await this.request("thread/backgroundTerminals/terminate", { threadId: running.status.threadId, processId });
+    const result = await this.request("thread/backgroundTerminals/terminate", { threadId: running.status.threadId, processId }, this.relayCommandRequestOptions(key, "terminal_stop"));
     return asRecord(result)?.terminated === true;
   }
 
@@ -796,6 +917,16 @@ export class CodexDriver implements AgentDriver {
         this.logger.warn("codex.app_server_version_mismatch", { preflight_version: this.appServerVersion, user_agent_version: reportedVersion });
       }
       await this.rpc.notify("initialized", undefined, { ensureWritable: false });
+      if (gatewayUrl) {
+        const control = asRecord(await this.request(RELAY_CONTROL_HELLO_METHOD, {
+          version: RELAY_CONTROL_PROTOCOL_VERSION,
+          instanceId: this.relayInstanceId,
+        }, { ensureWritable: false }));
+        if (control?.version !== RELAY_CONTROL_PROTOCOL_VERSION || typeof control.gatewayEpoch !== "string") {
+          throw new Error("Experimental relay Gateway did not negotiate the Relay control protocol.");
+        }
+        this.gatewayEpoch = control.gatewayEpoch;
+      }
       await this.probeServerCapabilities();
     } catch (error) {
       if (proc && this.proc === proc && !proc.killed) proc.kill();
@@ -902,6 +1033,18 @@ export class CodexDriver implements AgentDriver {
   }
 
   private async handleNotification(message: JsonRpcNotification): Promise<void> {
+    if (message.method === RELAY_CONTROL_COMMAND_METHOD) {
+      await this.handleRelayCommandNotification(message.params);
+      return;
+    }
+    if (message.method === RELAY_CONTROL_THREAD_STATE_METHOD) {
+      await this.handleRelayThreadStateNotification(message.params);
+      return;
+    }
+    if (message.method === RELAY_CONTROL_SNAPSHOT_METHOD) {
+      await this.handleRelayControlSnapshot(message.params);
+      return;
+    }
     const params = asRecord(message.params);
     const threadId = typeof params?.threadId === "string" ? params.threadId : undefined;
     const sideConversation = threadId ? this.sideConversations.get(threadId) : undefined;
@@ -1283,6 +1426,131 @@ export class CodexDriver implements AgentDriver {
     return message.method.startsWith("thread/") || message.method.startsWith("item/");
   }
 
+  private async handleRelayCommandNotification(value: unknown): Promise<void> {
+    const params = asRecord(value);
+    const state = relayCommandState(params);
+    if (!state || !this.acceptRelayControlEnvelope(params, state.threadId)) return;
+    const originToken = getString(params, "originToken");
+    this.pruneRelayCommandOrigins();
+    const originSessionKey = originToken ? this.relayCommandOrigins.get(originToken)?.sessionKey : undefined;
+    const content = relayCommandContent(params?.content);
+    for (const key of this.sessionKeysForThread(state.threadId)) {
+      if (key === originSessionKey) continue;
+      await this.onOutput({
+        type: "relay_command_state",
+        sessionKey: key,
+        gatewayEpoch: this.gatewayEpoch!,
+        threadRevision: state.revision,
+        ...state,
+        ...(content ? { content } : {}),
+      });
+    }
+    if (originToken && isRelayCommandTerminal(state.phase)) this.relayCommandOrigins.delete(originToken);
+  }
+
+  private async handleRelayThreadStateNotification(value: unknown): Promise<void> {
+    const params = asRecord(value);
+    const state = relayThreadState(params);
+    if (!state || !this.acceptRelayControlEnvelope(params, state.threadId)) return;
+    for (const key of this.sessionKeysForThread(state.threadId)) {
+      const running = this.sessions.get(key);
+      if (running) {
+        running.status.collaborationMode = state.collaborationMode;
+        running.status.collaborationModeApplied = state.collaborationModeApplied;
+        running.status.relayStateConsistency = "live";
+      }
+      await this.onOutput({
+        type: "relay_thread_state",
+        sessionKey: key,
+        gatewayEpoch: this.gatewayEpoch!,
+        threadRevision: state.revision,
+        ...state,
+      });
+    }
+  }
+
+  private async handleRelayControlSnapshot(value: unknown): Promise<void> {
+    const params = asRecord(value);
+    const threadId = getString(params, "threadId");
+    const gatewayEpoch = getString(params, "gatewayEpoch");
+    const threadState = relayThreadState(params?.threadState);
+    if (!threadId || !gatewayEpoch || gatewayEpoch !== this.gatewayEpoch || !threadState || threadState.threadId !== threadId) return;
+    const commands = Array.isArray(params?.commands)
+      ? params.commands.map((command) => relayCommandState(asRecord(command))).filter((command): command is AgentRelayCommandState => Boolean(command))
+      : [];
+    const revision = typeof params?.revision === "number" ? params.revision : threadState.revision;
+    if (params?.consistency !== "live") return;
+    this.relayControlRevisions.set(threadId, { gatewayEpoch, revision });
+    this.relayResyncRequested.delete(threadId);
+    for (const key of this.sessionKeysForThread(threadId)) {
+      const running = this.sessions.get(key);
+      if (running) {
+        running.status.collaborationMode = threadState.collaborationMode;
+        running.status.collaborationModeApplied = threadState.collaborationModeApplied;
+        running.status.relayStateConsistency = "live";
+      }
+      await this.onOutput({
+        type: "relay_control_snapshot",
+        sessionKey: key,
+        threadId,
+        gatewayEpoch,
+        revision,
+        consistency: "live",
+        threadState,
+        commands,
+      });
+    }
+    this.ackRelayControl(threadId, revision);
+  }
+
+  private acceptRelayControlEnvelope(params: Record<string, unknown> | undefined, threadId: string): boolean {
+    const gatewayEpoch = getString(params, "gatewayEpoch");
+    const revision = params?.threadRevision;
+    if (!gatewayEpoch || gatewayEpoch !== this.gatewayEpoch || typeof revision !== "number") return false;
+    const current = this.relayControlRevisions.get(threadId);
+    if (!current || current.gatewayEpoch !== gatewayEpoch || revision !== current.revision + 1) {
+      if (current?.gatewayEpoch === gatewayEpoch && revision <= current.revision) return false;
+      this.markRelayResyncing(threadId);
+      void this.requestRelayControlResync(threadId).catch((error) => {
+        this.logger.warn("codex.relay_control_resync_failed", { thread_id: threadId, error: toError(error) });
+      });
+      return false;
+    }
+    this.relayControlRevisions.set(threadId, { gatewayEpoch, revision });
+    this.ackRelayControl(threadId, revision);
+    return true;
+  }
+
+  private markRelayResyncing(threadId: string): void {
+    for (const key of this.sessionKeysForThread(threadId)) {
+      const running = this.sessions.get(key);
+      if (running) running.status.relayStateConsistency = "resyncing";
+    }
+  }
+
+  private async requestRelayControlResync(threadId: string): Promise<void> {
+    if (!this.usesGateway() || this.relayResyncRequested.has(threadId)) return;
+    this.relayResyncRequested.add(threadId);
+    this.markRelayResyncing(threadId);
+    try {
+      await this.request(RELAY_CONTROL_RESYNC_METHOD, { threadId }, { ensureWritable: false });
+    } catch (error) {
+      this.relayResyncRequested.delete(threadId);
+      throw error;
+    }
+  }
+
+  private ackRelayControl(threadId: string, revision: number): void {
+    if (!this.usesGateway() || !this.gatewayEpoch) return;
+    void this.rpc.notify(RELAY_CONTROL_ACK_METHOD, {
+      gatewayEpoch: this.gatewayEpoch,
+      threadId,
+      revision,
+    }, { ensureWritable: false }).catch((error) => {
+      this.logger.debug("codex.relay_control_ack_failed", { thread_id: threadId, revision, error: toError(error) });
+    });
+  }
+
   private async emitActivity(
     sessionKeyValue: string,
     activity: AgentActivity,
@@ -1531,7 +1799,35 @@ export class CodexDriver implements AgentDriver {
     });
   }
 
-  private async request(method: string, params?: unknown, options: { ensureWritable?: boolean } = {}): Promise<unknown> {
+  private relayCommandRequestOptions(key: string, kind: AgentRelayCommandKind): { relayControl?: AgentRelayCommandMetadata } {
+    if (!this.usesGateway()) return {};
+    this.pruneRelayCommandOrigins();
+    const originToken = `agent-relay:${randomUUID()}`;
+    this.relayCommandOrigins.set(originToken, { sessionKey: key, createdAt: Date.now() });
+    return {
+      relayControl: {
+        version: RELAY_CONTROL_PROTOCOL_VERSION,
+        commandId: `agent-relay:${randomUUID()}`,
+        kind,
+        originToken,
+      },
+    };
+  }
+
+  private pruneRelayCommandOrigins(now = Date.now()): void {
+    const cutoff = now - USER_MESSAGE_TRACKING_TTL_MS;
+    for (const [token, origin] of this.relayCommandOrigins) {
+      if (origin.createdAt >= cutoff) break;
+      this.relayCommandOrigins.delete(token);
+    }
+    while (this.relayCommandOrigins.size > USER_MESSAGE_TRACKING_LIMIT) {
+      const oldest = this.relayCommandOrigins.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.relayCommandOrigins.delete(oldest);
+    }
+  }
+
+  private async request(method: string, params?: unknown, options: { ensureWritable?: boolean; relayControl?: AgentRelayCommandMetadata } = {}): Promise<unknown> {
     return await this.rpc.request(method, params, options);
   }
 
@@ -1575,12 +1871,16 @@ export class CodexDriver implements AgentDriver {
     this.pendingInteractiveRequests.clear();
     this.pendingUserMessageOrigins.clear();
     this.mirroredUserMessageItems.clear();
+    this.relayCommandOrigins.clear();
+    this.relayControlRevisions.clear();
+    this.relayResyncRequested.clear();
     this.sideConversations.clear();
     this.requestedLifecycle.clear();
     this.requestedGoalMutation.clear();
     this.proc = undefined;
     this.socket = undefined;
     this.ready = undefined;
+    this.gatewayEpoch = undefined;
     for (const running of sessions) {
       running.status.running = false;
       void this.onExit({ sessionKey: running.status.sessionKey, exitCode, signalCode });
@@ -1603,6 +1903,10 @@ export class CodexDriver implements AgentDriver {
     this.proc = undefined;
     this.socket = undefined;
     this.ready = undefined;
+    this.gatewayEpoch = undefined;
+    this.relayCommandOrigins.clear();
+    this.relayControlRevisions.clear();
+    this.relayResyncRequested.clear();
   }
 
   private recordServerStderr(line: string): void {
@@ -1632,4 +1936,8 @@ export class CodexDriver implements AgentDriver {
     return new Error(details.join(" "));
   }
 
+}
+
+function toError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
 }

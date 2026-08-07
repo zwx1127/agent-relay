@@ -74,6 +74,8 @@ Relay 永远不会启动 Gateway。实验开关启用但当前为 local 模式�
 
 显式执行 `gateway stop` 时，会先把持久模式写为 `local`，再停止进程。Gateway 或 app-server 意外退出时，持久模式故意保留为 `gateway`；新的 CLI、桌面版和 Relay 连接会 fail closed，直到用户运行 `gateway start` 恢复，防止静默创建第二个 app-server 导致 thread 分叉。
 
+Gateway 与其 app-server 属于同一故障域：正常停止会终止二者；Gateway 异常退出后，独立 watchdog 会终止遗留的 app-server；启动时若发现仍存活但不一致的进程组合则拒绝继续。Relay 重启或 `clean-data` 不会停止它们。不会新增 thread 语义日志；Gateway 状态文件只保存生命周期发现信息。
+
 `gateway start` 必须在成功 setup 后运行。`gateway remove` 会先切换 local 并停止 Gateway，再修改客户端环境；如果停止失败，remove 会中止并保留启动器与安装状态，方便安全重试。
 
 ## Thread、workspace 与多客户端
@@ -82,14 +84,25 @@ Relay 永远不会启动 Gateway。实验开关启用但当前为 local 模式�
 - Gateway 模式从共享 app-server 和已有 thread 继承 Codex 配置。Relay 的普通请求、fork 和 side conversation 都不会覆盖 model、reasoning effort、personality、审批、sandbox 或 instructions；由 IM 新建 thread 时只携带用户明确选择的 workspace 目录。只有用户明确选择 Default 或 Plan 后，Relay 才会发送一次 collaboration mode 设置；协议要求的 model 和 reasoning-effort 字段复用 thread 当前值，如果当时是 steer，该模式意图会保留到下一个新 turn。`CODEX_APPROVAL`、`CODEX_SANDBOX` 和 Relay instruction 注入设置只用于本地 stdio 模式。
 - 多个原生客户端和多个 IM scope 可以 `/resume` 同一个 thread。Relay 不增加单写者或所有权限制，由用户决定哪个客户端发送输入。
 - `/resume` 复用 Codex TUI 的恢复语义。来源 scope 存在活动 turn、审批、用户输入请求或其他忙碌 Relay task 时，会拒绝切换。
-- `/resume` 成功后，Relay 会根据最近 turn 摘要立即显示活动卡片。活动 turn 会继续更新同一张卡；已完成、中断、失败或没有 turn 的 thread 会显示对应终态或 Idle 状态。
+- `/resume` 成功后，Relay 会根据最近 turn 的完整表示立即显示活动卡片，并在返回前读取当前 Goal 与后台终端状态。活动 turn 会继续更新同一张卡；已完成、中断、失败或没有 turn 的 thread 会显示对应终态或 Idle 状态。
 - Relay Home 选择 workspace 只绑定目录，不会让已运行的原生 Codex 进程切换目录，也不会自动绑定 thread。第一条普通消息会新建 thread；只有 `/resume` 会显式加入已有工作。
 - 空闲 workspace 切换只释放 Relay 的旧订阅，不停止 thread；忙碌时会拒绝切换。
 - 活动 turn 期间的普通 IM 输入采用 Codex TUI Enter/Steer 语义。接力工作不增加 Tab/Queue、Gateway 输入锁或 thread 所有权锁。
 - 原生 Codex 客户端或其他 IM scope 新发送的用户消息会实时同步到同一 thread 上的其余 IM scope；Relay 不会把消息回显到来源 scope。文本保持原样；非文本输入只显示附件数量，不会下载或重新上传。
 - 审批、用户输入和 MCP elicitation 可以出现在关联同一 thread 的全部已连接客户端中。第一份有效响应胜出，resolved 通知会清除重复控件。
+- Relay 支持的 thread 内部操作会作为指令状态同步到同一 thread 的其他 Relay scope，包括 review、compact、rename、Goal 修改、archive/delete、后台终端清理和 Plan 模式状态。操作只在来源客户端执行一次，其他 scope 不会重新执行同步到的指令。
+- `/side` 和 `/btw` 仍使用临时 fork；问题和答案 delta 会同步到其他已加入的 Relay scope，并保留在有界 Gateway 内存快照中，但不进入父 thread transcript。`/new`、`/clear`、`/resume` 和 `/fork` 保持本地导航，不会强迫其他客户端切换 thread。
+- `/plan` 切换同步模式；`/plan --on` 与 `/plan --off` 可以显式选择。Gateway/app-server 重启后采用 Codex 原生进程重启语义，Plan 恢复为 Default，不从 Relay 持久数据反推。
 
-Gateway 只转发 Codex、Gateway、Relay 同时运行且关联同一 thread 后产生的新实时事件。它不保存进度历史、消费游标、离线队列、重放或追赶流。恢复时只读取最新 turn 摘要来生成即时活动状态卡，不会把错过的对话输出补发到 IM。
+Gateway 使用内部观察连接：即使全部 Relay 前端断开，它仍会订阅已经见过的 thread。每个 Gateway epoch、每个 thread revision、ACK 与 resync 快照共同避免 Relay 重连后把残缺的事件后缀当成完整状态。该控制面只属于 Gateway，不扩展 Codex app-server 协议。
+
+恢复边界严格对齐 Codex App/CLI 的原生进程重启语义：
+
+- Relay 断线、重启或清理本地数据，而 Gateway/app-server 仍存活时，`/resume` 会从存活的 app-server 与 Gateway 内存恢复最近完整 turn、Goal、后台终端、重放的待审批/待输入请求、Plan/Default，以及 Relay 支持的指令和 `/btw` 状态。
+- Gateway/app-server 重启后，只恢复 Codex 原生 resume/查询能够恢复的状态。Relay 专属指令投影、临时 `/btw`、进程内 callback 都消失，Plan 回到 Default。
+- 重连窗口中的实时文本/活动 delta 是最终一致；终态 `turn/completed` 加上 resume 得到的完整 turn 才是权威结果，不承诺 delta 恰好一次。
+
+系统不增加进度历史数据库、消费游标、语义 JSON journal、离线输出队列或持久化重放。有界指令快照（包括 side 问题和累计答案）只存在于 Gateway 内存中，并在其中过期/裁剪；Gateway 重启即清空。
 
 ## 停止或移除
 

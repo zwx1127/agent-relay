@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { sessionKey } from "../../src/domain/session.ts";
+import type { AgentRelayControlSnapshotEvent } from "../../src/ports/agent.ts";
 import { workspaceCallbackToken } from "../../src/relay/ui/callback-data.ts";
 import { callbackMessage, cleanupRelayFixtures, relayFixture, textMessage } from "../support/relay-fixture.ts";
 
@@ -296,6 +297,92 @@ describe("experimental relay work behavior", () => {
       role: "user",
       text: "message from Codex Desktop\n[1 image, 1 audio attached]\n",
     });
+  });
+
+  test("hydrates shared Relay state and renders live side conversations without changing the transcript", async () => {
+    const { router, store, adapter, agent, path } = experimentalFixture();
+    const key = sessionKey("1", "demo");
+    const status = await agent.start({ conversationId: "1", scopeKey: "1", workspaceName: "demo", workspacePath: path, threadId: "shared-thread" });
+    store.markSessionStarted(key, "1", "demo", 1, status.threadId, "1");
+
+    await router.handleAgentOutput({
+      type: "relay_thread_state",
+      sessionKey: key,
+      gatewayEpoch: "epoch-1",
+      threadRevision: 1,
+      threadId: "shared-thread",
+      collaborationMode: "plan",
+      collaborationModeApplied: false,
+      revision: 1,
+      updatedAt: 10,
+    });
+    expect(store.getCollaborationMode(key)).toBe("plan");
+    expect(store.getPendingCollaborationMode(key)).toBe("plan");
+
+    const base = {
+      type: "relay_command_state" as const,
+      sessionKey: key,
+      commandId: "side-1",
+      threadId: "shared-thread",
+      childThreadId: "side-thread",
+      kind: "side" as const,
+      source: "codex" as const,
+      gatewayEpoch: "epoch-1",
+      createdAt: 20,
+    };
+    await router.handleAgentOutput({ ...base, phase: "accepted" as const, revision: 2, threadRevision: 2, updatedAt: 20, content: { type: "side_question" as const, text: "What changed?" } });
+    await router.handleAgentOutput({ ...base, phase: "running" as const, revision: 3, threadRevision: 3, updatedAt: 30, content: { type: "side_delta" as const, text: "Only the " } });
+    await router.handleAgentOutput({ ...base, phase: "running" as const, revision: 4, threadRevision: 4, updatedAt: 40, content: { type: "side_delta" as const, text: "Gateway." } });
+    await router.handleAgentOutput({ ...base, phase: "completed" as const, revision: 5, threadRevision: 5, updatedAt: 50 });
+
+    const rendered = adapter.edited.at(-1)?.text ?? adapter.sent.at(-1)?.text ?? "";
+    expect(rendered).toContain("Side conversation \u00b7 shared thread");
+    expect(rendered).toContain("What changed?");
+    expect(rendered).toContain("Only the Gateway.");
+    expect(rendered).toContain("Status: Completed");
+    expect(store.latestTranscriptEvent("1", "demo", "user")).toBeUndefined();
+    expect(store.latestTranscriptEvent("1", "demo", "agent")).toBeUndefined();
+  });
+
+  test("renders an in-memory Relay control snapshot as one summary card", async () => {
+    const { router, store, adapter, agent, path } = experimentalFixture();
+    const key = sessionKey("1", "demo");
+    const status = await agent.start({ conversationId: "1", scopeKey: "1", workspaceName: "demo", workspacePath: path, threadId: "shared-thread" });
+    store.markSessionStarted(key, "1", "demo", 1, status.threadId, "1");
+
+    const snapshot = {
+      type: "relay_control_snapshot",
+      sessionKey: key,
+      threadId: "shared-thread",
+      gatewayEpoch: "epoch-1",
+      revision: 3,
+      consistency: "live",
+      threadState: {
+        threadId: "shared-thread",
+        collaborationMode: "plan",
+        collaborationModeApplied: true,
+        revision: 2,
+        updatedAt: 20,
+      },
+      commands: [{
+        commandId: "review-1",
+        threadId: "shared-thread",
+        kind: "review",
+        phase: "completed",
+        source: "codex",
+        revision: 3,
+        createdAt: 10,
+        updatedAt: 30,
+      }],
+    } satisfies AgentRelayControlSnapshotEvent;
+    await router.handleAgentOutput(snapshot);
+    const sentAfterFirstSnapshot = adapter.sent.length;
+    await router.handleAgentOutput(snapshot);
+
+    expect(store.getCollaborationMode(key)).toBe("plan");
+    expect(adapter.sent.at(-1)?.text).toContain("Shared Relay state");
+    expect(adapter.sent.at(-1)?.text).toContain("/review: Completed");
+    expect(adapter.sent).toHaveLength(sentAfterFirstSnapshot);
   });
 
   test("removes the legacy thread commands even when Relay Work is enabled", async () => {

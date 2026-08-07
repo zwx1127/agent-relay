@@ -41,14 +41,19 @@ export class PlanCommandService {
       return;
     }
     const key = sessionKey(conversationId, workspace.name);
-    if (!prompt.trim()) {
-      const nextMode = this.deps.store.getCollaborationMode(key) === "plan" ? "default" : "plan";
-      this.deps.store.requestCollaborationMode(key, nextMode);
+    const normalizedPrompt = prompt.trim();
+    if (!normalizedPrompt || normalizedPrompt === "--on" || normalizedPrompt === "--off") {
+      const update = normalizedPrompt === "--on"
+        ? { operation: "set" as const, mode: "plan" as const }
+        : normalizedPrompt === "--off"
+          ? { operation: "set" as const, mode: "default" as const }
+          : { operation: "toggle" as const };
+      const nextMode = await this.syncMode(key, update);
       await this.deps.sendRendered(conversationId, messageWithTitle(nextMode === "plan" ? "Plan mode enabled." : "Plan mode disabled."));
       return;
     }
-    this.deps.store.requestCollaborationMode(key, "plan");
-    await this.deps.submitTask(conversationId, prompt.trim(), userMessageId, "immediate");
+    await this.syncMode(key, { operation: "set", mode: "plan" });
+    await this.deps.submitTask(conversationId, normalizedPrompt, userMessageId, "immediate");
   }
 
   markInterruptedTurn(sessionKeyValue: string, turnId: string): void {
@@ -106,13 +111,24 @@ export class PlanCommandService {
       }
       await this.deps.renderStrictCallbackPage(message, messageWithTitle("Implementing plan."), { inline_keyboard: [] });
       this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
-      this.deps.store.requestCollaborationMode(key, "default");
+      await this.syncMode(key, { operation: "set", mode: "default" });
       this.deps.logger.info("router.plan_callback_implemented", { conversation_id: message.conversationId, session_key: key });
       await this.deps.submitTask(message.conversationId, "Implement the approved plan.", message.messageId, "immediate");
       return;
     }
     await this.dismissReadyPrompt(message);
     this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+  }
+
+  private async syncMode(key: string, update: { operation: "set" | "toggle"; mode?: "default" | "plan" }): Promise<"default" | "plan"> {
+    const current = this.deps.agent.getStatus(key)?.collaborationMode ?? this.deps.store.getCollaborationMode(key);
+    const mode = this.deps.agent.syncThreadCollaborationMode
+      ? await this.deps.agent.syncThreadCollaborationMode(key, current, update)
+      : update.operation === "toggle"
+        ? current === "plan" ? "default" : "plan"
+        : update.mode ?? current;
+    this.deps.store.requestCollaborationMode(key, mode);
+    return mode;
   }
 
   async sendReadyPrompt(sessionKeyValue: string, completedTurnId?: string): Promise<void> {

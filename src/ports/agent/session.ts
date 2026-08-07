@@ -55,6 +55,10 @@ export interface AgentSessionStatus {
   appServerVersion?: string;
   reviewInProgress?: boolean;
   threadGoal?: AgentThreadGoal | null;
+  /** Gateway-only collaboration state projected from the current Gateway epoch. */
+  collaborationMode?: "default" | "plan";
+  collaborationModeApplied?: boolean;
+  relayStateConsistency?: "live" | "resyncing";
 }
 
 export interface StartAgentOptions {

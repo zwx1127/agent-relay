@@ -21,6 +21,8 @@ import type {
   AgentThreadSummary,
   AgentThreadSwitchResult,
 } from "./thread.ts";
+import type { AgentRelayThreadStateUpdate } from "./control.ts";
+import type { AgentCollaborationMode } from "./input.ts";
 
 export interface AgentDriver {
   readonly providerId?: ProviderId;
@@ -50,6 +52,7 @@ export interface AgentDriver {
   listModels?(): Promise<AgentModelSummary[]>;
   listSkills?(workspacePath: string, options?: AgentSkillListOptions): Promise<AgentSkillSummary[]>;
   searchFiles?(workspacePath: string, query: string, options?: AgentFileSearchOptions): Promise<AgentFileSearchResult[]>;
+  syncThreadCollaborationMode?(sessionKey: string, currentMode: AgentCollaborationMode, update: AgentRelayThreadStateUpdate): Promise<AgentCollaborationMode>;
 }
 
 export interface AgentDriverCapabilities {

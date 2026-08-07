@@ -95,6 +95,7 @@ Stopping a session from Relay Home stops only that thread's session and clears t
 - `/help`: show commands.
 - `/review`: review workspace changes.
 - `/plan`: toggle Plan mode for the current Codex thread.
+- `/plan --on` / `/plan --off`: select Plan or Default mode explicitly.
 - `/plan <prompt>`: enter Plan mode and ask Codex to plan first.
 - `Interrupt` on the latest activity card: stop the active turn. Goal cards also provide `Pause`, `Resume`, `Edit`, and `Clear` when applicable.
 - `/resume`: continue a previous thread.

@@ -1,0 +1,218 @@
+import { describe, expect, test } from "bun:test";
+import {
+  GatewayRelayControl,
+  RELAY_CONTROL_COMMAND_METHOD,
+  RELAY_CONTROL_ACK_METHOD,
+  RELAY_CONTROL_HELLO_METHOD,
+  RELAY_CONTROL_PROTOCOL_VERSION,
+  RELAY_CONTROL_RESYNC_METHOD,
+  RELAY_CONTROL_SNAPSHOT_METHOD,
+  RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
+  type RelayControlClient,
+} from "../../src/gateway/relay-control.ts";
+
+interface TestClient extends RelayControlClient {
+  sent: Array<Record<string, unknown>>;
+}
+
+function client(id: string, name: string, threads: string[] = []): TestClient {
+  const sent: Array<Record<string, unknown>> = [];
+  return {
+    data: { id, name, threads: new Set(threads) },
+    sent,
+    socket: { send: (raw) => sent.push(JSON.parse(raw) as Record<string, unknown>) },
+  };
+}
+
+function hello(control: GatewayRelayControl, target: TestClient, id = 1): void {
+  control.handleFrontend(target, {
+    id,
+    method: RELAY_CONTROL_HELLO_METHOD,
+    params: { version: RELAY_CONTROL_PROTOCOL_VERSION, instanceId: `instance-${target.data.id}` },
+  });
+  target.sent.length = 0;
+}
+
+function notifications(target: TestClient, method: string): Array<Record<string, unknown>> {
+  return target.sent.filter((message) => message.method === method);
+}
+
+describe("experimental Relay Gateway control plane", () => {
+  test("keeps thread mode and command snapshots in memory with revisioned envelopes", () => {
+    const origin = client("origin", "agent-relay", ["thread-1"]);
+    const peer = client("peer", "agent-relay", ["thread-1"]);
+    const clients = new Map([[origin.data.id, origin], [peer.data.id, peer]]);
+    const control = new GatewayRelayControl(() => clients.values());
+    hello(control, origin);
+    hello(control, peer);
+
+    control.handleFrontend(origin, {
+      id: 2,
+      method: RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
+      params: { threadId: "thread-1", operation: "set", mode: "plan" },
+    });
+    const state = peer.sent.find((message) => message.method === "agent-relay/control/threadState");
+    expect(state?.params).toMatchObject({ threadId: "thread-1", collaborationMode: "plan", collaborationModeApplied: false });
+
+    const metadata = { version: RELAY_CONTROL_PROTOCOL_VERSION, commandId: "command-1", kind: "review", originToken: "origin-1" };
+    const routed = control.handleFrontend(origin, {
+      id: 3,
+      method: "review/start",
+      params: { threadId: "thread-1", target: { type: "uncommittedChanges" } },
+      relayControl: metadata,
+    });
+    expect(routed.message).not.toHaveProperty("relayControl");
+    control.handleBackend(origin, { id: 3, result: { turn: { id: "turn-1", status: "inProgress" } } });
+    control.handleBackend(origin, {
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } },
+    });
+
+    peer.sent.length = 0;
+    control.sendSnapshot(peer, "thread-1");
+    const snapshot = notifications(peer, RELAY_CONTROL_SNAPSHOT_METHOD).at(-1)?.params as Record<string, unknown>;
+    expect(snapshot).toMatchObject({ gatewayEpoch: control.gatewayEpoch, consistency: "live" });
+    expect(snapshot.threadState).toMatchObject({ collaborationMode: "plan", collaborationModeApplied: false });
+    expect(snapshot.commands).toEqual([expect.objectContaining({ commandId: "command-1", kind: "review", phase: "completed" })]);
+    expect(JSON.stringify(snapshot)).not.toContain("uncommittedChanges");
+    expect(JSON.stringify(snapshot)).not.toContain("origin-1");
+  });
+
+  test("relays side questions and deltas live and restores their full in-memory content", () => {
+    const origin = client("origin", "agent-relay", ["parent"]);
+    const peer = client("peer", "agent-relay", ["parent"]);
+    const clients = new Map([[origin.data.id, origin], [peer.data.id, peer]]);
+    const control = new GatewayRelayControl(() => clients.values());
+    hello(control, origin);
+    hello(control, peer);
+
+    control.handleFrontend(origin, {
+      id: 10,
+      method: "thread/fork",
+      params: { threadId: "parent", ephemeral: true, excludeTurns: true },
+      relayControl: { version: RELAY_CONTROL_PROTOCOL_VERSION, commandId: "side-1", kind: "side", originToken: "side-origin" },
+    });
+    control.handleBackend(origin, { id: 10, result: { thread: { id: "child" } } });
+    control.handleFrontend(origin, {
+      id: 11,
+      method: "turn/start",
+      params: { threadId: "child", input: [{ type: "text", text: "private live question" }] },
+    });
+    control.handleBackend(origin, { id: 11, result: { turn: { id: "side-turn", status: "inProgress" } } });
+    control.handleBackend(origin, {
+      method: "item/agentMessage/delta",
+      params: { threadId: "child", turnId: "side-turn", itemId: "answer", delta: "live answer" },
+    });
+    control.handleBackend(origin, {
+      method: "turn/completed",
+      params: { threadId: "child", turn: { id: "side-turn", status: "completed" } },
+    });
+
+    const live = notifications(peer, RELAY_CONTROL_COMMAND_METHOD).map((message) => message.params as Record<string, unknown>);
+    expect(live).toContainEqual(expect.objectContaining({ commandId: "side-1", content: { type: "side_question", text: "private live question" } }));
+    expect(live).toContainEqual(expect.objectContaining({ commandId: "side-1", content: { type: "side_delta", text: "live answer" } }));
+    expect(live.at(-1)).toMatchObject({ commandId: "side-1", phase: "completed" });
+    expect(live.every((event) => event.gatewayEpoch === control.gatewayEpoch && typeof event.threadRevision === "number")).toBe(true);
+
+    peer.sent.length = 0;
+    control.sendSnapshot(peer, "parent");
+    const snapshot = notifications(peer, RELAY_CONTROL_SNAPSHOT_METHOD).at(-1)?.params;
+    expect(snapshot).toMatchObject({
+      consistency: "live",
+      commands: [expect.objectContaining({ question: "private live question", answer: "live answer", phase: "completed" })],
+    });
+  });
+
+  test("observes supported native operations for Relay peers and ignores unrelated threads", () => {
+    const native = client("native", "codex-desktop", ["thread-1"]);
+    const peer = client("peer", "agent-relay", ["thread-1"]);
+    const unrelated = client("other", "agent-relay", ["thread-2"]);
+    const clients = new Map([[native.data.id, native], [peer.data.id, peer], [unrelated.data.id, unrelated]]);
+    const control = new GatewayRelayControl(() => clients.values());
+    hello(control, peer);
+    hello(control, unrelated);
+
+    control.handleFrontend(native, { id: 20, method: "thread/name/set", params: { threadId: "thread-1", name: "Shared" } });
+    control.handleBackend(native, { id: 20, result: {} });
+
+    const events = notifications(peer, RELAY_CONTROL_COMMAND_METHOD);
+    expect(events).toHaveLength(2);
+    expect(events[0]?.params).toMatchObject({ kind: "rename", phase: "accepted", source: "codex" });
+    expect(events[1]?.params).toMatchObject({ kind: "rename", phase: "completed", source: "codex" });
+    expect(notifications(unrelated, RELAY_CONTROL_COMMAND_METHOD)).toHaveLength(0);
+    expect(native.sent).toHaveLength(0);
+  });
+
+  test("completes lifecycle commands when the native notification precedes the RPC response", () => {
+    const native = client("native", "codex-desktop", ["thread-1"]);
+    const peer = client("peer", "agent-relay", ["thread-1"]);
+    const clients = new Map([[native.data.id, native], [peer.data.id, peer]]);
+    const control = new GatewayRelayControl(() => clients.values());
+    hello(control, peer);
+
+    control.handleFrontend(native, { id: 25, method: "thread/delete", params: { threadId: "thread-1" } });
+    control.handleBackend(native, { method: "thread/deleted", params: { threadId: "thread-1" } });
+    control.handleBackend(native, { id: 25, result: {} });
+
+    const events = notifications(peer, RELAY_CONTROL_COMMAND_METHOD);
+    expect(events).toHaveLength(2);
+    expect(events[0]?.params).toMatchObject({ kind: "delete", phase: "accepted" });
+    expect(events[1]?.params).toMatchObject({ kind: "delete", phase: "completed" });
+  });
+
+  test("keeps an active side command after disconnect and lets the observer complete it", () => {
+    const origin = client("origin", "agent-relay", ["parent"]);
+    const peer = client("peer", "agent-relay", ["parent"]);
+    const clients = new Map([[origin.data.id, origin], [peer.data.id, peer]]);
+    const control = new GatewayRelayControl(() => clients.values());
+    hello(control, origin);
+    hello(control, peer);
+    control.handleFrontend(origin, {
+      id: 30,
+      method: "thread/fork",
+      params: { threadId: "parent", ephemeral: true },
+      relayControl: { version: RELAY_CONTROL_PROTOCOL_VERSION, commandId: "side-disconnect", kind: "side", originToken: "origin-side" },
+    });
+    control.handleBackend(origin, { id: 30, result: { thread: { id: "side-child" } } });
+    control.handleFrontend(origin, { id: 31, method: "turn/start", params: { threadId: "side-child", input: [{ type: "text", text: "keep going" }] } });
+    control.handleBackend(origin, { id: 31, result: { turn: { id: "side-turn", status: "inProgress" } } });
+
+    peer.sent.length = 0;
+    control.clientDisconnected("origin");
+    expect(notifications(peer, RELAY_CONTROL_COMMAND_METHOD)).toHaveLength(0);
+    control.handleObserver({
+      method: "item/agentMessage/delta",
+      params: { threadId: "side-child", turnId: "side-turn", itemId: "answer", delta: "after disconnect" },
+    });
+    control.handleObserver({
+      method: "turn/completed",
+      params: { threadId: "side-child", turn: { id: "side-turn", status: "completed" } },
+    });
+    expect(notifications(peer, RELAY_CONTROL_COMMAND_METHOD).at(-1)?.params).toMatchObject({
+      commandId: "side-disconnect",
+      phase: "completed",
+      answer: "after disconnect",
+    });
+  });
+
+  test("starts a fresh Gateway epoch in native Default mode and supports ACK plus resync", () => {
+    const peer = client("peer", "agent-relay", ["thread-1"]);
+    const control = new GatewayRelayControl(() => [peer]);
+    hello(control, peer);
+
+    control.handleFrontend(peer, {
+      id: 40,
+      method: RELAY_CONTROL_RESYNC_METHOD,
+      params: { threadId: "thread-1" },
+    });
+    const snapshot = notifications(peer, RELAY_CONTROL_SNAPSHOT_METHOD).at(-1)?.params as Record<string, unknown>;
+    expect(snapshot.threadState).toMatchObject({ collaborationMode: "default", collaborationModeApplied: true });
+    expect(peer.sent.at(-1)).toEqual({ id: 40, result: { gatewayEpoch: control.gatewayEpoch, revision: 0 } });
+
+    control.handleFrontend(peer, {
+      method: RELAY_CONTROL_ACK_METHOD,
+      params: { gatewayEpoch: control.gatewayEpoch, threadId: "thread-1", revision: 0 },
+    });
+    expect(peer.data.relayControlAcks?.get("thread-1")).toBe(0);
+  });
+});

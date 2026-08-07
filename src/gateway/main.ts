@@ -9,6 +9,8 @@ import { codexAppServerWebSocketSpawnCommand } from "../providers/agents/codex/s
 import { GatewayLiveEventSequencer, messageThreadId, type GatewayLiveEvent } from "./live-events.ts";
 import { gatewayLogPath, isProcessAlive, readGatewayState, resolveGatewayStatePath, RELAY_GATEWAY_PROTOCOL_VERSION, type RelayGatewayState } from "./state.ts";
 import { defaultGatewayStatePath } from "./control.ts";
+import { GatewayRelayControl } from "./relay-control.ts";
+import { GatewayObserver } from "./observer.ts";
 
 interface GatewayRuntimeConfig {
   codexBin: string;
@@ -25,6 +27,9 @@ export interface GatewayClientData {
   queued: string[];
   threads: Set<string>;
   deliveredSeq: Map<string, number>;
+  relayControlVersion?: number;
+  relayInstanceId?: string;
+  relayControlAcks?: Map<string, number>;
   pendingThreadRequests?: Map<string, PendingThreadRequest>;
 }
 
@@ -66,18 +71,38 @@ async function main(): Promise<void> {
   };
   mkdirSync(dirname(config.statePath), { recursive: true });
   const existing = readGatewayState(config.statePath);
-  if (existing && isProcessAlive(existing.pid) && isProcessAlive(existing.appServerPid)) return;
+  if (existing) {
+    const gatewayAlive = isProcessAlive(existing.pid);
+    const appServerAlive = isProcessAlive(existing.appServerPid);
+    if (gatewayAlive && appServerAlive) return;
+    if (gatewayAlive && !appServerAlive) {
+      throw new Error(`Experimental relay Gateway state is inconsistent: Gateway pid ${existing.pid} is alive but app-server pid ${existing.appServerPid} is not.`);
+    }
+    if (appServerAlive) {
+      try {
+        process.kill(existing.appServerPid, "SIGTERM");
+      } catch {
+        // The orphan may have exited between the liveness check and termination.
+      }
+      await waitForProcessExit(existing.appServerPid, 5_000);
+      if (isProcessAlive(existing.appServerPid)) {
+        throw new Error(`Orphaned Codex app-server pid ${existing.appServerPid} did not exit; refusing to start a split failure domain.`);
+      }
+    }
+  }
   if (existsSync(config.statePath)) unlinkSync(config.statePath);
 
   const lockPath = `${config.statePath}.lock`;
   acquireLock(lockPath);
   let child: ChildProcess | undefined;
   let frontendServer: ReturnType<typeof Bun.serve<GatewayClientData>> | undefined;
+  let observer: GatewayObserver | undefined;
   let stopping = false;
   const clients = new Map<string, ConnectedClient>();
   const pendingRequests = new Map<string, PendingServerRequest>();
   const relayedRequestIds = new Map<string, string>();
   const liveEvents = new GatewayLiveEventSequencer();
+  const relayControl = new GatewayRelayControl(() => clients.values(), (threadId) => observer?.anchor(threadId));
   const startedAt = Date.now();
   const cleanup = (): void => {
     const state = readGatewayState(config.statePath);
@@ -95,6 +120,7 @@ async function main(): Promise<void> {
     stopping = true;
     log(config.logPath, "gateway stopping", { signal, pid: process.pid, appServerPid: child?.pid });
     frontendServer?.stop(true);
+    observer?.stop();
     for (const client of clients.values()) client.data.backend?.close();
     child?.kill(signal);
     cleanup();
@@ -125,18 +151,37 @@ async function main(): Promise<void> {
     if (!stopping) process.exit(code ?? 1);
   });
   if (!child.pid) throw new Error("Codex app-server did not provide a process id.");
+  const watchdog = spawn(process.execPath, [resolve("src/gateway/child-watchdog.ts"), String(process.pid), String(child.pid)], {
+    cwd: process.cwd(),
+    env,
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  watchdog.unref();
   await waitForPort(config.port + 1, 15_000);
+  observer = new GatewayObserver(
+    backendUrl,
+    (message) => relayControl.handleObserver(message),
+    (error) => log(config.logPath, "gateway observer error", { error: error.message }),
+  );
+  await observer.start();
 
   const handleFrontendMessage = (client: ConnectedClient, raw: string): void => {
     const message = parseMessage(raw);
+    let forwardedRaw = raw;
     if (message) {
-      updateClientFromRequest(client.data, message);
-      if (isRpcResponse(message) && routeServerRequestResponse(client.data, message, raw, clients, pendingRequests, relayedRequestIds)) return;
+      const control = relayControl.handleFrontend(client, message);
+      if (control.handled) return;
+      const forwarded = control.message ?? message;
+      forwardedRaw = forwarded === message ? raw : JSON.stringify(forwarded);
+      updateClientFromRequest(client.data, forwarded);
+      if (isRpcResponse(forwarded) && routeServerRequestResponse(client.data, forwarded, forwardedRaw, clients, pendingRequests, relayedRequestIds)) return;
     }
     const backend = client.data.backend;
-    if (backend?.readyState === WebSocket.OPEN) backend.send(raw);
+    if (backend?.readyState === WebSocket.OPEN) backend.send(forwardedRaw);
     else {
-      client.data.queued.push(raw);
+      client.data.queued.push(forwardedRaw);
       if (client.data.queued.length > 1_000) client.socket.close(1013, "Gateway backend queue exceeded");
     }
   };
@@ -148,23 +193,38 @@ async function main(): Promise<void> {
       for (const raw of client.data.queued.splice(0)) backend.send(raw);
     });
     backend.addEventListener("message", (event) => {
+      const frontendConnected = clients.has(client.data.id);
       const raw = typeof event.data === "string" ? event.data : String(event.data);
       const message = parseMessage(raw);
-      if (message) updateClientFromBackend(client.data, message);
+      if (message) {
+        updateClientFromBackend(client.data, message);
+        relayControl.handleBackend(client, message);
+      }
       if (!message) {
-        client.socket.send(raw);
+        if (frontendConnected) client.socket.send(raw);
         return;
       }
       if (handleServerRequestResolved(client.data, message, clients, pendingRequests)) return;
       const liveEvent = liveEvents.sequence(client.data.id, message);
       if (liveEvent) deliverLiveEvent(liveEvent, raw, client, clients);
-      else client.socket.send(raw);
+      else if (frontendConnected) client.socket.send(raw);
       if (isServerRequest(message) && isShareableServerRequest(message.method)) {
         shareServerRequest(client, message, backend, clients, pendingRequests, relayedRequestIds);
       }
+      if (isRpcResponse(message)) {
+        const responseThreadId = messageThreadId(message);
+        if (responseThreadId) {
+          observer?.anchor(responseThreadId);
+          if (frontendConnected) relayControl.sendSnapshot(client, responseThreadId);
+        }
+      }
     });
-    backend.addEventListener("error", () => client.socket.close(1011, "Codex app-server connection failed"));
-    backend.addEventListener("close", () => client.socket.close(1011, "Codex app-server connection closed"));
+    backend.addEventListener("error", () => {
+      if (clients.has(client.data.id)) client.socket.close(1011, "Codex app-server connection failed");
+    });
+    backend.addEventListener("close", () => {
+      if (clients.has(client.data.id)) client.socket.close(1011, "Codex app-server connection closed");
+    });
   };
 
   frontendServer = Bun.serve<GatewayClientData>({
@@ -205,8 +265,17 @@ async function main(): Promise<void> {
         handleFrontendMessage(clients.get(socket.data.id) ?? { data: socket.data, socket }, String(data));
       },
       close(socket) {
-        socket.data.backend?.close();
         clients.delete(socket.data.id);
+        const keepBackendForResponse = relayControl.clientDisconnected(socket.data.id);
+        if (keepBackendForResponse) {
+          setTimeout(() => {
+            socket.data.backend?.close();
+            relayControl.clientBackendClosed(socket.data.id);
+          }, 10_000).unref();
+        } else {
+          socket.data.backend?.close();
+          relayControl.clientBackendClosed(socket.data.id);
+        }
         for (const [key, pending] of pendingRequests) {
           if (pending.originClientId !== socket.data.id) continue;
           pending.resolved = true;
@@ -497,6 +566,11 @@ function waitForPort(port: number, timeoutMs: number): Promise<void> {
     };
     attempt();
   });
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (isProcessAlive(pid) && Date.now() < deadline) await Bun.sleep(50);
 }
 
 function log(path: string, message: string, fields: object): void {
