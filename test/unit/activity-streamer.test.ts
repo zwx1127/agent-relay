@@ -38,6 +38,7 @@ describe("activity streamer lifecycle", () => {
     expect(sent[0]).toContain("Working");
     expect(sent[0]).toContain("Saved work");
     expect(sent[0]).toContain("Existing work");
+    expect(sent[0]).not.toContain("Latest turn snapshot");
 
     await streamer.handle({ type: "activity", sessionKey: "codex:1:demo", threadId: "thread-a", turnId: "turn-a", activity: { kind: "plan", steps: [{ step: "Continue live", status: "inProgress" }] } });
 
@@ -67,6 +68,7 @@ describe("activity streamer lifecycle", () => {
       });
       expect(sent).toHaveLength(1);
       expect(sent[0]).toContain(entry.expected);
+      expect(sent[0]).not.toContain("Latest turn snapshot");
       if (entry.error) expect(sent[0]).toContain("resume boom");
     }
 
@@ -90,6 +92,7 @@ describe("activity streamer lifecycle", () => {
         latestTurn: { id: waitingContext.activeTurnId!, status: "inProgress", activities: [] },
       });
       expect(waitingSent[0]).toContain(waitingCase.expected);
+      expect(waitingSent[0]).not.toContain("Latest turn snapshot");
     }
 
     const idleSent: string[] = [];
@@ -107,6 +110,7 @@ describe("activity streamer lifecycle", () => {
     expect(idleSent).toHaveLength(1);
     expect(idleSent[0]).toContain("Idle");
     expect(idleSent[0]).toContain("No turns yet");
+    expect(idleSent[0]).not.toContain("Latest turn snapshot");
   });
 
   test("no-turn metadata cannot create a card", async () => {

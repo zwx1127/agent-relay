@@ -248,7 +248,7 @@ export class ActivityStreamer {
     if (snapshot?.startedAt !== undefined) state.startedAt = snapshot.startedAt;
     state.durationMs = snapshot?.durationMs;
     state.error = snapshot?.error?.message;
-    state.phaseDetail = snapshot ? "Latest turn snapshot" : "No turns yet";
+    state.phaseDetail = snapshot ? undefined : "No turns yet";
     for (const entry of snapshot?.activities ?? []) this.apply(state, entry.activity, entry.itemId);
 
     if (!snapshot) state.phase = "idle";
