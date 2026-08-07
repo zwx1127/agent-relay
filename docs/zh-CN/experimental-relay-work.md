@@ -17,7 +17,7 @@ EXPERIMENTAL_RELAY_GATEWAY_PORT=18765
 # EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH=/absolute/path/to/gateway-state.json
 ```
 
-Gateway 的运行状态、日志、启动器配置和安装记录默认位于 `~/.agent-relay/experimental-relay-work/`。Relay 仓库内的 `.data` 和 `logs` 与之独立；Relay 的清理和重启不会删除 Gateway 数据。
+Gateway 的运行状态、日志、启动器配置和安装记录默认位于 `~/.agent-relay/experimental-relay-work/`。Relay 仓库内的 `.data` 和 `logs` 与之独立。Relay 重启会清空这些仓库内目录，使 session、task、prompt、UI 状态和 transcript 从干净状态开始；它不会删除 Gateway 数据或 Codex thread 历史，后者仍可通过 `/resume` 恢复。
 
 只需执行一次 setup。它会安装永久 Codex 启动器和客户端环境、初始化持久 `local` 模式，但**不会启动 Gateway**：
 

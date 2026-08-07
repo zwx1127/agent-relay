@@ -17,7 +17,7 @@ EXPERIMENTAL_RELAY_GATEWAY_PORT=18765
 # EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH=/absolute/path/to/gateway-state.json
 ```
 
-Gateway runtime state, logs, launcher configuration, and installation records default to `~/.agent-relay/experimental-relay-work/`. Relay's repository-local `.data` and `logs` directories are independent; Relay cleanup and restart never delete Gateway data.
+Gateway runtime state, logs, launcher configuration, and installation records default to `~/.agent-relay/experimental-relay-work/`. Relay's repository-local `.data` and `logs` directories are independent. Relay restart clears those repository-local directories so sessions, tasks, prompts, UI state, and transcripts start fresh; it never deletes Gateway data or Codex thread history, which remain available through `/resume`.
 
 Run setup once. Setup installs the permanent Codex launcher and client environment, initializes durable `local` mode, and does **not** start Gateway:
 

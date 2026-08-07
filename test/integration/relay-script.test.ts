@@ -86,18 +86,24 @@ describe("relay lifecycle script", () => {
     expect(existsSync(sentinel)).toBe(true);
   });
 
-  unixOnlyTest("experimental relay work restart preserves Relay data", async () => {
+  unixOnlyTest("experimental relay work restart clears Relay data without touching Gateway data", async () => {
     const root = createFixture();
     expectSuccess(runRelay(root, "start"));
     const firstPid = readPid(root);
     const sentinel = join(root, ".data", "relay-work-binding");
-    writeFileSync(sentinel, "keep");
+    const gatewayState = join(root, "gateway-state.json");
+    writeFileSync(sentinel, "stale Relay state");
+    writeFileSync(gatewayState, "independent Gateway state");
 
-    const restart = runRelay(root, "restart", { EXPERIMENTAL_RELAY_WORK_ENABLED: "true" });
+    const restart = runRelay(root, "restart", {
+      EXPERIMENTAL_RELAY_WORK_ENABLED: "true",
+      EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH: gatewayState,
+    });
     expectSuccess(restart);
-    expect(restart.stdout).toContain("preserving Relay data");
+    expect(restart.stdout).toContain("removed ");
     expect(readPid(root)).not.toBe(firstPid);
-    expect(existsSync(sentinel)).toBe(true);
+    expect(existsSync(sentinel)).toBe(false);
+    expect(existsSync(gatewayState)).toBe(true);
   });
 });
 

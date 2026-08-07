@@ -143,18 +143,6 @@ function Show-Usage {
   Write-Line "usage: $name <start|stop|restart|status|clean-data|clean>"
 }
 
-function Test-ExperimentalRelayWorkEnabled {
-  $value = [Environment]::GetEnvironmentVariable("EXPERIMENTAL_RELAY_WORK_ENABLED")
-  if ([string]::IsNullOrWhiteSpace($value)) {
-    $envFile = Join-Path $RootDir ".env"
-    if (Test-Path -LiteralPath $envFile) {
-      $line = Get-Content -LiteralPath $envFile | Where-Object { $_ -match '^\s*EXPERIMENTAL_RELAY_WORK_ENABLED\s*=' } | Select-Object -Last 1
-      if ($line) { $value = ($line -split '=', 2)[1].Trim().Trim('"').Trim("'") }
-    }
-  }
-  return @("1", "true", "yes", "on") -contains ([string]$value).Trim().ToLowerInvariant()
-}
-
 function Start-SleepSeconds {
   param([double]$Seconds)
   if ($Seconds -le 0) {
@@ -485,11 +473,7 @@ function Invoke-RestartWorker {
 
 function Invoke-RestartSequence {
   Stop-Relay
-  if (-not (Test-ExperimentalRelayWorkEnabled)) {
-    Clear-RelayData
-  } else {
-    Write-Line "experimental relay work enabled; preserving Relay data"
-  }
+  Clear-RelayData
   Start-Relay
 }
 

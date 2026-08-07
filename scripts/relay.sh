@@ -17,15 +17,6 @@ usage: $(basename "$0") <start|stop|restart|status|clean-data|clean>
 USAGE
 }
 
-experimental_relay_work_enabled() {
-  local value="${EXPERIMENTAL_RELAY_WORK_ENABLED:-}"
-  if [[ -z "$value" && -f "$ROOT_DIR/.env" ]]; then
-    value="$(sed -nE 's/^[[:space:]]*EXPERIMENTAL_RELAY_WORK_ENABLED[[:space:]]*=[[:space:]]*([^#[:space:]]+).*$/\1/p' "$ROOT_DIR/.env" | tail -n 1 | tr -d "\"'")"
-  fi
-  value="${value,,}"
-  [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
-}
-
 ensure_bun() {
   if ! command -v bun >/dev/null 2>&1; then
     echo "bun is not available on PATH" >&2
@@ -247,11 +238,7 @@ restart_worker() {
 
 restart_sequence() {
   stop
-  if experimental_relay_work_enabled; then
-    echo "experimental relay work enabled; preserving Relay data"
-  else
-    clean_data
-  fi
+  clean_data
   start
 }
 

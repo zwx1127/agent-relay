@@ -76,21 +76,27 @@ if (process.platform === "win32") {
       expect(existsSync(sentinel)).toBe(true);
     }, 15_000);
 
-    test("experimental relay work restart preserves Relay data for Gateway continuity", async () => {
+    test("experimental relay work restart clears Relay data without touching Gateway data", async () => {
       const root = createFixture();
       expectSuccess(runRelay(root, "start"));
       const firstPid = readPid(root);
       const sentinel = join(root, ".data", "relay-work-binding");
-      writeFileSync(sentinel, "keep");
+      const gatewayState = join(root, "gateway-state.json");
+      writeFileSync(sentinel, "stale Relay state");
+      writeFileSync(gatewayState, "independent Gateway state");
 
-      const restart = runRelay(root, "restart", { EXPERIMENTAL_RELAY_WORK_ENABLED: "true" });
+      const restart = runRelay(root, "restart", {
+        EXPERIMENTAL_RELAY_WORK_ENABLED: "true",
+        EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH: gatewayState,
+      });
       expectSuccess(restart);
       await waitFor(() => {
         if (!existsSync(join(root, ".data", "agent-relay.pid"))) return false;
         const nextPid = readPid(root);
-        return nextPid !== firstPid && existsSync(sentinel);
-      }, "experimental restart to preserve data", 10_000);
-      expect(existsSync(sentinel)).toBe(true);
+        return nextPid !== firstPid && !existsSync(sentinel);
+      }, "experimental restart to clear Relay data", 10_000);
+      expect(existsSync(sentinel)).toBe(false);
+      expect(existsSync(gatewayState)).toBe(true);
     }, 15_000);
   });
 }
