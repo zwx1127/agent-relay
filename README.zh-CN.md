@@ -110,7 +110,8 @@ bun run start
 | `/help` | 查看支持的命令。 |
 | `/relay` | 打开 Relay Home。 |
 | `/review` | 审查当前工作区改动。 |
-| `/plan <prompt>` | 用 Plan mode 执行提示词。 |
+| `/plan` | 为当前 Codex 线程切换 Plan mode。 |
+| `/plan <prompt>` | 进入 Plan mode 并执行提示词。 |
 | `/goal <objective>` | 为当前 Codex 线程设置目标。 |
 | `/resume` | 选择最近的 Codex 线程，并立即显示其最新 turn 状态。 |
 | `/side <prompt>` | 发起临时 side conversation。 |

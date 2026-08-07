@@ -22,7 +22,7 @@ export function formatHelpMessage(): RenderedTelegramText {
     "- ", code("/fork"), " - Fork the current thread.\n",
     "- ", code("/side <prompt>"), ", ", code("/btw <prompt>"), " - Ask in an ephemeral side conversation.\n",
     "- ", code("/rename <name>"), " - Rename the current thread.\n",
-    "- ", code("/plan"), " - Enter Plan mode.\n",
+    "- ", code("/plan"), " - Toggle Plan mode.\n",
     "- ", code("/plan <prompt>"), " - Run a prompt in Plan mode.\n",
     "- ", code("/goal"), " - Show the current goal.\n",
     "- ", code("/goal <objective>"), " - Set the current goal.\n",

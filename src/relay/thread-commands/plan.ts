@@ -42,8 +42,9 @@ export class PlanCommandService {
     }
     const key = sessionKey(conversationId, workspace.name);
     if (!prompt.trim()) {
-      this.deps.store.requestCollaborationMode(key, "plan");
-      await this.deps.sendRendered(conversationId, messageWithTitle("Plan mode enabled."));
+      const nextMode = this.deps.store.getCollaborationMode(key) === "plan" ? "default" : "plan";
+      this.deps.store.requestCollaborationMode(key, nextMode);
+      await this.deps.sendRendered(conversationId, messageWithTitle(nextMode === "plan" ? "Plan mode enabled." : "Plan mode disabled."));
       return;
     }
     this.deps.store.requestCollaborationMode(key, "plan");

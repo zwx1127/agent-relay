@@ -968,7 +968,7 @@ describe("relay controller thread commands", () => {
     expect(adapter.reactions.at(-1)).toEqual({ conversationId: "1", messageId: "100", emoji: "😎" });
   });
 
-  test("empty /plan is idempotent and does not toggle back to Default", async () => {
+  test("empty /plan toggles between Plan and Default mode", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -976,17 +976,44 @@ describe("relay controller thread commands", () => {
     store.bindConversation(1, "demo");
 
     await router.handle(textMessage("/plan"));
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
+    expect(store.getPendingCollaborationMode("codex:1:demo")).toBe("plan");
+
+    await router.handle(textMessage("/plan"));
+
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
+    expect(agent.sent).toEqual([]);
+    expect(adapter.sent.slice(-2).map((message) => message.text)).toEqual(["Plan mode enabled.", "Plan mode disabled."]);
+    expect(store.getPendingCollaborationMode("codex:1:demo")).toBe("default");
+
+    await router.handle(textMessage("work after switch"));
+
+    expect(agent.sent.at(-1)).toEqual(sentPrompt("work after switch", "default", true));
+    expect(store.getPendingCollaborationMode("codex:1:demo")).toBeUndefined();
+  });
+
+  test("empty /plan keeps Plan mode while Codex is busy or waiting", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/plan"));
+    const status = agent.getStatus("codex:1:demo")!;
+
+    status.activeTurnId = "turn-active";
+    await router.handle(textMessage("/plan"));
+    status.activeTurnId = undefined;
+    status.waitingForUserInput = true;
+    await router.handle(textMessage("/plan"));
+    status.waitingForUserInput = false;
+    status.waitingForApproval = true;
     await router.handle(textMessage("/plan"));
 
     expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
-    expect(agent.sent).toEqual([]);
-    expect(adapter.sent.slice(-2).map((message) => message.text)).toEqual(["Plan mode enabled.", "Plan mode enabled."]);
     expect(store.getPendingCollaborationMode("codex:1:demo")).toBe("plan");
-
-    await router.handle(textMessage("design after switch"));
-
-    expect(agent.sent.at(-1)).toEqual(sentPrompt("design after switch", "plan", true));
-    expect(store.getPendingCollaborationMode("codex:1:demo")).toBeUndefined();
+    expect(adapter.sent.slice(-3).every((message) => message.text.startsWith("Codex is busy."))).toBe(true);
   });
 
   test("failed Plan turns do not show Plan-ready and preserve the failure", async () => {
@@ -1113,6 +1140,29 @@ describe("relay controller thread commands", () => {
     expect(adapter.edited.at(-1)?.options.replyMarkup).toEqual({ inline_keyboard: [] });
     expect(adapter.edited.at(-1)?.text).not.toContain("Continuing in Plan mode.");
     expect(adapter.edited.at(-1)?.text).not.toContain("Plan ready.");
+  });
+
+  test("plan implement callback expires after empty /plan returns to Default mode", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/plan design this"));
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    agent.getStatus("codex:1:demo")!.activeTurnId = undefined;
+    const planMessage = adapter.sent.at(-1)!;
+    const implementButton = planMessage.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Implement");
+    const sentCount = agent.sent.length;
+
+    await router.handle(textMessage("/plan"));
+    await router.handle(callbackMessage(implementButton!.callback_data, 7, "cb-plan-after-exit", planMessage.messageId));
+
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
+    expect(agent.sent).toHaveLength(sentCount);
+    expect(store.getPendingPrompt("1", planMessage.messageId!)).toBeUndefined();
+    expect(adapter.edited.at(-1)?.text).toContain("Plan action expired.");
   });
 
   test("new thread resets plan mode before the next prompt", async () => {

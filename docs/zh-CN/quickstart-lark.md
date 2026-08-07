@@ -93,7 +93,8 @@ bun run start
 
 - `/help`：查看命令。
 - `/review`：审查工作区改动。
-- `/plan <prompt>`：让 Codex 先制定计划。
+- `/plan`：为当前 Codex 线程切换 Plan mode。
+- `/plan <prompt>`：进入 Plan mode，让 Codex 先制定计划。
 - 最新活动卡上的 `Interrupt`：中断当前 turn。Goal 卡会按状态提供 `Pause`、`Resume`、`Edit`、`Clear`。
 - `/resume`：恢复之前的线程。
 

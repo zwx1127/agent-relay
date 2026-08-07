@@ -111,7 +111,8 @@ Common commands:
 | `/help` | Show supported commands. |
 | `/relay` | Open Relay Home. |
 | `/review` | Review current workspace changes. |
-| `/plan <prompt>` | Run a prompt in Plan mode. |
+| `/plan` | Toggle Plan mode for the current Codex thread. |
+| `/plan <prompt>` | Enter Plan mode and run a prompt. |
 | `/goal <objective>` | Set a goal for the current Codex thread. |
 | `/resume` | Pick a recent Codex thread and immediately show its latest turn state. |
 | `/side <prompt>` | Ask in a temporary side conversation. |
