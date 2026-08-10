@@ -159,6 +159,26 @@ describe("lark adapter", () => {
     }]);
   });
 
+  test("marks normalized Lark rich text as Markdown presentation", async () => {
+    const channel = new FakeLarkChannel();
+    const adapter = adapterWith(channel);
+    const received: unknown[] = [];
+    await adapter.start(async (message) => {
+      received.push(message);
+    });
+
+    await channel.handlers.message?.(normalizedMessage({
+      content: "**Bold** and `code`",
+      rawContentType: "post",
+    }));
+
+    expect(received).toEqual([expect.objectContaining({
+      kind: "message",
+      text: "**Bold** and `code`",
+      textPresentation: { format: "markdown" },
+    })]);
+  });
+
   test("ignores interactive card message echoes", async () => {
     const channel = new FakeLarkChannel();
     const adapter = adapterWith(channel);

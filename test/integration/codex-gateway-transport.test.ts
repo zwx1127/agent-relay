@@ -333,13 +333,20 @@ describe("experimental Codex Gateway transport", () => {
       ]);
 
       outputs.length = 0;
-      await driver.send(first.sessionKey, "from scope one", { collaborationMode: "default" });
+      await driver.send(first.sessionKey, "from scope one", {
+        collaborationMode: "default",
+        clientUserMessageId: "agent-relay:scope-one",
+      });
       await Bun.sleep(20);
       expect(outputs.filter((event) => event.type === "user_message")).toEqual([
-        expect.objectContaining({ sessionKey: second.sessionKey, input: { text: "from scope one" } }),
+        expect.objectContaining({
+          sessionKey: second.sessionKey,
+          input: { text: "from scope one" },
+          clientUserMessageId: "agent-relay:scope-one",
+        }),
       ]);
       const turnStart = received.find((message) => message.method === "turn/start");
-      expect((turnStart?.params as Record<string, unknown>)?.clientUserMessageId).toMatch(/^agent-relay:/);
+      expect((turnStart?.params as Record<string, unknown>)?.clientUserMessageId).toBe("agent-relay:scope-one");
       expect(turnStart?.params as Record<string, unknown>).not.toHaveProperty("collaborationMode");
 
       expect(await driver.sideConversation(first.sessionKey, "side question")).toMatchObject({ message: "side response", threadId: "side-thread" });

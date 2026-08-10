@@ -16,6 +16,7 @@ export function toLarkInboundMessage(message: NormalizedMessage): InboundMessage
       ...larkTopicContext(message),
       photos: imageResources.map(resourceToPhoto),
       ...(captionFromMessage(message) ? { caption: captionFromMessage(message) } : {}),
+      ...(captionFromMessage(message) && larkTextPresentation(message) ? { captionPresentation: larkTextPresentation(message) } : {}),
       ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
       ...(message.rootId ? { replyRootMessageId: message.rootId } : {}),
       date: Math.floor(message.createTime / 1000),
@@ -34,6 +35,7 @@ export function toLarkInboundMessage(message: NormalizedMessage): InboundMessage
       ...larkTopicContext(message),
       audio: { fileId: audioResource.fileKey, fileName: audioResource.fileName ?? `audio-${message.messageId}` },
       ...(captionFromMessage(message) ? { caption: captionFromMessage(message) } : {}),
+      ...(captionFromMessage(message) && larkTextPresentation(message) ? { captionPresentation: larkTextPresentation(message) } : {}),
       ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
       ...(message.rootId ? { replyRootMessageId: message.rootId } : {}),
       date: Math.floor(message.createTime / 1000),
@@ -55,6 +57,7 @@ export function toLarkInboundMessage(message: NormalizedMessage): InboundMessage
         ...(fileResource.fileName ? { fileName: fileResource.fileName } : {}),
       },
       ...(captionFromMessage(message) ? { caption: captionFromMessage(message) } : {}),
+      ...(captionFromMessage(message) && larkTextPresentation(message) ? { captionPresentation: larkTextPresentation(message) } : {}),
       ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
       ...(message.rootId ? { replyRootMessageId: message.rootId } : {}),
       date: Math.floor(message.createTime / 1000),
@@ -72,10 +75,15 @@ export function toLarkInboundMessage(message: NormalizedMessage): InboundMessage
     ...larkMessageContext(message),
     ...larkTopicContext(message),
     text: stripLarkBotMentions(text, message),
+    ...(larkTextPresentation(message) ? { textPresentation: larkTextPresentation(message) } : {}),
     ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
     ...(message.rootId ? { replyRootMessageId: message.rootId } : {}),
     date: Math.floor(message.createTime / 1000),
   };
+}
+
+function larkTextPresentation(message: NormalizedMessage): { format: "markdown" } | undefined {
+  return message.rawContentType === "post" ? { format: "markdown" } : undefined;
 }
 
 function larkTopicContext(message: NormalizedMessage): { topic?: { provider: "lark"; id: string; rootMessageId?: string } } {

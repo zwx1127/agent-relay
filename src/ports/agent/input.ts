@@ -2,6 +2,8 @@ export interface AgentSendOptions {
   collaborationMode?: AgentCollaborationMode;
   /** True only when the user explicitly requested this mode transition. */
   collaborationModeExplicit?: boolean;
+  /** Optional caller-generated identity used to correlate a Gateway user-message echo. */
+  clientUserMessageId?: string;
   attachments?: AgentInputAttachment[];
   /** Compatibility with tasks persisted before structured attachments were added. */
   images?: AgentImageInput[];

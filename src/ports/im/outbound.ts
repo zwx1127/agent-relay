@@ -6,10 +6,14 @@ export type TextParseMode = "HTML";
 export type TextEntityType =
   | "bold"
   | "italic"
+  | "underline"
+  | "strikethrough"
+  | "spoiler"
   | "code"
   | "pre"
   | "text_link"
-  | "blockquote";
+  | "blockquote"
+  | "expandable_blockquote";
 
 export interface TextEntity {
   type: TextEntityType;

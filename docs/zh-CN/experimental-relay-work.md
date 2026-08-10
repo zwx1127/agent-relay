@@ -88,7 +88,8 @@ Gateway 与其 app-server 属于同一故障域：正常停止会终止二者；
 - Relay Home 选择 workspace 只绑定目录，不会让已运行的原生 Codex 进程切换目录，也不会自动绑定 thread。第一条普通消息会新建 thread；只有 `/resume` 会显式加入已有工作。
 - 空闲 workspace 切换只释放 Relay 的旧订阅，不停止 thread；忙碌时会拒绝切换。
 - 活动 turn 期间的普通 IM 输入采用 Codex TUI Enter/Steer 语义。接力工作不增加 Tab/Queue、Gateway 输入锁或 thread 所有权锁。
-- 原生 Codex 客户端或其他 IM scope 新发送的用户消息会实时同步到同一 thread 上的其余 IM scope；Relay 不会把消息回显到来源 scope。文本保持原样；非文本输入只显示附件数量，不会下载或重新上传。
+- 原生 Codex 客户端或其他 IM scope 新发送的用户消息会实时同步到同一 thread 上的其余 IM scope；Relay 不会把消息回显到来源 scope。IM 来源消息会保留 Relay 支持的文本格式，以及对已同步用户消息和助手最终回复的引用关系；同步副本沿用 IM 用户消息样式，不再显示 shared-thread 标题。原生 Codex 消息或缺少本地展示上下文的 IM 消息仍使用 shared-thread 兜底标题。非文本输入只显示附件类型与数量，不会下载或重新上传。
+- 同步引用别名是有界的 Relay 进程内状态。Relay 重启或被引用消息已无映射时，消息仍会同步，但不再附带引用关系。
 - 审批、用户输入和 MCP elicitation 可以出现在关联同一 thread 的全部已连接客户端中。第一份有效响应胜出，resolved 通知会清除重复控件。
 - Relay 支持的 thread 内部操作会作为指令状态同步到同一 thread 的其他 Relay scope，包括 review、compact、rename、Goal 修改、archive/delete、后台终端清理和 Plan 模式状态。操作只在来源客户端执行一次，其他 scope 不会重新执行同步到的指令。
 - `/side` 和 `/btw` 仍使用临时 fork；问题和答案 delta 会同步到其他已加入的 Relay scope，并保留在有界 Gateway 内存快照中，但不进入父 thread transcript。`/new`、`/clear`、`/resume` 和 `/fork` 保持本地导航，不会强迫其他客户端切换 thread。

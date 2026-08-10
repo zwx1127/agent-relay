@@ -20,9 +20,11 @@ import { parseSessionKey } from "../domain/session.ts";
 import type { RelayStore } from "../storage/store.ts";
 import { splitRenderedForTelegram, type RenderedTelegramText } from "../presentation/telegram/text.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
+import type { SendMessageOptions } from "../ports/im.ts";
 import { messageWithTitle } from "./ui/text-parts.ts";
 import { transcriptTextForInput } from "./tasks/input.ts";
 import { PAGE_MAX_CHARS } from "./ui/constants.ts";
+import { renderSharedUserInput, type SharedMessageRegistry } from "./shared-message-registry.ts";
 
 export interface RelayAgentEventRouterDeps {
   logger: Logger;
@@ -43,7 +45,9 @@ export interface RelayAgentEventRouterDeps {
   finalizeOutput(sessionKey: string): Promise<void>;
   sendPlanReadyPrompt(sessionKey: string, turnId?: string): Promise<void>;
   appendSystem(scopeKey: ConversationId, text: string): void;
-  sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText): Promise<{ messageId?: MessageId }>;
+  sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
+  sharedMessages: SharedMessageRegistry;
+  setReplyToMessageId(sessionKey: string, messageId: MessageId): void;
   editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: { messageId: MessageId; disableWebPagePreview?: boolean }): Promise<void>;
   completeTask(sessionKey: string, turnId: string | undefined, status: "done" | "interrupted" | "failed"): Promise<void>;
   markActiveTask(sessionKey: string, status: "blocked" | "running", turnId?: string): Promise<void>;
@@ -255,6 +259,14 @@ export class RelayAgentEventRouter {
     await this.deps.finalizeOutput(event.sessionKey);
     if (!event.input.text && !event.input.attachments?.length && !event.input.images?.length) return;
     const text = transcriptTextForInput(event.input);
+    const context = this.deps.sharedMessages.userMessageContext(event.threadId, event.clientUserMessageId);
+    const referenceKey = context?.referenceKey
+      ?? this.deps.sharedMessages.externalUserReference(event.threadId, event.itemId);
+    const replyToMessageId = this.deps.sharedMessages.messageIdForReference(
+      event.threadId,
+      context?.replyReferenceKey,
+      parsed.scopeKey,
+    );
     this.deps.logger.info("router.shared_user_message", {
       session_key: event.sessionKey,
       thread_id: event.threadId,
@@ -262,6 +274,8 @@ export class RelayAgentEventRouter {
       item_id: event.itemId,
       text_len: event.input.text.length,
       attachment_count: event.input.attachments?.length ?? 0,
+      has_im_context: Boolean(context),
+      reply_mapped: replyToMessageId !== undefined,
     });
     this.deps.store.appendTranscript({
       conversationId: parsed.conversationId,
@@ -271,9 +285,20 @@ export class RelayAgentEventRouter {
       text,
       createdAt: Date.now(),
     });
-    for (const page of splitRenderedForTelegram(messageWithTitle("User \u00b7 shared thread", text), PAGE_MAX_CHARS)) {
-      await this.deps.sendRendered(parsed.scopeKey, page);
+    const rendered = context
+      ? renderSharedUserInput(event.input, context.presentation)
+      : messageWithTitle("User \u00b7 shared thread", text);
+    let lastMessageId: MessageId | undefined;
+    for (const [index, page] of splitRenderedForTelegram(rendered, PAGE_MAX_CHARS).entries()) {
+      const result = await this.deps.sendRendered(parsed.scopeKey, page, {
+        ...(index === 0 && replyToMessageId !== undefined ? { replyToMessageId } : {}),
+      });
+      if (result.messageId !== undefined) {
+        lastMessageId = result.messageId;
+        if (referenceKey) this.deps.sharedMessages.registerAlias(event.threadId, referenceKey, parsed.scopeKey, result.messageId);
+      }
     }
+    if (lastMessageId !== undefined) this.deps.setReplyToMessageId(event.sessionKey, lastMessageId);
   }
 
   private async handleRequestResolved(event: AgentServerRequestResolvedEvent): Promise<void> {

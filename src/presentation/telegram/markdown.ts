@@ -125,6 +125,28 @@ function renderInlineMarkdown(output: TelegramTextBuilder, value: string): void 
       continue;
     }
 
+    if (value.startsWith("~~", index)) {
+      const end = value.indexOf("~~", index + 2);
+      if (end > index + 2) {
+        const start = output.length;
+        renderInlineMarkdown(output, value.slice(index + 2, end));
+        output.entity({ type: "strikethrough", offset: start, length: output.length - start });
+        index = end + 2;
+        continue;
+      }
+    }
+
+    if (value.startsWith("<u>", index)) {
+      const end = value.indexOf("</u>", index + 3);
+      if (end > index + 3) {
+        const start = output.length;
+        renderInlineMarkdown(output, value.slice(index + 3, end));
+        output.entity({ type: "underline", offset: start, length: output.length - start });
+        index = end + 4;
+        continue;
+      }
+    }
+
     const boldMarker = value.startsWith("**", index) ? "**" : value.startsWith("__", index) ? "__" : undefined;
     if (boldMarker) {
       const end = value.indexOf(boldMarker, index + boldMarker.length);

@@ -1,5 +1,6 @@
 import type { ConversationId, MessageId, UserId } from "../../domain/ids.ts";
 import type { ImTopicContext } from "../../domain/scope.ts";
+import type { TextEntity } from "./outbound.ts";
 
 export interface InboundMediaFile {
   fileId: string;
@@ -38,6 +39,12 @@ export interface InboundMention {
   isBot?: boolean;
 }
 
+export interface InboundTextPresentation {
+  /** Plain text may still carry provider-native entities; Markdown is parsed only when the provider normalized rich text to Markdown. */
+  format: "plain" | "markdown";
+  entities?: TextEntity[];
+}
+
 export interface InboundMessageContext {
   conversationType?: ConversationType;
   /** Group messages without a direct bot mention are ignored before authorization checks. */
@@ -57,6 +64,7 @@ export interface MediaInboundMessage extends InboundMessageContext {
   conversationId: ConversationId;
   userId: UserId;
   caption?: string;
+  captionPresentation?: InboundTextPresentation;
   photos: InboundMediaFile[];
   /** Provider-native album/group id; messages with the same id are buffered briefly and submitted together. */
   mediaGroupId?: string;
@@ -72,6 +80,7 @@ export interface FileInboundMessage extends InboundMessageContext {
   userId: UserId;
   file: InboundDocumentFile;
   caption?: string;
+  captionPresentation?: InboundTextPresentation;
   replyToMessageId?: MessageId;
   date?: number;
 }
@@ -84,6 +93,7 @@ export interface AudioInboundMessage extends InboundMessageContext {
   userId: UserId;
   audio: InboundDocumentFile;
   caption?: string;
+  captionPresentation?: InboundTextPresentation;
   durationSeconds?: number;
   replyToMessageId?: MessageId;
   date?: number;
@@ -96,6 +106,7 @@ export interface TextInboundMessage extends InboundMessageContext {
   conversationId: ConversationId;
   userId: UserId;
   text: string;
+  textPresentation?: InboundTextPresentation;
   replyToMessageId?: MessageId;
   date?: number;
 }

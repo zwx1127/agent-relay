@@ -55,6 +55,7 @@ export interface AgentUserMessageEvent {
   threadId: string;
   turnId?: string;
   itemId?: string;
+  clientUserMessageId?: string;
 }
 
 export interface AgentServerRequestResolvedEvent {

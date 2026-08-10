@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { sessionKey } from "../../src/domain/session.ts";
 import type { AgentRelayControlSnapshotEvent } from "../../src/ports/agent.ts";
 import { workspaceCallbackToken } from "../../src/relay/ui/callback-data.ts";
-import { callbackMessage, cleanupRelayFixtures, relayFixture, textMessage } from "../support/relay-fixture.ts";
+import { callbackMessage, cleanupRelayFixtures, relayFixture, textMessage, waitForStreamFlush } from "../support/relay-fixture.ts";
 
 afterEach(cleanupRelayFixtures);
 
@@ -22,6 +22,18 @@ function addWorkspace(fixture: ReturnType<typeof experimentalFixture>, name: str
   mkdirSync(path);
   fixture.store.upsertWorkspace({ name, path, createdAt: 2 });
   return path;
+}
+
+async function attachSharedScopes(fixture: ReturnType<typeof experimentalFixture>) {
+  const { agent, store, path } = fixture;
+  store.bindConversation("2", "demo");
+  const firstKey = sessionKey("1", "demo");
+  const secondKey = sessionKey("2", "demo");
+  const first = await agent.start({ conversationId: "1", scopeKey: "1", workspaceName: "demo", workspacePath: path, threadId: "shared-thread" });
+  const second = await agent.start({ conversationId: "2", scopeKey: "2", workspaceName: "demo", workspacePath: path, threadId: "shared-thread" });
+  store.markSessionStarted(firstKey, "1", "demo", 1, first.threadId, "1");
+  store.markSessionStarted(secondKey, "2", "demo", 1, second.threadId, "2");
+  return { firstKey, secondKey };
 }
 
 function selectWorkspace(name: string, callbackQueryId = `select-${name}`) {
@@ -297,6 +309,168 @@ describe("experimental relay work behavior", () => {
       role: "user",
       text: "message from Codex Desktop\n[1 image, 1 audio attached]\n",
     });
+  });
+
+  test("mirrors IM formatting and user reply chains without the shared-thread title", async () => {
+    const fixture = experimentalFixture();
+    const { router, adapter, agent } = fixture;
+    const { firstKey, secondKey } = await attachSharedScopes(fixture);
+
+    await router.handle({
+      kind: "message",
+      id: "11",
+      messageId: "11",
+      conversationId: "1",
+      userId: "7",
+      text: "Bold and code",
+      textPresentation: {
+        format: "plain",
+        entities: [
+          { type: "bold", offset: 0, length: 4 },
+          { type: "code", offset: 9, length: 4 },
+        ],
+      },
+    });
+    const firstClientId = agent.sent.at(-1)?.options?.clientUserMessageId;
+    expect(firstClientId).toMatch(/^agent-relay:/);
+    await router.handleAgentOutput({
+      type: "user_message",
+      sessionKey: secondKey,
+      threadId: "shared-thread",
+      turnId: "turn-one",
+      itemId: "item-one",
+      clientUserMessageId: firstClientId,
+      input: { text: "Bold and code" },
+    });
+    const firstCopy = adapter.sent.at(-1)!;
+    expect(firstCopy.conversationId).toBe("2");
+    expect(firstCopy.text).toBe("Bold and code");
+    expect(firstCopy.text).not.toContain("User · shared thread");
+    expect(firstCopy.options?.entities).toEqual([
+      { type: "bold", offset: 0, length: 4 },
+      { type: "code", offset: 9, length: 4 },
+    ]);
+
+    await router.handle({
+      kind: "message",
+      id: "12",
+      messageId: "12",
+      conversationId: "1",
+      userId: "7",
+      text: "follow up",
+      replyToMessageId: "11",
+    });
+    const replyClientId = agent.sent.at(-1)?.options?.clientUserMessageId;
+    await router.handleAgentOutput({
+      type: "user_message",
+      sessionKey: secondKey,
+      threadId: "shared-thread",
+      turnId: "turn-two",
+      itemId: "item-two",
+      clientUserMessageId: replyClientId,
+      input: { text: "follow up" },
+    });
+    expect(adapter.sent.at(-1)?.options?.replyToMessageId).toBe(firstCopy.messageId);
+
+    await router.handle({
+      kind: "message",
+      id: "21",
+      messageId: "21",
+      conversationId: "2",
+      userId: "7",
+      text: "reply from the mirror",
+      replyToMessageId: firstCopy.messageId,
+    });
+    const reverseClientId = agent.sent.at(-1)?.options?.clientUserMessageId;
+    await router.handleAgentOutput({
+      type: "user_message",
+      sessionKey: firstKey,
+      threadId: "shared-thread",
+      turnId: "turn-three",
+      itemId: "item-three",
+      clientUserMessageId: reverseClientId,
+      input: { text: "reply from the mirror" },
+    });
+    expect(adapter.sent.at(-1)?.conversationId).toBe("1");
+    expect(adapter.sent.at(-1)?.options?.replyToMessageId).toBe("11");
+  });
+
+  test("summarizes IM attachments as text without copying their payloads", async () => {
+    const fixture = experimentalFixture();
+    const { router, adapter, agent } = fixture;
+    const { secondKey } = await attachSharedScopes(fixture);
+
+    await router.handle({
+      kind: "file",
+      id: "41",
+      messageId: "41",
+      conversationId: "1",
+      userId: "7",
+      caption: "inspect this",
+      file: { fileId: "file-41", fileName: "report.pdf", mimeType: "application/pdf", fileSize: 12 },
+    });
+    const sent = agent.sent.at(-1)!;
+    await router.handleAgentOutput({
+      type: "user_message",
+      sessionKey: secondKey,
+      threadId: "shared-thread",
+      turnId: "file-turn",
+      itemId: "file-item",
+      clientUserMessageId: sent.options?.clientUserMessageId,
+      input: { text: sent.text, attachments: sent.options?.attachments },
+    });
+
+    expect(adapter.sent.at(-1)?.text).toBe("inspect this\n[1 file attached]");
+    expect(adapter.photos).toHaveLength(0);
+    expect(adapter.files).toHaveLength(0);
+  });
+
+  test("maps assistant replies across scopes and makes mirrored input the local reply target", async () => {
+    const fixture = experimentalFixture();
+    const { router, adapter, agent } = fixture;
+    const { firstKey, secondKey } = await attachSharedScopes(fixture);
+
+    await router.handle({ kind: "message", id: "31", messageId: "31", conversationId: "1", userId: "7", text: "start" });
+    const clientUserMessageId = agent.sent.at(-1)?.options?.clientUserMessageId;
+    await router.handleAgentOutput({
+      type: "user_message",
+      sessionKey: secondKey,
+      threadId: "shared-thread",
+      turnId: "answer-turn",
+      itemId: "start-item",
+      clientUserMessageId,
+      input: { text: "start" },
+    });
+    const mirroredUserMessageId = adapter.sent.at(-1)?.messageId;
+
+    await router.handleAgentOutput({ type: "message", sessionKey: firstKey, chunk: "answer", turnId: "answer-turn", itemId: "answer-item" });
+    await router.handleAgentOutput({ type: "message", sessionKey: secondKey, chunk: "answer", turnId: "answer-turn", itemId: "answer-item" });
+    await waitForStreamFlush();
+    const firstAnswer = adapter.sent.find((message) => message.conversationId === "1" && message.text === "answer");
+    const secondAnswer = adapter.sent.find((message) => message.conversationId === "2" && message.text === "answer");
+    expect(firstAnswer?.options?.replyToMessageId).toBe("31");
+    expect(secondAnswer?.options?.replyToMessageId).toBe(mirroredUserMessageId);
+
+    await router.handle({
+      kind: "message",
+      id: "32",
+      messageId: "32",
+      conversationId: "1",
+      userId: "7",
+      text: "about that answer",
+      replyToMessageId: firstAnswer?.messageId,
+    });
+    const replyClientId = agent.sent.at(-1)?.options?.clientUserMessageId;
+    await router.handleAgentOutput({
+      type: "user_message",
+      sessionKey: secondKey,
+      threadId: "shared-thread",
+      turnId: "next-turn",
+      itemId: "reply-item",
+      clientUserMessageId: replyClientId,
+      input: { text: "about that answer" },
+    });
+    expect(adapter.sent.at(-1)?.options?.replyToMessageId).toBe(secondAnswer?.messageId);
   });
 
   test("hydrates shared Relay state and renders live side conversations without changing the transcript", async () => {

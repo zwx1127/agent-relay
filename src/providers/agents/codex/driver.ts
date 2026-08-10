@@ -360,7 +360,9 @@ export class CodexDriver implements AgentDriver {
     const collaborationMode = options?.collaborationMode && (!gateway || options.collaborationModeExplicit)
       ? collaborationModePayload(running.status, options.collaborationMode, this.defaultModel)
       : undefined;
-    const clientUserMessageId = this.usesGateway() ? `agent-relay:${randomUUID()}` : undefined;
+    const clientUserMessageId = this.usesGateway()
+      ? options?.clientUserMessageId ?? `agent-relay:${randomUUID()}`
+      : undefined;
     if (clientUserMessageId) this.registerUserMessageOrigin(clientUserMessageId, key);
     const originParams = clientUserMessageId ? { clientUserMessageId } : {};
     const params = running.status.activeTurnId
@@ -1789,6 +1791,7 @@ export class CodexDriver implements AgentDriver {
         threadId,
         ...(turnId ? { turnId } : {}),
         itemId,
+        ...(clientId ? { clientUserMessageId: clientId } : {}),
       });
     }
   }

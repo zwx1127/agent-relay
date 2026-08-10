@@ -26,6 +26,12 @@ function renderEntity(value: string, entity: TextEntity): string {
       return `**${escapeMarkdown(value)}**`;
     case "italic":
       return `*${escapeMarkdown(value)}*`;
+    case "underline":
+      return escapeMarkdown(value);
+    case "strikethrough":
+      return `~~${escapeMarkdown(value)}~~`;
+    case "spoiler":
+      return escapeMarkdown(value);
     case "code":
       return inlineCode(value);
     case "pre":
@@ -33,6 +39,7 @@ function renderEntity(value: string, entity: TextEntity): string {
     case "text_link":
       return entity.url ? `[${escapeLinkLabel(value)}](${entity.url})` : escapeMarkdown(value);
     case "blockquote":
+    case "expandable_blockquote":
       return value
         .split("\n")
         .map((line) => `> ${escapeMarkdown(line)}`)

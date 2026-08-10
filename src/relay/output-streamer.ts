@@ -17,6 +17,7 @@ export interface OutputStreamerDeps {
   store: Pick<RelayStore, "setPagedOutput" | "getPagedOutput" | "deletePagedOutput">;
   logger: Logger;
   getReplyToMessageId(sessionKey: string): MessageId | undefined;
+  onMessageRendered?(sessionKey: string, turnId: string | undefined, messageId: MessageId): void;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
   editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: Omit<EditMessageTextOptions, "entities" | "parseMode">): Promise<void>;
   renderCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
@@ -154,6 +155,7 @@ export class OutputStreamer {
             disableWebPagePreview: true,
           });
           this.markFlushed(sessionKeyValue, snapshotText);
+          this.deps.onMessageRendered?.(sessionKeyValue, state.turnId, state.messageId);
           state.finalPageRendered = false;
           return;
         } catch (error) {
@@ -169,6 +171,7 @@ export class OutputStreamer {
         disableWebPagePreview: true,
       });
       state.messageId = result.messageId;
+      if (result.messageId !== undefined) this.deps.onMessageRendered?.(sessionKeyValue, state.turnId, result.messageId);
       this.markFlushed(sessionKeyValue, snapshotText);
       state.finalPageRendered = false;
       return;
@@ -197,6 +200,7 @@ export class OutputStreamer {
             disableWebPagePreview: true,
           });
           this.markFlushed(sessionKeyValue, snapshotText);
+          this.deps.onMessageRendered?.(sessionKeyValue, state.turnId, state.messageId);
           state.finalPageRendered = final;
           return;
         } catch (error) {
@@ -213,6 +217,7 @@ export class OutputStreamer {
         disableWebPagePreview: true,
       });
       state.messageId = result.messageId;
+      if (result.messageId !== undefined) this.deps.onMessageRendered?.(sessionKeyValue, state.turnId, result.messageId);
       this.markFlushed(sessionKeyValue, snapshotText);
       state.finalPageRendered = final;
     }

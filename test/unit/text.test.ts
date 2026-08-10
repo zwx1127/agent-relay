@@ -40,12 +40,13 @@ describe("text utilities", () => {
       "- **Changed** `src/app.ts`",
       "> quoted",
       "See [docs](https://example.com/docs).",
+      "~~removed~~ and <u>underlined</u>",
     ].join("\n"));
 
     expect(rendered.text).toContain("Summary");
     expect(rendered.text).toContain("• Changed src/app.ts");
     expect(rendered.text).toContain("quoted");
-    expect(rendered.entities.map((entity) => entity.type)).toEqual(["bold", "bold", "code", "blockquote", "text_link"]);
+    expect(rendered.entities.map((entity) => entity.type)).toEqual(["bold", "bold", "code", "blockquote", "text_link", "strikethrough", "underline"]);
   });
 
   test("renders fenced code blocks without fence marker spacing", () => {

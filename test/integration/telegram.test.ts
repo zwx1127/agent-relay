@@ -121,6 +121,36 @@ describe("telegram adapter", () => {
     expect(document).toMatchObject({ kind: "audio", caption: "transcribe", audio: { fileId: "audio-doc", fileName: "clip.mp3", mimeType: "audio/mpeg" } });
   });
 
+  test("preserves supported text entities after removing a bot mention", () => {
+    const adapter = new TelegramAdapter("token", async () => Response.json({ ok: true, result: [] }), noopLogger, {
+      botUsername: "RelayBot",
+    });
+    const inbound = (adapter as any).toInboundMessage({
+      update_id: 1,
+      message: {
+        message_id: 9,
+        date: 1,
+        text: "@RelayBot 😀bold",
+        entities: [
+          { type: "mention", offset: 0, length: 9 },
+          { type: "bold", offset: 12, length: 4 },
+        ],
+        chat: { id: 2, type: "group" },
+        from: { id: 3 },
+      },
+    });
+
+    expect(inbound).toMatchObject({
+      kind: "message",
+      text: "😀bold",
+      mentionedBot: true,
+      textPresentation: {
+        format: "plain",
+        entities: [{ type: "bold", offset: 2, length: 4 }],
+      },
+    });
+  });
+
   test("marks and strips telegram bot mentions in group text", async () => {
     const adapter = new TelegramAdapter("token", async () => Response.json({ ok: true, result: [] }), noopLogger, {
       botUsername: "relay_bot",

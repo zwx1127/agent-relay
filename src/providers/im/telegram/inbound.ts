@@ -1,4 +1,4 @@
-import type { InboundMessage } from "../../../ports/im.ts";
+import type { InboundMessage, TextEntity, TextEntityType } from "../../../ports/im.ts";
 
 export interface TelegramUpdate {
   update_id: number;
@@ -31,6 +31,8 @@ interface TelegramMessageEntity {
   type: "mention" | "text_mention" | "bot_command" | string;
   offset: number;
   length: number;
+  url?: string;
+  language?: string;
   user?: { id: number; is_bot?: boolean; username?: string; first_name?: string };
 }
 
@@ -53,6 +55,7 @@ export function toTelegramInboundMessage(update: TelegramUpdate, botUsername: st
       conversationId: String(message.chat.id),
       userId: String(message.from.id),
       text: mention.text,
+      ...(mention.presentation ? { textPresentation: mention.presentation } : {}),
       ...mention.context,
       ...(topic ? { topic } : {}),
       ...(message.reply_to_message ? { replyToMessageId: String(message.reply_to_message.message_id) } : {}),
@@ -70,6 +73,7 @@ export function toTelegramInboundMessage(update: TelegramUpdate, botUsername: st
       conversationId: String(message.chat.id),
       userId: String(message.from.id),
       ...(mention.text ? { caption: mention.text } : {}),
+      ...(mention.text && mention.presentation ? { captionPresentation: mention.presentation } : {}),
       ...mention.context,
       ...(topic ? { topic } : {}),
       photos: message.photo.map((photo) => ({
@@ -96,6 +100,7 @@ export function toTelegramInboundMessage(update: TelegramUpdate, botUsername: st
       conversationId: String(message.chat.id),
       userId: String(message.from.id),
       ...(mention.text ? { caption: mention.text } : {}),
+      ...(mention.text && mention.presentation ? { captionPresentation: mention.presentation } : {}),
       ...mention.context,
       ...(topic ? { topic } : {}),
       audio: {
@@ -121,6 +126,7 @@ export function toTelegramInboundMessage(update: TelegramUpdate, botUsername: st
       conversationId: String(message.chat.id),
       userId: String(message.from.id),
       ...(mention.text ? { caption: mention.text } : {}),
+      ...(mention.text && mention.presentation ? { captionPresentation: mention.presentation } : {}),
       ...mention.context,
       ...(topic ? { topic } : {}),
       file: {
@@ -158,7 +164,11 @@ function mentionContextForTelegram(
   entities: TelegramMessageEntity[] | undefined,
   chatType: TelegramChatType | undefined,
   botUsername: string | undefined,
-): { text: string; context: { conversationType?: "direct" | "group" | "unknown"; mentionedBot?: boolean; mentionAll?: boolean; mentions?: Array<{ label: string; userId?: string; isBot?: boolean }> } } {
+): {
+  text: string;
+  presentation?: { format: "plain"; entities: TextEntity[] };
+  context: { conversationType?: "direct" | "group" | "unknown"; mentionedBot?: boolean; mentionAll?: boolean; mentions?: Array<{ label: string; userId?: string; isBot?: boolean }> };
+} {
   const conversationType: "direct" | "group" | "unknown" | undefined = chatType === "private" ? "direct" : chatType === "group" || chatType === "supergroup" ? "group" : chatType ? "unknown" : undefined;
   const mentions = (entities ?? [])
     .filter((entity) => entity.type === "mention" || entity.type === "text_mention")
@@ -172,13 +182,17 @@ function mentionContextForTelegram(
     });
   const bot = normalizeBotUsername(botUsername);
   const botMentionEntities = bot ? (entities ?? []).filter((entity) => entityMentionsBot(text, entity, bot)) : [];
-  const stripped = stripBotMentions(text, botMentionEntities);
+  const stripped = stripBotMentions(text, entities ?? [], botMentionEntities);
   const context: { conversationType?: "direct" | "group" | "unknown"; mentionedBot?: boolean; mentions?: Array<{ label: string; userId?: string; isBot?: boolean }> } = {
     ...(conversationType ? { conversationType } : {}),
     ...(conversationType === "group" ? { mentionedBot: botMentionEntities.length > 0 } : {}),
     ...(mentions.length > 0 ? { mentions } : {}),
   };
-  return { text: stripped, context };
+  return {
+    text: stripped.text,
+    ...(stripped.entities.length > 0 ? { presentation: { format: "plain", entities: stripped.entities } } : {}),
+    context,
+  };
 }
 
 function entityMentionsBot(text: string, entity: TelegramMessageEntity, botUsername: string): boolean {
@@ -197,18 +211,67 @@ function isStandaloneMentionToken(text: string, entity: TelegramMessageEntity): 
   return (!before || /\s/.test(before)) && (!after || /\s/.test(after));
 }
 
-function stripBotMentions(text: string, entities: TelegramMessageEntity[]): string {
-  let next = text;
-  for (const entity of [...entities].sort((a, b) => b.offset - a.offset)) {
-    const value = next.slice(entity.offset, entity.offset + entity.length);
-    if (entity.type === "bot_command") {
-      const atIndex = value.indexOf("@");
-      if (atIndex >= 0) next = `${next.slice(0, entity.offset + atIndex)}${next.slice(entity.offset + entity.length)}`;
-      continue;
-    }
-    next = `${next.slice(0, entity.offset)}${next.slice(entity.offset + entity.length)}`;
+function stripBotMentions(
+  text: string,
+  entities: TelegramMessageEntity[],
+  botMentionEntities: TelegramMessageEntity[],
+): { text: string; entities: TextEntity[] } {
+  const deleted = new Array<boolean>(text.length).fill(false);
+  const botEntities = new Set(botMentionEntities);
+  for (const entity of botMentionEntities) {
+    const start = clampOffset(entity.offset, text.length);
+    const end = clampOffset(entity.offset + entity.length, text.length);
+    const value = text.slice(start, end);
+    const deleteFrom = entity.type === "bot_command" && value.includes("@")
+      ? start + value.indexOf("@")
+      : start;
+    for (let index = deleteFrom; index < end; index += 1) deleted[index] = true;
   }
-  return next.trim();
+
+  const boundaries = new Array<number>(text.length + 1).fill(0);
+  let withoutBot = "";
+  for (let index = 0; index < text.length; index += 1) {
+    if (!deleted[index]) withoutBot += text[index];
+    boundaries[index + 1] = withoutBot.length;
+  }
+  const leadingTrim = withoutBot.length - withoutBot.trimStart().length;
+  const normalized = withoutBot.trim();
+  const normalizedEnd = leadingTrim + normalized.length;
+  const normalizedEntities = entities.flatMap((entity): TextEntity[] => {
+    if (botEntities.has(entity) || !isTextEntityType(entity.type)) return [];
+    const originalStart = clampOffset(entity.offset, text.length);
+    const originalEnd = clampOffset(entity.offset + entity.length, text.length);
+    const mappedStart = boundaries[originalStart] ?? 0;
+    const mappedEnd = boundaries[originalEnd] ?? mappedStart;
+    const clippedStart = Math.max(mappedStart, leadingTrim);
+    const clippedEnd = Math.min(mappedEnd, normalizedEnd);
+    if (clippedEnd <= clippedStart) return [];
+    return [{
+      type: entity.type,
+      offset: clippedStart - leadingTrim,
+      length: clippedEnd - clippedStart,
+      ...(entity.url ? { url: entity.url } : {}),
+      ...(entity.language ? { language: entity.language } : {}),
+    }];
+  });
+  return { text: normalized, entities: normalizedEntities };
+}
+
+function clampOffset(value: number, textLength: number): number {
+  return Math.max(0, Math.min(textLength, Number.isFinite(value) ? Math.floor(value) : 0));
+}
+
+function isTextEntityType(value: string): value is TextEntityType {
+  return value === "bold"
+    || value === "italic"
+    || value === "underline"
+    || value === "strikethrough"
+    || value === "spoiler"
+    || value === "code"
+    || value === "pre"
+    || value === "text_link"
+    || value === "blockquote"
+    || value === "expandable_blockquote";
 }
 
 function telegramTopic(messageThreadId: number | undefined): { provider: "telegram"; id: string } | undefined {

@@ -26,6 +26,11 @@ export function taskInputFromTask(task: RelayTask): AgentTaskInput {
 }
 
 export function transcriptTextForInput(input: AgentTaskInput): string {
+  const summary = attachmentSummaryForInput(input);
+  return `${input.text}\n${summary ? `[${summary} attached]\n` : ""}`;
+}
+
+export function attachmentSummaryForInput(input: AgentTaskInput): string {
   const counts = new Map<string, number>();
   for (const attachment of input.attachments ?? []) {
     const label = attachment.type === "localImage" || attachment.type === "image"
@@ -39,8 +44,7 @@ export function transcriptTextForInput(input: AgentTaskInput): string {
   }
   const legacyImageCount = input.images?.length ?? 0;
   if (legacyImageCount > 0) counts.set("image", (counts.get("image") ?? 0) + legacyImageCount);
-  const summary = [...counts.entries()].map(([label, count]) => `${count} ${label}${count === 1 ? "" : "s"}`).join(", ");
-  return `${input.text}\n${summary ? `[${summary} attached]\n` : ""}`;
+  return [...counts.entries()].map(([label, count]) => `${count} ${label}${count === 1 ? "" : "s"}`).join(", ");
 }
 
 function parseAttachment(value: unknown): AgentInputAttachment | undefined {

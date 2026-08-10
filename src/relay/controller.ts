@@ -44,6 +44,7 @@ import { RelayMessageRenderer } from "./rendering.ts";
 import { RelaySessionService } from "./session-service.ts";
 import { RelayAgentEventRouter } from "./agent-event-router.ts";
 import { RelayCapabilityService } from "./capability-service.ts";
+import { SharedMessageRegistry } from "./shared-message-registry.ts";
 
 interface InboundRoute {
   scopeKey: string;
@@ -66,6 +67,7 @@ export class RelayController {
   private readonly sessionService: RelaySessionService;
   private readonly agentEvents: RelayAgentEventRouter;
   private readonly capabilityService: RelayCapabilityService;
+  private readonly sharedMessages: SharedMessageRegistry;
   // IM providers can deliver callbacks, text, and media concurrently. Serializing
   // per conversation keeps prompt state, task state, and home-message edits ordered.
   private readonly conversationQueue = new ConversationQueue();
@@ -73,10 +75,16 @@ export class RelayController {
   constructor(private readonly deps: RelayControllerDeps) {
     this.logger = deps.logger ?? noopLogger;
     this.renderer = new RelayMessageRenderer(deps.adapter, this.logger);
+    this.sharedMessages = new SharedMessageRegistry(deps.config.experimentalRelayWorkEnabled);
     this.outputStreamer = new OutputStreamer({
       store: deps.store,
       logger: this.logger,
       getReplyToMessageId: (sessionKeyValue) => this.lastUserMessageIds.get(sessionKeyValue),
+      onMessageRendered: (sessionKeyValue, turnId, messageId) => {
+        const parsed = parseSessionKey(sessionKeyValue);
+        const threadId = deps.agent.getStatus(sessionKeyValue)?.threadId ?? deps.store.getSession(sessionKeyValue)?.thread_id ?? undefined;
+        if (parsed) this.sharedMessages.registerAssistantMessage(threadId, turnId, parsed.scopeKey, messageId);
+      },
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
       editRendered: (conversationId, rendered, options) => this.editRendered(conversationId, rendered, options),
       renderCallbackPage: (message, body, replyMarkup) => this.renderCallbackPage(message, body, replyMarkup),
@@ -120,6 +128,8 @@ export class RelayController {
           deps.agent.getStatus(sessionKeyValue)?.activeTurnId,
         );
       },
+      prepareSharedUserMessage: (threadId, scopeKey, messageId, text) => this.sharedMessages.prepareUserMessage(threadId, scopeKey, messageId, text),
+      discardSharedUserMessage: (clientUserMessageId) => this.sharedMessages.discardUserMessage(clientUserMessageId),
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
     });
     this.workspaceFlow = new WorkspaceFlow({
@@ -213,7 +223,16 @@ export class RelayController {
       finalizeOutput: (sessionKeyValue) => this.finalizeSessionOutput(sessionKeyValue),
       sendPlanReadyPrompt: (sessionKeyValue, turnId) => this.threadCommands.sendPlanReadyPrompt(sessionKeyValue, turnId),
       appendSystem: (conversationId, text) => this.appendSystem(conversationId, text),
-      sendRendered: (conversationId, rendered) => this.sendRendered(conversationId, rendered),
+      sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
+      sharedMessages: this.sharedMessages,
+      setReplyToMessageId: (sessionKeyValue, messageId) => {
+        this.lastUserMessageIds.set(sessionKeyValue, messageId);
+        this.activityStreamer.registerUserReplyTarget(
+          sessionKeyValue,
+          messageId,
+          deps.agent.getStatus(sessionKeyValue)?.activeTurnId,
+        );
+      },
       editRendered: (conversationId, rendered, options) => this.editRendered(conversationId, rendered, options),
       completeTask: (sessionKeyValue, turnId, status) => this.completeTaskAndDispatchNext(sessionKeyValue, turnId, status),
       markActiveTask: (sessionKeyValue, status, turnId) => this.markActiveTask(sessionKeyValue, status, turnId),
@@ -299,6 +318,7 @@ export class RelayController {
       });
       return;
     }
+    this.sharedMessages.captureInbound(message);
     if (message.kind === "media") {
       await this.mediaRelay.handleMediaMessage(message);
       return;

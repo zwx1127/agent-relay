@@ -30,6 +30,8 @@ export interface TaskCoordinatorDeps {
   ensureAgentStarted(conversationId: ConversationId, workspace: WorkspaceRecord, threadId?: string): Promise<AgentSessionStatus>;
   finalizeSessionOutput(sessionKey: string): Promise<void>;
   setReplyToMessageId(sessionKey: string, messageId: MessageId): void;
+  prepareSharedUserMessage(threadId: string | undefined, scopeKey: string, messageId: MessageId | undefined, text: string): string | undefined;
+  discardSharedUserMessage(clientUserMessageId: string | undefined): void;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
 }
 
@@ -281,6 +283,12 @@ export class TaskCoordinator {
       createdAt: Date.now(),
     });
     let result: Awaited<ReturnType<AgentDriver["send"]>>;
+    const clientUserMessageId = this.deps.prepareSharedUserMessage(
+      this.deps.agent.getStatus(key)?.threadId,
+      scope.scopeKey,
+      userMessageId,
+      input.text,
+    );
     try {
       // Collaboration mode is stored per relay session so Plan mode survives
       // callbacks and prompt submissions without changing the agent interface.
@@ -289,6 +297,7 @@ export class TaskCoordinator {
       const sendOptions: AgentSendOptions = {
         collaborationMode: mode,
         ...(pendingMode === mode ? { collaborationModeExplicit: true } : {}),
+        ...(clientUserMessageId ? { clientUserMessageId } : {}),
         ...(input.attachments?.length ? { attachments: input.attachments } : {}),
         ...(input.images?.length ? { images: input.images } : {}),
       };
@@ -297,6 +306,7 @@ export class TaskCoordinator {
         this.deps.store.clearPendingCollaborationMode(key, mode);
       }
     } catch (error) {
+      this.deps.discardSharedUserMessage(clientUserMessageId);
       if (task) {
         this.updateTaskStatus(task.id, "failed", task.turnId);
         await this.syncTaskReaction(task.id);
