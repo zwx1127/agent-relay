@@ -1,6 +1,6 @@
 import { sessionKey } from "../../src/domain/session.ts";
 import type { ConversationId, MessageId } from "../../src/domain/ids.ts";
-import type { AgentBackgroundTerminalSummary, AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentDriverCapabilities, AgentFileSearchOptions, AgentFileSearchResult, AgentInterruptResult, AgentModelSummary, AgentSendOptions, AgentSessionStatus, AgentSkillListOptions, AgentSkillSummary, AgentThreadGoal, AgentThreadGoalSetOptions, AgentThreadListOptions, AgentThreadSummary, AgentTurnSnapshot } from "../../src/ports/agent.ts";
+import type { AgentBackgroundTerminalSummary, AgentBuiltinCommand, AgentBuiltinResult, AgentDriver, AgentDriverCapabilities, AgentFileSearchOptions, AgentFileSearchResult, AgentInterruptResult, AgentModelSummary, AgentOutputEvent, AgentSendOptions, AgentSessionStatus, AgentSideConversationInput, AgentSideConversationOpenOptions, AgentSideConversationSendResult, AgentSideConversationSession, AgentSkillListOptions, AgentSkillSummary, AgentThreadGoal, AgentThreadGoalSetOptions, AgentThreadListOptions, AgentThreadSummary, AgentTurnSnapshot } from "../../src/ports/agent.ts";
 import type { EditMessageTextOptions, MessageReactionOptions, SendMessageOptions } from "../../src/ports/im.ts";
 
 export class FakeImAdapter {
@@ -100,6 +100,16 @@ export class FakeAgent implements AgentDriver {
   builtins: Array<{ key: string; command: AgentBuiltinCommand }> = [];
   forks: string[] = [];
   sideConversations: Array<{ key: string; text: string }> = [];
+  sideConversationSends: Array<{ key: string; threadId: string; text: string; input: AgentSideConversationInput; steered: boolean }> = [];
+  sideConversationChunks?: string[];
+  sideConversationMessage?: string;
+  sideConversationWait?: Promise<void>;
+  sideConversationFailure?: Error;
+  sideConversationOpens: Array<{ key: string; threadId: string; eventSessionKey: string }> = [];
+  sideConversationCloses: Array<{ key: string; threadId: string }> = [];
+  sideConversationInterrupts: Array<{ key: string; threadId: string }> = [];
+  private readonly sideConversationHandlers = new Map<string, { sessionKey: string; onEvent?: (event: AgentOutputEvent) => void | Promise<void>; activeTurnId?: string }>();
+  private sideConversationSequence = 0;
   renames: Array<{ key: string; name: string }> = [];
   archived: string[] = [];
   deleted: string[] = [];
@@ -189,6 +199,11 @@ export class FakeAgent implements AgentDriver {
 
   async respond(key: string, requestId: string | number, result: unknown): Promise<void> {
     this.responses.push({ key, requestId, result });
+    for (const side of this.sideConversationHandlers.values()) {
+      if (side.sessionKey === key) {
+        await side.onEvent?.({ type: "server_request_resolved", sessionKey: key, requestId });
+      }
+    }
     const status = this.statuses.get(key);
     if (status) {
       status.waitingForApproval = false;
@@ -249,9 +264,58 @@ export class FakeAgent implements AgentDriver {
     return { threadId: "fork-thread", threadName: "Forked" };
   }
 
-  async sideConversation(key: string, text: string): Promise<{ message: string; threadId?: string; turnId?: string }> {
-    this.sideConversations.push({ key, text });
-    return { message: `side: ${text}`, threadId: "side-thread", turnId: "side-turn" };
+  async openSideConversation(key: string, options: AgentSideConversationOpenOptions = {}): Promise<AgentSideConversationSession> {
+    const threadId = `side-thread-${++this.sideConversationSequence}`;
+    const eventSessionKey = options.eventSessionKey ?? key;
+    this.sideConversationOpens.push({ key, threadId, eventSessionKey });
+    this.sideConversationHandlers.set(threadId, { sessionKey: eventSessionKey, onEvent: options.onEvent });
+    return { threadId };
+  }
+
+  async sendSideConversationInput(key: string, threadId: string, input: AgentSideConversationInput): Promise<AgentSideConversationSendResult> {
+    const side = this.sideConversationHandlers.get(threadId);
+    if (!side) throw new Error("Side conversation is not active.");
+    if (this.sideConversationFailure) throw this.sideConversationFailure;
+    const steered = Boolean(side.activeTurnId);
+    const turnId = side.activeTurnId ?? `side-turn-${this.sideConversationSequence}`;
+    side.activeTurnId = turnId;
+    this.sideConversations.push({ key, text: input.text });
+    this.sideConversationSends.push({ key, threadId, text: input.text, input, steered });
+    const deliver = async () => {
+      for (const delta of this.sideConversationChunks ?? [this.sideConversationMessage ?? `side: ${input.text}`]) {
+        await side.onEvent?.({ type: "message", sessionKey: side.sessionKey, chunk: delta, turnId });
+      }
+      if (this.sideConversationWait) await this.sideConversationWait;
+      if (side.activeTurnId !== turnId) return;
+      side.activeTurnId = undefined;
+      await side.onEvent?.({ type: "turn_completed", sessionKey: side.sessionKey, turnId, status: "completed" });
+    };
+    void deliver();
+    return { turnId, steered };
+  }
+
+  async interruptSideConversation(key: string, threadId: string): Promise<AgentInterruptResult> {
+    this.sideConversationInterrupts.push({ key, threadId });
+    const side = this.sideConversationHandlers.get(threadId);
+    const turnId = side?.activeTurnId;
+    if (!side || !turnId) return { interrupted: false };
+    side.activeTurnId = undefined;
+    await side.onEvent?.({ type: "turn_completed", sessionKey: side.sessionKey, turnId, status: "interrupted" });
+    return { interrupted: true, turnId };
+  }
+
+  async closeSideConversation(key: string, threadId: string): Promise<void> {
+    this.sideConversationCloses.push({ key, threadId });
+    this.sideConversationHandlers.delete(threadId);
+  }
+
+  async emitSideConversationEvent(
+    threadId: string,
+    event: Record<string, unknown> & { type?: AgentOutputEvent["type"] },
+  ): Promise<void> {
+    const side = this.sideConversationHandlers.get(threadId);
+    if (!side) throw new Error("Side conversation is not active.");
+    await side.onEvent?.({ ...event, sessionKey: side.sessionKey } as AgentOutputEvent);
   }
 
   async renameThread(key: string, name: string): Promise<void> {

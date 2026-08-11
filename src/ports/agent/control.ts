@@ -1,6 +1,6 @@
 import type { AgentCollaborationMode } from "./input.ts";
 
-export const RELAY_CONTROL_PROTOCOL_VERSION = 2;
+export const RELAY_CONTROL_PROTOCOL_VERSION = 3;
 export const RELAY_CONTROL_HELLO_METHOD = "agent-relay/control/hello";
 export const RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD = "agent-relay/control/threadState/update";
 export const RELAY_CONTROL_COMMAND_METHOD = "agent-relay/control/command";
@@ -12,7 +12,6 @@ export const RELAY_CONTROL_RESYNC_METHOD = "agent-relay/control/resync";
 export type AgentRelayCommandKind =
   | "review"
   | "compact"
-  | "side"
   | "rename"
   | "goal_update"
   | "goal_clear"
@@ -26,16 +25,12 @@ export type AgentRelayCommandPhase = "accepted" | "running" | "completed" | "fai
 export interface AgentRelayCommandState {
   commandId: string;
   threadId: string;
-  childThreadId?: string;
   kind: AgentRelayCommandKind;
   phase: AgentRelayCommandPhase;
   source: "relay" | "codex";
   revision: number;
   createdAt: number;
   updatedAt: number;
-  /** Complete in-memory side-conversation content, included in resync snapshots. */
-  question?: string;
-  answer?: string;
 }
 
 export interface AgentRelayThreadState {
@@ -47,7 +42,7 @@ export interface AgentRelayThreadState {
 }
 
 export interface AgentRelayCommandMetadata {
-  version: 2;
+  version: 3;
   commandId: string;
   kind: AgentRelayCommandKind;
   originToken: string;
@@ -57,10 +52,6 @@ export interface AgentRelayControlEnvelope {
   gatewayEpoch: string;
   threadRevision: number;
 }
-
-export type AgentRelayCommandContent =
-  | { type: "side_question"; text: string }
-  | { type: "side_delta"; text: string };
 
 export interface AgentRelayThreadStateUpdate {
   operation: "set" | "toggle";

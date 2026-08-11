@@ -92,18 +92,18 @@ Gateway 与其 app-server 属于同一故障域：正常停止会终止二者；
 - 同步引用别名是有界的 Relay 进程内状态。Relay 重启或被引用消息已无映射时，消息仍会同步，但不再附带引用关系。
 - 审批、用户输入和 MCP elicitation 可以出现在关联同一 thread 的全部已连接客户端中。第一份有效响应胜出，resolved 通知会清除重复控件。
 - Relay 支持的 thread 内部操作会作为指令状态同步到同一 thread 的其他 Relay scope，包括 review、compact、rename、Goal 修改、archive/delete、后台终端清理和 Plan 模式状态。操作只在来源客户端执行一次，其他 scope 不会重新执行同步到的指令。
-- `/side` 和 `/btw` 仍使用临时 fork；问题和答案 delta 会同步到其他已加入的 Relay scope，并保留在有界 Gateway 内存快照中，但不进入父 thread transcript。`/new`、`/clear`、`/resume` 和 `/fork` 保持本地导航，不会强迫其他客户端切换 thread。
+- `/side` 和 `/btw` 会进入当前 IM scope 独享的多轮 BTW 模式，并复用一个临时 fork。裸 `/btw` 立即创建子 thread，并发送带 **Return to main** 的 ForceReply 控制卡；`/btw <prompt>` 会创建并提交，或继续已有子 thread。BTW 模式下的普通文本和结构化附件都发往子 thread；子 turn 运行时的新输入使用 Steer，每个新子 turn 都有独立的流式工作卡和进度 reaction；审批、用户问答和 MCP elicitation 仍可交互。BTW 的问题、答案、状态和子 thread 通知不会同步给其他 Gateway 客户端，不进入父 transcript，也不修改父任务或活动状态，因此原生 Codex CLI TUI 和 Desktop 可以独立继续使用父 thread。点击 **Return to main** 关闭子 thread 前，chat/workspace 导航会被阻止。
 - `/plan` 切换同步模式；`/plan --on` 与 `/plan --off` 可以显式选择。Gateway/app-server 重启后采用 Codex 原生进程重启语义，Plan 恢复为 Default，不从 Relay 持久数据反推。
 
 Gateway 使用内部观察连接：即使全部 Relay 前端断开，它仍会订阅已经见过的 thread。每个 Gateway epoch、每个 thread revision、ACK 与 resync 快照共同避免 Relay 重连后把残缺的事件后缀当成完整状态。该控制面只属于 Gateway，不扩展 Codex app-server 协议。
 
 恢复边界严格对齐 Codex App/CLI 的原生进程重启语义：
 
-- Relay 断线、重启或清理本地数据，而 Gateway/app-server 仍存活时，`/resume` 会从存活的 app-server 与 Gateway 内存恢复最近完整 turn、Goal、后台终端、重放的待审批/待输入请求、Plan/Default，以及 Relay 支持的指令和 `/btw` 状态。
+- Relay 断线、重启或清理本地数据，而 Gateway/app-server 仍存活时，`/resume` 会从存活的 app-server 与 Gateway 内存恢复父 thread 的最近完整 turn、Goal、后台终端、重放的待审批/待输入请求、Plan/Default，以及 Relay 支持的父指令状态。BTW 模式不会恢复；旧 BTW 卡片会变成已结束控制卡。
 - Gateway/app-server 重启后，只恢复 Codex 原生 resume/查询能够恢复的状态。Relay 专属指令投影、临时 `/btw`、进程内 callback 都消失，Plan 回到 Default。
 - 重连窗口中的实时文本/活动 delta 是最终一致；终态 `turn/completed` 加上 resume 得到的完整 turn 才是权威结果，不承诺 delta 恰好一次。
 
-系统不增加进度历史数据库、消费游标、语义 JSON journal、离线输出队列或持久化重放。有界指令快照（包括 side 问题和累计答案）只存在于 Gateway 内存中，并在其中过期/裁剪；Gateway 重启即清空。
+系统不增加进度历史数据库、消费游标、语义 JSON journal、离线输出队列或持久化重放。有界父指令快照只存在于 Gateway 内存中，并在其中过期/裁剪；BTW 内容不进入该快照。Gateway 重启会清空 Gateway 状态和所有活动中的临时子 thread。
 
 ## 停止或移除
 

@@ -12,7 +12,6 @@ import type {
   AgentFileSearchOptions,
   AgentFileSearchResult,
   AgentModelSummary,
-  AgentSideConversationResult,
   AgentSkillListOptions,
   AgentSkillSummary,
   AgentThreadGoal,
@@ -21,6 +20,12 @@ import type {
   AgentThreadSummary,
   AgentThreadSwitchResult,
 } from "./thread.ts";
+import type {
+  AgentSideConversationInput,
+  AgentSideConversationOpenOptions,
+  AgentSideConversationSendResult,
+  AgentSideConversationSession,
+} from "./side-conversation.ts";
 import type { AgentRelayThreadStateUpdate } from "./control.ts";
 import type { AgentCollaborationMode } from "./input.ts";
 
@@ -41,7 +46,10 @@ export interface AgentDriver {
   setThreadGoal?(sessionKey: string, goal: AgentThreadGoalSetOptions): Promise<AgentThreadGoal>;
   clearThreadGoal?(sessionKey: string): Promise<boolean>;
   forkThread?(sessionKey: string): Promise<AgentThreadSwitchResult>;
-  sideConversation?(sessionKey: string, text: string): Promise<AgentSideConversationResult>;
+  openSideConversation?(sessionKey: string, options?: AgentSideConversationOpenOptions): Promise<AgentSideConversationSession>;
+  sendSideConversationInput?(sessionKey: string, threadId: string, input: AgentSideConversationInput): Promise<AgentSideConversationSendResult>;
+  interruptSideConversation?(sessionKey: string, threadId: string): Promise<AgentInterruptResult>;
+  closeSideConversation?(sessionKey: string, threadId: string): Promise<void>;
   renameThread?(sessionKey: string, name: string): Promise<void>;
   archiveThread?(sessionKey: string): Promise<void>;
   deleteThread?(sessionKey: string): Promise<void>;

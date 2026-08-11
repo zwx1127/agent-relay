@@ -20,7 +20,7 @@ export function formatHelpMessage(): RenderedTelegramText {
     "- ", code("/clear [name]"), " - Clear Relay display state and start a fresh chat.\n",
     "- ", code("/resume [search]"), " - Resume a recent Codex thread.\n",
     "- ", code("/fork"), " - Fork the current thread.\n",
-    "- ", code("/side <prompt>"), ", ", code("/btw <prompt>"), " - Ask in an ephemeral side conversation.\n",
+    "- ", code("/side [prompt]"), ", ", code("/btw [prompt]"), " - Enter or continue multi-turn BTW mode; use Return to main to exit.\n",
     "- ", code("/rename <name>"), " - Rename the current thread.\n",
     "- ", code("/plan"), " - Toggle Plan mode.\n",
     "- ", code("/plan --on|--off"), " - Select Plan or Default mode explicitly.\n",

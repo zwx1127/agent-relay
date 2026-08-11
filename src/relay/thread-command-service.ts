@@ -1,14 +1,18 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
+  AgentImageOutputEvent,
   AgentBuiltinCommand,
   AgentDriver,
+  AgentOutputEvent,
   AgentSessionStatus,
+  AgentSideConversationResult,
   AgentTaskInput,
 } from "../ports/agent.ts";
 import type { EditMessageTextOptions, InlineKeyboardMarkup, SendMessageOptions, ImAdapter } from "../ports/im.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
 import { sessionKey } from "../domain/session.ts";
+import { parseChatScopeKey } from "../domain/scope.ts";
 import type { Logger } from "../domain/logger.ts";
 import type { RelayStore } from "../storage/store.ts";
 import type { PendingPrompt, WorkspaceRecord } from "./types.ts";
@@ -31,11 +35,12 @@ import { PlanCommandService } from "./thread-commands/plan.ts";
 import type { CallbackMessage } from "./thread-commands/types.ts";
 import { isActivityControlAction, type ActivityControlAction } from "./activity-controls.ts";
 import { hasBusyWorkspaceWork, isAgentSessionBusy } from "./session-busy.ts";
+import { SideConversationPresenter, type SideConversationPresentation } from "./side-conversation-presenter.ts";
 
 export interface ThreadCommandDeps {
   store: RelayStore;
   agent: AgentDriver;
-  adapter: Pick<ImAdapter, "deleteMessage">;
+  adapter: Pick<ImAdapter, "deleteMessage" | "setMessageReaction" | "capabilities">;
   logger: Logger;
   requireCurrentWorkspace(conversationId: ConversationId): WorkspaceRecord;
   ensureAgentStarted(conversationId: ConversationId, workspace: WorkspaceRecord, threadId?: string, options?: { resumePrevious?: boolean }): Promise<AgentSessionStatus>;
@@ -59,7 +64,26 @@ export interface ThreadCommandDeps {
   renderStrictCallbackPage(message: CallbackMessage, body: string | RenderedTelegramText, replyMarkup: InlineKeyboardMarkup): Promise<RenderCallbackPageResult>;
   expireCallbackPrompt(message: CallbackMessage): Promise<void>;
   clearCodexPromptsForSession(sessionKey: string): void;
+  enqueueSideEvent(scopeKey: string, task: () => Promise<void>): void;
+  handleSidePromptEvent(event: AgentOutputEvent): Promise<void>;
+  sendSideImage(event: AgentImageOutputEvent, replyToMessageId?: MessageId): Promise<void>;
   hasTaskCreatedAfter(conversationId: ConversationId, workspaceName: string, timestamp: number): boolean;
+}
+
+interface ActiveSideConversation {
+  token: string;
+  scopeKey: string;
+  conversationId: ConversationId;
+  workspaceName: string;
+  ownerSessionKey: string;
+  eventSessionKey: string;
+  threadId: string;
+  controlMessageId?: MessageId;
+  activeTurnId?: string;
+  presentation?: SideConversationPresentation;
+  answer: string;
+  pendingRequestIds: Set<string>;
+  closing: boolean;
 }
 
 export class ThreadCommandService {
@@ -67,8 +91,18 @@ export class ThreadCommandService {
   private readonly backgroundTerminals: BackgroundTerminalService;
   private readonly goals: GoalCommandService;
   private readonly plans: PlanCommandService;
+  private readonly sideConversations: SideConversationPresenter;
+  private readonly activeSideConversations = new Map<string, ActiveSideConversation>();
 
   constructor(private readonly deps: ThreadCommandDeps) {
+    this.sideConversations = new SideConversationPresenter({
+      store: deps.store,
+      adapter: deps.adapter,
+      logger: deps.logger,
+      canEdit: deps.adapter.capabilities.editMessage,
+      sendRendered: deps.sendRendered,
+      editRendered: deps.editRendered,
+    });
     this.attachments = new AttachmentPicker({
       store: deps.store,
       agent: deps.agent,
@@ -122,8 +156,27 @@ export class ThreadCommandService {
     });
   }
 
-  clearSessionState(sessionKeyValue: string): void {
+  async clearSessionState(sessionKeyValue: string): Promise<void> {
     this.plans.clearSession(sessionKeyValue);
+    const active = [...this.activeSideConversations.values()].find((side) => side.ownerSessionKey === sessionKeyValue);
+    if (active) await this.closeSideConversationState(active, undefined, true);
+  }
+
+  hasActiveSideConversation(conversationId: ConversationId): boolean {
+    return this.activeSideConversations.has(String(conversationId));
+  }
+
+  activeSideConversationId(conversationId: ConversationId): string | undefined {
+    return this.activeSideConversations.get(String(conversationId))?.token;
+  }
+
+  async rejectNavigationDuringSideConversation(conversationId: ConversationId): Promise<boolean> {
+    if (!this.hasActiveSideConversation(conversationId)) return false;
+    await this.deps.sendRendered(conversationId, messageWithTitle(
+      "BTW mode is active.",
+      "Use Return to main on the latest BTW control card before switching, renaming, archiving, or deleting the main chat.",
+    ));
+    return true;
   }
 
   async runReviewCommand(conversationId: ConversationId, text: string): Promise<void> {
@@ -245,54 +298,239 @@ export class ThreadCommandService {
 
   async sideConversationCommand(conversationId: ConversationId, prompt: string, userMessageId?: MessageId): Promise<void> {
     const normalized = prompt.trim();
-    if (!normalized) {
-      const workspace = this.deps.requireCurrentWorkspace(conversationId);
-      const key = sessionKey(conversationId, workspace.name);
-      const result = await this.deps.sendRendered(conversationId, textMessage("Side question requested."), {
-        forceReply: true,
-        forceReplyInstruction: "Reply to this prompt, or send your next message with the side question.",
-        inputFieldPlaceholder: "Side question",
-        disableWebPagePreview: true,
-      });
-      if (!result.messageId) throw new Error("IM adapter did not return a side conversation prompt message id.");
-      this.deps.store.setPendingPrompt({
-        conversationId,
-        promptMessageId: result.messageId,
-        kind: "relay_command",
-        createdAt: Date.now(),
-        sessionKey: key,
-        payloadJson: JSON.stringify({ command: "side" }),
-        expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
-      });
+    const active = this.activeSideConversations.get(String(conversationId));
+    if (active) {
+      if (!normalized) await this.renderSideControlCard(active);
+      else await this.submitActiveSideInput(conversationId, { text: normalized }, userMessageId);
       return;
     }
 
-    await this.runSideConversation(conversationId, normalized, userMessageId);
+    const side = await this.openSideConversation(conversationId);
+    try {
+      await this.renderSideControlCard(side);
+    } catch (error) {
+      await this.closeSideConversationState(side, undefined, true);
+      throw error;
+    }
+    if (normalized) await this.submitActiveSideInput(conversationId, { text: normalized }, userMessageId);
   }
 
-  private async runSideConversation(conversationId: ConversationId, prompt: string, userMessageId?: MessageId): Promise<void> {
-    if (!prompt.trim()) {
-      await this.deps.sendRendered(conversationId, messageWithTitle("Side conversation cancelled.", "No question was provided."));
+  async submitActiveSideInput(
+    conversationId: ConversationId,
+    input: AgentTaskInput,
+    userMessageId?: MessageId,
+  ): Promise<void> {
+    const side = this.activeSideConversations.get(String(conversationId));
+    if (!side || side.closing) {
+      await this.deps.sendRendered(conversationId, messageWithTitle("BTW mode ended.", "Run /btw to start another side conversation."));
       return;
     }
+    const prompt = input.text.trim();
+    if (!prompt && !input.attachments?.length && !input.images?.length) {
+      await this.deps.sendRendered(conversationId, messageWithTitle("BTW input not submitted.", "Add a question or an attachment."));
+      return;
+    }
+    if (side.pendingRequestIds.size > 0) {
+      await this.deps.sendRendered(conversationId, messageWithTitle(
+        "BTW is waiting for your answer.",
+        "Reply to the latest Codex question or use its buttons before sending another follow-up.",
+      ));
+      return;
+    }
+    if (!this.deps.agent.sendSideConversationInput) throw new Error("Agent driver cannot continue side conversations.");
+
+    const existingPresentation = side.presentation;
+    if (existingPresentation) {
+      existingPresentation.appendInput(prompt || "Attachment", userMessageId);
+    } else {
+      side.answer = "";
+      side.presentation = await this.sideConversations.begin({
+        conversationId,
+        sessionKey: side.eventSessionKey,
+        question: prompt || "Attachment",
+        sourceMessageId: userMessageId,
+      });
+    }
+    const presentation = side.presentation;
+    try {
+      const result = await this.deps.agent.sendSideConversationInput(side.ownerSessionKey, side.threadId, input);
+      if (side.presentation === presentation && result.turnId) side.activeTurnId = result.turnId;
+      this.deps.logger.info(result.steered ? "router.side_conversation_steered" : "router.side_conversation_turn_started", {
+        conversation_id: conversationId,
+        workspace: side.workspaceName,
+        session_key: side.ownerSessionKey,
+        child_thread_id: side.threadId,
+        turn_id: result.turnId,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (side.presentation === presentation) {
+        side.presentation = undefined;
+        side.activeTurnId = undefined;
+        await presentation?.fail(detail);
+      }
+      this.deps.logger.error("router.side_conversation_send_failed", {
+        conversation_id: side.conversationId,
+        scope_key: side.scopeKey,
+        child_thread_id: side.threadId,
+        error: error instanceof Error ? error : new Error(detail),
+      });
+    }
+  }
+
+  async answerSideConversationPrompt(
+    conversationId: ConversationId,
+    promptMessageId: MessageId,
+    text: string,
+    userMessageId?: MessageId,
+  ): Promise<void> {
+    const pending = this.deps.store.getPendingPrompt(conversationId, promptMessageId);
+    const data = parsePromptPayload(pending?.payloadJson);
+    const side = this.activeSideConversations.get(String(conversationId));
+    if (!pending || pending.kind !== "side_conversation" || !data || !side || data.token !== side.token || side.closing) {
+      this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
+      await this.deps.sendRendered(conversationId, messageWithTitle("BTW mode ended.", "Run /btw to start another side conversation."));
+      return;
+    }
+    await this.submitActiveSideInput(conversationId, { text: text.trim() }, userMessageId);
+  }
+
+  private async openSideConversation(conversationId: ConversationId): Promise<ActiveSideConversation> {
     const workspace = this.deps.requireCurrentWorkspace(conversationId);
+    const ownerSessionKey = sessionKey(conversationId, workspace.name);
     const status = await this.deps.ensureAgentStarted(conversationId, workspace);
-    const key = sessionKey(conversationId, workspace.name);
-    if (status.reviewInProgress) {
-      await this.deps.sendRendered(conversationId, messageWithTitle("Side conversation unavailable.", "Wait for the current review to finish."));
-      return;
+    if (!status.threadId) throw new Error("Send a normal message first, then try /btw again.");
+    if (!this.deps.agent.openSideConversation || !this.deps.agent.sendSideConversationInput
+      || !this.deps.agent.interruptSideConversation || !this.deps.agent.closeSideConversation) {
+      throw new Error("Agent driver cannot start multi-turn side conversations.");
     }
-    if (!status.threadId) {
-      await this.deps.sendRendered(conversationId, messageWithTitle("Side conversation unavailable.", "Send a normal message first, then try /side again."));
-      return;
-    }
-    if (!this.deps.agent.sideConversation) throw new Error("Agent driver cannot start side conversations.");
-    this.deps.logger.info("router.side_conversation_started", { conversation_id: conversationId, workspace: workspace.name, session_key: key });
-    const result = await this.deps.agent.sideConversation(key, prompt);
-    await this.deps.sendRendered(conversationId, messageWithTitle("Side conversation", result.message), {
-      ...(userMessageId ? { replyToMessageId: userMessageId } : {}),
-      disableWebPagePreview: true,
+    const token = shortToken();
+    const scope = parseChatScopeKey(String(conversationId));
+    const eventSessionKey = sessionKey(scope.scopeKey, workspace.name, `codex-side-${token}`);
+    const opened = await this.deps.agent.openSideConversation(ownerSessionKey, {
+      eventSessionKey,
+      onEvent: (event) => {
+        this.deps.enqueueSideEvent(scope.scopeKey, () => this.handleSideConversationEvent(scope.scopeKey, token, event));
+      },
     });
+    const side: ActiveSideConversation = {
+      token,
+      scopeKey: scope.scopeKey,
+      conversationId: scope.conversationId,
+      workspaceName: workspace.name,
+      ownerSessionKey,
+      eventSessionKey,
+      threadId: opened.threadId,
+      answer: "",
+      pendingRequestIds: new Set(),
+      closing: false,
+    };
+    this.activeSideConversations.set(scope.scopeKey, side);
+    this.deps.logger.info("router.side_conversation_opened", {
+      conversation_id: scope.conversationId,
+      scope_key: scope.scopeKey,
+      workspace: workspace.name,
+      session_key: ownerSessionKey,
+      child_thread_id: opened.threadId,
+    });
+    return side;
+  }
+
+  private async renderSideControlCard(side: ActiveSideConversation): Promise<void> {
+    if (side.controlMessageId !== undefined) {
+      this.deps.store.deletePendingPrompt(side.scopeKey, side.controlMessageId);
+      await this.deps.editRendered(
+        side.scopeKey,
+        messageWithTitle("BTW mode is active.", "Controls moved to the latest BTW card."),
+        { messageId: side.controlMessageId, replyMarkup: { inline_keyboard: [] } },
+      ).catch(() => undefined);
+    }
+    const result = await this.deps.sendRendered(side.scopeKey, messageWithTitle(
+      "BTW mode is active.",
+      "Send ordinary messages to continue this side conversation. The main chat stays unchanged.",
+    ), {
+      forceReply: true,
+      forceReplyInstruction: "Reply here, or send your next message, to ask BTW.",
+      inputFieldPlaceholder: "Ask a side question",
+      replyMarkup: { inline_keyboard: [[{ text: "Return to main", callback_data: `ar:cmd:side:${side.token}:close` }]] },
+      disableWebPagePreview: true,
+      deliveryMode: "at-most-once",
+    });
+    if (!result.messageId) throw new Error("IM adapter did not return a BTW control card message id.");
+    side.controlMessageId = result.messageId;
+    this.deps.store.setPendingPrompt({
+      conversationId: side.conversationId,
+      scopeKey: side.scopeKey,
+      promptMessageId: result.messageId,
+      kind: "side_conversation",
+      createdAt: Date.now(),
+      sessionKey: side.eventSessionKey,
+      payloadJson: JSON.stringify({ command: "side", token: side.token }),
+    });
+  }
+
+  private async handleSideConversationEvent(scopeKey: string, token: string, event: AgentOutputEvent): Promise<void> {
+    const side = this.activeSideConversations.get(scopeKey);
+    if (!side || side.token !== token || side.eventSessionKey !== event.sessionKey || side.closing) return;
+    if (!event.type || event.type === "message") {
+      side.answer += event.chunk;
+      side.presentation?.appendDelta(event.chunk);
+      return;
+    }
+    if (event.type === "activity") {
+      side.presentation?.updateActivity(event.activity);
+      return;
+    }
+    if (event.type === "image") {
+      await this.deps.sendSideImage(event, side.presentation?.messageId());
+      return;
+    }
+    if (event.type === "user_input_request" || event.type === "approval_request" || event.type === "mcp_elicitation_request") {
+      side.pendingRequestIds.add(sideRequestKey(event.requestId));
+      await this.deps.handleSidePromptEvent(event);
+      return;
+    }
+    if (event.type === "server_request_resolved") {
+      side.pendingRequestIds.delete(sideRequestKey(event.requestId));
+      await this.deps.handleSidePromptEvent(event);
+      return;
+    }
+    if (event.type === "turn_completed") {
+      if (event.turnId && side.activeTurnId && event.turnId !== side.activeTurnId) return;
+      const presentation = side.presentation;
+      side.presentation = undefined;
+      side.activeTurnId = undefined;
+      side.pendingRequestIds.clear();
+      if (!presentation) return;
+      const result: AgentSideConversationResult = {
+        message: side.answer,
+        status: event.status === "interrupted" || event.status === "failed" ? event.status : "completed",
+        threadId: side.threadId,
+        ...(event.turnId ? { turnId: event.turnId } : {}),
+        ...(event.error ? { error: event.error } : {}),
+      };
+      await presentation.complete(result);
+      side.answer = "";
+      this.deps.logger.info("router.side_conversation_turn_completed", {
+        conversation_id: side.conversationId,
+        scope_key: side.scopeKey,
+        child_thread_id: side.threadId,
+        turn_id: event.turnId,
+        status: result.status,
+      });
+      return;
+    }
+    if (event.type === "thread_lifecycle") {
+      await side.presentation?.fail("The BTW child chat ended.");
+      if (side.controlMessageId !== undefined) {
+        await this.deps.editRendered(
+          side.scopeKey,
+          messageWithTitle("BTW mode ended.", "The ephemeral child chat is no longer available. Run /btw to start another one."),
+          { messageId: side.controlMessageId, replyMarkup: { inline_keyboard: [] } },
+        ).catch(() => undefined);
+      }
+      await this.clearSideConversationState(side);
+    }
   }
 
   async renameCommand(conversationId: ConversationId, name: string): Promise<void> {
@@ -415,6 +653,21 @@ export class ThreadCommandService {
     const [, command, token, action] = parts;
     const pending = message.messageId ? this.deps.store.getPendingPrompt(message.conversationId, message.messageId) : undefined;
     const data = parsePromptPayload(pending?.payloadJson);
+    if (command === "side") {
+      const side = this.activeSideConversations.get(String(message.conversationId));
+      if (!pending || pending.kind !== "side_conversation" || !data || !side || data.token !== token
+        || side.token !== token || action !== "close" || side.closing) {
+        if (message.messageId) this.deps.store.deletePendingPrompt(message.conversationId, message.messageId);
+        await this.deps.renderCallbackPage(
+          message,
+          messageWithTitle("BTW mode ended.", "Run /btw to start another side conversation."),
+          { inline_keyboard: [] },
+        );
+        return "BTW mode already ended.";
+      }
+      await this.closeSideConversationState(side, message);
+      return "Returned to main chat.";
+    }
     if (!pending || pending.kind !== "relay_command" || !data || data.token !== token || isExpired(pending)) {
       if (command === "terminal") {
         if (message.messageId) this.deps.store.deletePendingPrompt(message.conversationId, message.messageId);
@@ -453,6 +706,63 @@ export class ThreadCommandService {
       return this.handleActivityControlCallback(message, pending, data, action);
     }
     throw new Error("Unknown command callback.");
+  }
+
+  private async closeSideConversationState(
+    side: ActiveSideConversation,
+    message?: CallbackMessage,
+    bestEffort = false,
+  ): Promise<void> {
+    if (side.closing) return;
+    side.closing = true;
+    try {
+      if (side.activeTurnId && this.deps.agent.interruptSideConversation) {
+        await this.deps.agent.interruptSideConversation(side.ownerSessionKey, side.threadId);
+      }
+      if (this.deps.agent.closeSideConversation) {
+        await this.deps.agent.closeSideConversation(side.ownerSessionKey, side.threadId);
+      }
+      if (side.presentation) {
+        await side.presentation.complete({
+          message: side.answer,
+          status: "interrupted",
+          threadId: side.threadId,
+          ...(side.activeTurnId ? { turnId: side.activeTurnId } : {}),
+        });
+      }
+      await this.clearSideConversationState(side);
+      if (message) {
+        await this.deps.renderCallbackPage(
+          message,
+          messageWithTitle("Returned to main chat.", "The BTW child chat was closed and will not be resumed."),
+          { inline_keyboard: [] },
+        );
+      }
+      this.deps.logger.info("router.side_conversation_closed", {
+        conversation_id: side.conversationId,
+        scope_key: side.scopeKey,
+        child_thread_id: side.threadId,
+      });
+    } catch (error) {
+      side.closing = false;
+      if (!bestEffort) throw error;
+      this.deps.logger.warn("router.side_conversation_close_failed", {
+        conversation_id: side.conversationId,
+        scope_key: side.scopeKey,
+        child_thread_id: side.threadId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+      await this.clearSideConversationState(side);
+    }
+  }
+
+  private async clearSideConversationState(side: ActiveSideConversation): Promise<void> {
+    if (this.activeSideConversations.get(side.scopeKey) === side) this.activeSideConversations.delete(side.scopeKey);
+    this.deps.clearCodexPromptsForSession(side.eventSessionKey);
+    this.deps.store.deletePendingPromptsForSession(side.eventSessionKey);
+    side.pendingRequestIds.clear();
+    side.presentation = undefined;
+    side.activeTurnId = undefined;
   }
 
   private async handleActivityControlCallback(
@@ -706,13 +1016,13 @@ export class ThreadCommandService {
       await this.deps.sendRendered(conversationId, textMessage("Command prompt expired."));
       return;
     }
+    if (data.command === "rename" && this.hasActiveSideConversation(conversationId)) {
+      await this.rejectNavigationDuringSideConversation(conversationId);
+      return;
+    }
     this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
     if (data.command === "rename") {
       await this.renameCurrentThread(conversationId, text.trim());
-      return;
-    }
-    if (data.command === "side") {
-      await this.runSideConversation(conversationId, text.trim(), promptMessageId);
       return;
     }
     if (data.command === "attachment_task") {
@@ -720,7 +1030,9 @@ export class ThreadCommandService {
       const key = sessionKey(conversationId, workspace.name);
       const status = this.deps.agent.getStatus(key);
       const attachment = parseAttachmentRecord(data.attachment);
-      if (!status?.running || pending.sessionKey !== key || status.threadId !== data.threadId || !attachment || this.commandBusy(conversationId, workspace.name, status)) {
+      const activeSideConversation = this.hasActiveSideConversation(conversationId);
+      if (!status?.running || pending.sessionKey !== key || status.threadId !== data.threadId || !attachment
+        || (!activeSideConversation && this.commandBusy(conversationId, workspace.name, status))) {
         await this.deps.sendRendered(conversationId, messageWithTitle("Attachment task expired.", "The active chat changed or Codex is busy. Run the command again."));
         return;
       }
@@ -733,7 +1045,11 @@ export class ThreadCommandService {
         await this.deps.sendRendered(conversationId, messageWithTitle("Attachment not submitted.", "The task description must not be empty."));
         return;
       }
-      await this.deps.submitTask(conversationId, prompt, promptMessageId, "immediate", { text: prompt, attachments: [attachment] });
+      if (activeSideConversation) {
+        await this.submitActiveSideInput(conversationId, { text: prompt, attachments: [attachment] }, userMessageId ?? promptMessageId);
+      } else {
+        await this.deps.submitTask(conversationId, prompt, promptMessageId, "immediate", { text: prompt, attachments: [attachment] });
+      }
       return;
     }
     if (data.command === "goal_edit") {
@@ -750,4 +1066,8 @@ function capitalize(value: string): string {
 
 function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
+}
+
+function sideRequestKey(requestId: string | number): string {
+  return `${typeof requestId}:${String(requestId)}`;
 }

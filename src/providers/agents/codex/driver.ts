@@ -20,7 +20,6 @@ import type {
   AgentModelSummary,
   AgentOutputEvent,
   AgentOutputHandler,
-  AgentRelayCommandContent,
   AgentRelayCommandKind,
   AgentRelayCommandMetadata,
   AgentRelayCommandPhase,
@@ -28,7 +27,10 @@ import type {
   AgentRelayThreadState,
   AgentRelayThreadStateUpdate,
   AgentSessionStatus,
-  AgentSideConversationResult,
+  AgentSideConversationInput,
+  AgentSideConversationOpenOptions,
+  AgentSideConversationSendResult,
+  AgentSideConversationSession,
   AgentSkillListOptions,
   AgentSkillSummary,
   AgentThreadGoal,
@@ -80,7 +82,6 @@ export interface CodexDriverOptions {
 function relayCommandState(record: Record<string, unknown> | undefined): AgentRelayCommandState | undefined {
   const commandId = getString(record, "commandId");
   const threadId = getString(record, "threadId");
-  const childThreadId = getString(record, "childThreadId");
   const kind = relayCommandKind(getString(record, "kind"));
   const phase = relayCommandPhase(getString(record, "phase"));
   const source = getString(record, "source");
@@ -89,15 +90,12 @@ function relayCommandState(record: Record<string, unknown> | undefined): AgentRe
   return {
     commandId,
     threadId,
-    ...(childThreadId ? { childThreadId } : {}),
     kind,
     phase,
     source,
     revision: record.revision,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
-    ...(typeof record.question === "string" ? { question: record.question } : {}),
-    ...(typeof record.answer === "string" ? { answer: record.answer } : {}),
   };
 }
 
@@ -116,15 +114,8 @@ function relayThreadState(value: unknown): AgentRelayThreadState | undefined {
   };
 }
 
-function relayCommandContent(value: unknown): AgentRelayCommandContent | undefined {
-  const record = asRecord(value);
-  const type = getString(record, "type");
-  const text = getString(record, "text");
-  return text && (type === "side_question" || type === "side_delta") ? { type, text } : undefined;
-}
-
 function relayCommandKind(value: string | undefined): AgentRelayCommandKind | undefined {
-  return value === "review" || value === "compact" || value === "side" || value === "rename"
+  return value === "review" || value === "compact" || value === "rename"
     || value === "goal_update" || value === "goal_clear" || value === "archive" || value === "delete"
     || value === "terminals_clean" || value === "terminal_stop" ? value : undefined;
 }
@@ -147,6 +138,7 @@ function commandExecutionFailed(item: Record<string, unknown>): boolean {
 }
 
 interface PendingInteractiveRequest {
+  requestId: string | number;
   threadId: string;
   sessionKeys: Set<string>;
   resolved: boolean;
@@ -837,7 +829,7 @@ export class CodexDriver implements AgentDriver {
     return { threadId, threadName: running.status.threadName };
   }
 
-  async sideConversation(key: string, text: string): Promise<AgentSideConversationResult> {
+  async openSideConversation(key: string, options: AgentSideConversationOpenOptions = {}): Promise<AgentSideConversationSession> {
     const running = this.requireRunningSession(key);
     const gateway = this.usesGateway();
     const forkResult = await this.request("thread/fork", {
@@ -852,47 +844,96 @@ export class CodexDriver implements AgentDriver {
       } : {}),
       ephemeral: true,
       excludeTurns: true,
-    }, this.relayCommandRequestOptions(key, "side"));
+    });
     const threadId = getThreadId(forkResult);
     if (!threadId) throw new Error("Codex app-server did not return a side conversation thread id.");
-
+    const collector: SideConversationCollector = {
+      ownerSessionKey: key,
+      sessionKey: options.eventSessionKey ?? key,
+      threadId,
+      terminalTurnIds: new Set(),
+      onEvent: options.onEvent,
+    };
+    this.sideConversations.set(threadId, collector);
     try {
-      return await new Promise<AgentSideConversationResult>(async (resolve, reject) => {
-        const collector: SideConversationCollector = {
-          threadId,
-          text: "",
-          resolve,
-          reject,
-        };
-        this.sideConversations.set(threadId, collector);
-        try {
-          // Inject the boundary as a thread item instead of prepending it to the
-          // user's text, keeping inherited history and the active question distinct.
-          await this.request("thread/inject_items", {
-            threadId,
-            items: [sideBoundaryPromptItem()],
-          });
-          const turnResult = await this.request("turn/start", {
-            threadId,
-            input: userInputPayload(text, undefined),
-          });
-          collector.turnId = getTurnId(turnResult);
-        } catch (error) {
-          this.sideConversations.delete(threadId);
-          reject(error instanceof Error ? error : new Error(String(error)));
-        }
+      // Keep inherited history and the first active user instruction separated.
+      await this.request("thread/inject_items", {
+        threadId,
+        items: [sideBoundaryPromptItem()],
       });
-    } finally {
+      return { threadId };
+    } catch (error) {
+      this.sideConversations.delete(threadId);
+      await this.request("thread/unsubscribe", { threadId }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async sendSideConversationInput(
+    key: string,
+    threadId: string,
+    input: AgentSideConversationInput,
+  ): Promise<AgentSideConversationSendResult> {
+    const collector = this.requireSideConversation(key, threadId);
+    const payload = userInputPayload(input.text, input.attachments, input.images);
+    let steered = Boolean(collector.activeTurnId);
+    let result: unknown;
+    if (collector.activeTurnId) {
       try {
-        await this.request("thread/unsubscribe", { threadId });
+        result = await this.request("turn/steer", {
+          threadId,
+          expectedTurnId: collector.activeTurnId,
+          input: payload,
+        });
       } catch (error) {
-        this.logger.warn("codex.side_conversation_unsubscribe_failed", {
+        if (!isNoActiveTurnToSteerError(error)) throw error;
+        collector.activeTurnId = undefined;
+        steered = false;
+        result = await this.request("turn/start", { threadId, input: payload });
+      }
+    } else {
+      result = await this.request("turn/start", { threadId, input: payload });
+    }
+    const turnId = getTurnId(result);
+    if (turnId) {
+      // A very short turn can complete before the turn/start response resumes
+      // this awaiting caller. Do not resurrect that already-terminal turn.
+      collector.activeTurnId = collector.terminalTurnIds.has(turnId) ? undefined : turnId;
+    }
+    return { ...(turnId ? { turnId } : {}), steered };
+  }
+
+  async interruptSideConversation(key: string, threadId: string): Promise<AgentInterruptResult> {
+    const collector = this.requireSideConversation(key, threadId);
+    const turnId = collector.activeTurnId;
+    if (!turnId) return { interrupted: false };
+    try {
+      await this.request("turn/interrupt", { threadId, turnId });
+      return { interrupted: true, turnId };
+    } catch (error) {
+      if (!isNoActiveTurnToInterruptError(error)) throw error;
+      collector.activeTurnId = undefined;
+      return { interrupted: false, turnId, stale: true };
+    }
+  }
+
+  async closeSideConversation(key: string, threadId: string): Promise<void> {
+    this.requireSideConversation(key, threadId);
+    for (const [requestKey, request] of this.pendingInteractiveRequests) {
+      if (request.threadId !== threadId || request.resolved) continue;
+      request.resolved = true;
+      await this.rpc.rejectRequest(request.requestId, -32000, "Side conversation closed.").catch((error) => {
+        this.logger.warn("codex.side_conversation_request_cancel_failed", {
           session_key: key,
           thread_id: threadId,
+          request_id: requestKey,
           error: error instanceof Error ? error : new Error(String(error)),
         });
-      }
+      });
+      await this.finishInteractiveRequest(request.requestId, request);
     }
+    await this.request("thread/unsubscribe", { threadId });
+    this.sideConversations.delete(threadId);
   }
 
   async renameThread(key: string, name: string): Promise<void> {
@@ -1570,35 +1611,139 @@ export class CodexDriver implements AgentDriver {
   ): Promise<boolean> {
     if (message.method === "item/agentMessage/delta" || message.method === "item/plan/delta") {
       const delta = typeof params?.delta === "string" ? params.delta : "";
-      if (delta) collector.text += delta;
+      if (delta) await this.emitSideConversationEvent(collector, {
+        type: "message",
+        sessionKey: collector.sessionKey,
+        chunk: delta,
+        ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
+        ...(getString(params, "itemId") ? { itemId: getString(params, "itemId") } : {}),
+      });
       return true;
     }
-    if (message.method === "item/completed") {
+    if (message.method === "item/reasoning/summaryTextDelta") {
+      const summary = getString(params, "delta");
+      if (summary) await this.emitSideActivity(collector, { kind: "reasoning", summary }, params);
+      return true;
+    }
+    if (message.method === "turn/plan/updated") {
+      const steps = (Array.isArray(params?.plan) ? params.plan : []).map((value) => {
+        const step = asRecord(value);
+        const text = getString(step, "step");
+        const status = planStepStatus(getString(step, "status"));
+        return text && status ? { step: text, status } : undefined;
+      }).filter((step): step is { step: string; status: "pending" | "inProgress" | "completed" } => Boolean(step));
+      await this.emitSideActivity(collector, { kind: "plan", steps }, params);
+      return true;
+    }
+    if (message.method === "turn/diff/updated") {
+      const diff = getString(params, "diff");
+      if (diff !== undefined) await this.emitSideActivity(collector, { kind: "diff", diff }, params);
+      return true;
+    }
+    if (message.method === "item/started" || message.method === "item/completed") {
       const item = asRecord(params?.item);
-      if (item?.type === "exitedReviewMode" && typeof item.review === "string") collector.text += item.review;
+      const activity = itemActivity(item, message.method === "item/started");
+      if (activity) await this.emitSideActivity(collector, activity, params, getString(item, "id"));
+      if (message.method === "item/completed" && item?.type === "imageGeneration") {
+        await this.emitSideConversationEvent(collector, imageOutputEvent(collector.sessionKey, item, getTurnId(params)));
+      }
+      if (message.method === "item/completed" && item?.type === "exitedReviewMode" && typeof item.review === "string" && item.review) {
+        await this.emitSideConversationEvent(collector, {
+          type: "message",
+          sessionKey: collector.sessionKey,
+          chunk: item.review,
+          ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
+          ...(getString(item, "id") ? { itemId: getString(item, "id") } : {}),
+        });
+      }
+      return true;
+    }
+    if (message.method === "rawResponseItem/completed") {
+      const item = asRecord(params?.item);
+      if (item?.type === "image_generation_call") {
+        await this.emitSideConversationEvent(collector, imageOutputEvent(collector.sessionKey, item, getTurnId(params)));
+      }
+      return true;
+    }
+    if (message.method === "item/mcpToolCall/progress") {
+      await this.emitSideActivity(collector, {
+        kind: "item",
+        category: "mcp",
+        label: `MCP ${getString(params, "server") ?? "server"}/${getString(params, "tool") ?? "tool"}`,
+        status: "inProgress",
+        ...(getString(params, "message") ? { detail: getString(params, "message") } : {}),
+      }, params, getString(params, "itemId"));
       return true;
     }
     if (message.method === "turn/started") {
-      collector.turnId = getTurnId({ turn: params?.turn }) ?? collector.turnId;
+      collector.activeTurnId = getTurnId({ turn: params?.turn }) ?? collector.activeTurnId;
+      await this.emitSideActivity(collector, { kind: "item", category: "other", label: "Turn started", status: "started" }, params);
       return true;
     }
     if (message.method === "turn/completed") {
-      const turnId = getTurnId(params) ?? collector.turnId;
+      const completed = toTurnCompletedEvent(collector.sessionKey, params);
+      if (completed.turnId) {
+        collector.terminalTurnIds.add(completed.turnId);
+        if (collector.terminalTurnIds.size > 64) {
+          const oldest = collector.terminalTurnIds.values().next().value;
+          if (oldest) collector.terminalTurnIds.delete(oldest);
+        }
+      }
+      if (!completed.turnId || completed.turnId === collector.activeTurnId) collector.activeTurnId = undefined;
+      await this.emitSideConversationEvent(collector, completed);
+      return true;
+    }
+    if (message.method === "serverRequest/resolved") {
+      const requestId = params?.requestId;
+      if (typeof requestId === "string" || typeof requestId === "number") {
+        await this.resolveInteractiveRequest(requestId);
+      }
+      return true;
+    }
+    if (message.method === "thread/closed" || message.method === "thread/deleted" || message.method === "thread/archived") {
+      const action = message.method.slice("thread/".length) as "closed" | "deleted" | "archived";
       this.sideConversations.delete(collector.threadId);
-      collector.resolve({
-        message: collector.text.trim() || "Side conversation completed without a text response.",
+      await this.emitSideConversationEvent(collector, {
+        type: "thread_lifecycle",
+        sessionKey: collector.sessionKey,
         threadId: collector.threadId,
-        ...(turnId ? { turnId } : {}),
+        action,
       });
       return true;
     }
     if (message.method === "error") {
       const error = summarizeUnknown(params?.error) ?? "Side conversation failed.";
-      this.sideConversations.delete(collector.threadId);
-      collector.reject(new Error(error));
+      await this.emitSideActivity(collector, { kind: "notice", level: "error", title: "Codex error", detail: error }, params);
       return true;
     }
     return message.method.startsWith("thread/") || message.method.startsWith("item/");
+  }
+
+  private async emitSideConversationEvent(collector: SideConversationCollector, event: AgentOutputEvent): Promise<void> {
+    try {
+      await collector.onEvent?.(event);
+    } catch (error) {
+      this.logger.warn("codex.side_conversation_progress_failed", {
+        thread_id: collector.threadId,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
+  }
+
+  private async emitSideActivity(
+    collector: SideConversationCollector,
+    activity: AgentActivity,
+    params?: Record<string, unknown>,
+    itemId?: string,
+  ): Promise<void> {
+    await this.emitSideConversationEvent(collector, {
+      type: "activity",
+      sessionKey: collector.sessionKey,
+      threadId: collector.threadId,
+      activity,
+      ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
+      ...(itemId ? { itemId } : {}),
+    });
   }
 
   private async handleRelayCommandNotification(value: unknown): Promise<void> {
@@ -1608,7 +1753,6 @@ export class CodexDriver implements AgentDriver {
     const originToken = getString(params, "originToken");
     this.pruneRelayCommandOrigins();
     const originSessionKey = originToken ? this.relayCommandOrigins.get(originToken)?.sessionKey : undefined;
-    const content = relayCommandContent(params?.content);
     for (const key of this.sessionKeysForThread(state.threadId)) {
       if (key === originSessionKey) continue;
       await this.onOutput({
@@ -1617,7 +1761,6 @@ export class CodexDriver implements AgentDriver {
         gatewayEpoch: this.gatewayEpoch!,
         threadRevision: state.revision,
         ...state,
-        ...(content ? { content } : {}),
       });
     }
     if (originToken && isRelayCommandTerminal(state.phase)) this.relayCommandOrigins.delete(originToken);
@@ -2008,6 +2151,7 @@ export class CodexDriver implements AgentDriver {
 
   private registerInteractiveRequest(requestId: string | number, threadId: string, sessionKeys: string[]): void {
     this.pendingInteractiveRequests.set(interactiveRequestKey(requestId), {
+      requestId,
       threadId,
       sessionKeys: new Set(sessionKeys),
       resolved: false,
@@ -2026,6 +2170,14 @@ export class CodexDriver implements AgentDriver {
     this.clearThreadWaitingState(request.threadId);
     if (!request.resolutionEmitted) {
       request.resolutionEmitted = true;
+      const side = this.sideConversations.get(request.threadId);
+      if (side) {
+        await this.emitSideConversationEvent(side, {
+          type: "server_request_resolved",
+          sessionKey: side.sessionKey,
+          requestId,
+        });
+      }
       for (const key of request.sessionKeys) {
         if (this.sessions.get(key)?.status.threadId === request.threadId) {
           await this.onOutput({ type: "server_request_resolved", sessionKey: key, requestId });
@@ -2112,6 +2264,14 @@ export class CodexDriver implements AgentDriver {
     return running;
   }
 
+  private requireSideConversation(key: string, threadId: string): SideConversationCollector {
+    const collector = this.sideConversations.get(threadId);
+    if (!collector || collector.ownerSessionKey !== key) {
+      throw new Error("Side conversation is not active for the current Relay scope.");
+    }
+    return collector;
+  }
+
   private async writeMessage(message: JsonRpcMessage, options: { ensureWritable?: boolean } = {}): Promise<void> {
     if (options.ensureWritable !== false) await this.ensureWritable();
     if (this.socket?.readyState === WebSocket.OPEN) {
@@ -2163,7 +2323,18 @@ export class CodexDriver implements AgentDriver {
       void this.onExit({ sessionKey: running.status.sessionKey, exitCode, signalCode });
     }
     for (const sideConversation of sideConversations) {
-      sideConversation.reject(this.appServerExitError(exitCode, signalCode));
+      void this.emitSideActivity(sideConversation, {
+        kind: "notice",
+        level: "error",
+        title: "Side conversation disconnected",
+        detail: this.appServerExitError(exitCode, signalCode).message,
+      });
+      void this.emitSideConversationEvent(sideConversation, {
+        type: "thread_lifecycle",
+        sessionKey: sideConversation.sessionKey,
+        threadId: sideConversation.threadId,
+        action: "closed",
+      });
     }
   }
 

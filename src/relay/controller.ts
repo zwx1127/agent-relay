@@ -163,7 +163,12 @@ export class RelayController {
       renderConsole: (conversationId) => this.renderConsole(conversationId),
       ensureAgentStarted: (conversationId, workspace) => this.ensureAgentStarted(conversationId, workspace),
       sendWaitingPromptNotice: (conversationId, status) => this.sendWaitingPromptNotice(conversationId, status),
-      submitTask: (conversationId, text, userMessageId, preference, input) => this.submitTask(conversationId, text, userMessageId, preference, input),
+      sideConversationActive: (conversationId) => this.threadCommands?.hasActiveSideConversation(conversationId) ?? false,
+      sideConversationId: (conversationId) => this.threadCommands?.activeSideConversationId(conversationId),
+      submitTask: (conversationId, text, userMessageId, preference, input) => this.threadCommands?.hasActiveSideConversation(conversationId)
+        ? this.threadCommands.submitActiveSideInput(conversationId, input ?? { text }, userMessageId)
+        : this.submitTask(conversationId, text, userMessageId, preference, input),
+      submitParentTask: (conversationId, text, userMessageId, preference, input) => this.submitTask(conversationId, text, userMessageId, preference, input),
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),
       trySendRendered: (conversationId, rendered, failureEvent, fields) => this.trySendRendered(conversationId, rendered, failureEvent, fields),
       appendSystem: (conversationId, text) => this.appendSystem(conversationId, text),
@@ -212,6 +217,24 @@ export class RelayController {
       renderStrictCallbackPage: (message, body, replyMarkup) => this.renderStrictCallbackPage(message, body, replyMarkup),
       expireCallbackPrompt: (message) => this.expireCallbackPrompt(message),
       clearCodexPromptsForSession: (sessionKeyValue) => this.clearCodexPromptsForSession(sessionKeyValue),
+      enqueueSideEvent: (scopeKey, task) => {
+        void this.conversationQueue.run(scopeKey, task).catch((error) => {
+          this.logger.error("router.side_conversation_event_failed", {
+            scope_key: scopeKey,
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+        });
+      },
+      handleSidePromptEvent: async (event) => {
+        if (event.type === "user_input_request") await this.codexPromptFlow.handleUserInputRequest(event);
+        else if (event.type === "approval_request") await this.codexPromptFlow.handleApprovalRequest(event);
+        else if (event.type === "mcp_elicitation_request") await this.codexPromptFlow.handleMcpElicitationRequest(event);
+        else if (event.type === "server_request_resolved") await this.codexPromptFlow.handleRequestResolved(event);
+      },
+      sendSideImage: (event, replyToMessageId) => this.mediaRelay.sendAgentImageOutput(event, {
+        ...(replyToMessageId !== undefined ? { replyToMessageId } : {}),
+        appendTranscript: false,
+      }),
       hasTaskCreatedAfter: (conversationId, workspaceName, timestamp) => this.hasTaskCreatedAfter(conversationId, workspaceName, timestamp),
     });
     this.agentEvents = new RelayAgentEventRouter({
@@ -365,6 +388,10 @@ export class RelayController {
         await this.sendRendered(message.conversationId, textMessage("This prompt belongs to another topic. Reply in that topic to continue."));
         return;
       }
+      if (command && isSideNavigationCommand(command)
+        && await this.threadCommands.rejectNavigationDuringSideConversation(message.conversationId)) {
+        return;
+      }
       if (command === "/relay") {
         await this.renderConsole(message.conversationId, { forceNewMessage: true });
       } else if (command && await this.slashCommands.handle(message, command, text)) {
@@ -378,7 +405,11 @@ export class RelayController {
           ? this.deps.store.getPendingPrompt(message.conversationId, promptMessageId)
           : this.latestNextMessagePrompt(message.conversationId);
         if (pending?.kind === "workspace_name") {
-          await this.workspaceFlow.createWorkspaceFromPrompt(message.conversationId, pending.promptMessageId, text);
+          if (this.threadCommands.hasActiveSideConversation(message.conversationId)) {
+            await this.threadCommands.rejectNavigationDuringSideConversation(message.conversationId);
+          } else {
+            await this.workspaceFlow.createWorkspaceFromPrompt(message.conversationId, pending.promptMessageId, text);
+          }
         } else if (pending?.kind === "codex_user_input") {
           await this.codexPromptFlow.answerFreeText(message.conversationId, pending.promptMessageId, text);
         } else if (pending?.kind === "codex_mcp_elicitation") {
@@ -387,6 +418,10 @@ export class RelayController {
           await this.mediaRelay.answerMediaActionPrompt(message.conversationId, pending.promptMessageId, text);
         } else if (pending?.kind === "relay_command") {
           await this.threadCommands.answerRelayCommandPrompt(message.conversationId, pending.promptMessageId, text, message.messageId);
+        } else if (pending?.kind === "side_conversation") {
+          await this.threadCommands.answerSideConversationPrompt(message.conversationId, pending.promptMessageId, text, message.messageId);
+        } else if (this.threadCommands.hasActiveSideConversation(message.conversationId)) {
+          await this.threadCommands.submitActiveSideInput(message.conversationId, { text }, message.messageId);
         } else {
           // While Codex is blocked on an explicit question or approval, new
           // direct prompts are held back so they do not bypass the requested gate.
@@ -538,6 +573,11 @@ export class RelayController {
     }
 
     try {
+      if (this.threadCommands.hasActiveSideConversation(message.conversationId)
+        && isSideNavigationCallback(message.data)) {
+        await this.answerCallback(message.callbackQueryId, "Return to the main chat before changing chats or workspaces.");
+        return;
+      }
       const callbackText = await this.routeCallback(message);
       await this.answerCallback(message.callbackQueryId, callbackText);
     } catch (error) {
@@ -741,6 +781,7 @@ export class RelayController {
   }
 
   private async markActiveTask(sessionKeyValue: string, status: "blocked" | "running", turnId?: string): Promise<void> {
+    if (parseSessionKey(sessionKeyValue)?.agentProvider.startsWith("codex-side-")) return;
     await this.taskCoordinator.markActive(sessionKeyValue, status, turnId);
     if (status === "running") await this.activityStreamer.setPhase(sessionKeyValue, "working");
   }
@@ -784,7 +825,7 @@ export class RelayController {
     this.deps.store.deletePendingPromptsForSession(sessionKeyValue);
     this.lastUserMessageIds.delete(sessionKeyValue);
     this.activityStreamer.clearReplyTargets(sessionKeyValue);
-    this.threadCommands?.clearSessionState(sessionKeyValue);
+    await this.threadCommands?.clearSessionState(sessionKeyValue);
   }
 
   private isStaleConsoleCallback(message: Extract<InboundMessage, { kind: "callback_query" }>, payload: string): boolean {
@@ -885,6 +926,7 @@ export class RelayController {
       || kind === "codex_user_input"
       || kind === "codex_approval"
       || kind === "relay_command"
+      || kind === "side_conversation"
       || kind === "media_action";
   }
 
@@ -935,4 +977,25 @@ function sameChatLocation(leftScopeKey: string, rightScopeKey: string): boolean 
   if (String(left.conversationId) !== String(right.conversationId)) return false;
   if (!left.topic && !right.topic) return true;
   return Boolean(left.topic && right.topic && left.topic.provider === right.topic.provider && left.topic.id === right.topic.id);
+}
+
+function isSideNavigationCommand(command: string): boolean {
+  return command === "/new"
+    || command === "/clear"
+    || command === "/resume"
+    || command === "/fork"
+    || command === "/rename"
+    || command === "/archive"
+    || command === "/delete";
+}
+
+function isSideNavigationCallback(data: string): boolean {
+  return data === "ar:n"
+    || data.startsWith("ar:n:")
+    || data.startsWith("ar:uh:")
+    || data.startsWith("ar:wd?:")
+    || data.startsWith("ar:wd!:")
+    || data.startsWith("ar:cmd:resume:")
+    || data.startsWith("ar:cmd:archive:")
+    || data.startsWith("ar:cmd:delete:");
 }

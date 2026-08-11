@@ -29,12 +29,14 @@ interface MediaGroupState {
 
 interface PendingImageActionPayload {
   kind: "image";
+  sideConversationId?: string;
   images: AgentImageInput[];
   originalMessageId?: MessageId;
 }
 
 interface PendingFileActionPayload {
   kind: "file";
+  sideConversationId?: string;
   path: string;
   filename: string;
   fileSize: number;
@@ -44,6 +46,7 @@ interface PendingFileActionPayload {
 
 interface PendingAudioActionPayload {
   kind: "audio";
+  sideConversationId?: string;
   path: string;
   filename: string;
   fileSize: number;
@@ -63,7 +66,10 @@ export interface MediaRelayDeps {
   renderConsole(conversationId: ConversationId): Promise<void>;
   ensureAgentStarted(conversationId: ConversationId, workspace: WorkspaceRecord): Promise<AgentSessionStatus>;
   sendWaitingPromptNotice(conversationId: ConversationId, status: AgentSessionStatus): Promise<boolean>;
+  sideConversationActive(conversationId: ConversationId): boolean;
+  sideConversationId(conversationId: ConversationId): string | undefined;
   submitTask(conversationId: ConversationId, text: string, userMessageId?: MessageId, preference?: TaskSubmitPreference, input?: AgentTaskInput): Promise<void>;
+  submitParentTask(conversationId: ConversationId, text: string, userMessageId?: MessageId, preference?: TaskSubmitPreference, input?: AgentTaskInput): Promise<void>;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
   trySendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, failureEvent: string, fields?: LogFields): Promise<void>;
   appendSystem(conversationId: ConversationId, text: string): void;
@@ -198,7 +204,7 @@ export class MediaRelayService {
     const rawPrompt = sorted.map((item) => item.caption?.trim()).find(Boolean);
     const planMatch = rawPrompt ? /^\/plan(?:@[^\s]+)?(?:\s+([\s\S]*))?$/i.exec(rawPrompt) : undefined;
     const prompt = planMatch ? planMatch[1]?.trim() || "Create a plan based on the attached image(s)." : rawPrompt;
-    if (prompt) {
+    if (prompt && !this.deps.sideConversationActive(scope.scopeKey)) {
       const status = await this.deps.ensureAgentStarted(scope.scopeKey, workspace);
       if (await this.deps.sendWaitingPromptNotice(scope.scopeKey, status)) return;
     }
@@ -214,7 +220,7 @@ export class MediaRelayService {
       });
       return;
     }
-    if (planMatch) this.deps.store.requestCollaborationMode(sessionKey(scope.scopeKey, workspace.name), "plan");
+    if (planMatch && !this.deps.sideConversationActive(scope.scopeKey)) this.deps.store.requestCollaborationMode(sessionKey(scope.scopeKey, workspace.name), "plan");
     await this.deps.submitTask(scope.scopeKey, prompt, sorted[0]?.messageId, "auto", {
       text: prompt,
       attachments: images.map((image) => ({ type: "localImage", path: image.path, ...(image.caption ? { caption: image.caption } : {}) })),
@@ -266,7 +272,7 @@ export class MediaRelayService {
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
 
     const caption = message.caption?.trim();
-    if (caption) {
+    if (caption && !this.deps.sideConversationActive(scope.scopeKey)) {
       const status = await this.deps.ensureAgentStarted(scope.scopeKey, workspace);
       if (await this.deps.sendWaitingPromptNotice(scope.scopeKey, status)) return;
     }
@@ -297,7 +303,7 @@ export class MediaRelayService {
     }
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
     const caption = message.caption?.trim();
-    if (caption) {
+    if (caption && !this.deps.sideConversationActive(scope.scopeKey)) {
       const status = await this.deps.ensureAgentStarted(scope.scopeKey, workspace);
       if (await this.deps.sendWaitingPromptNotice(scope.scopeKey, status)) return;
     }
@@ -383,20 +389,27 @@ export class MediaRelayService {
       await this.deps.sendRendered(scope.scopeKey, messageWithTitle("Attachment prompt expired.", "Resend the image or file with a description."));
       return;
     }
+    const activeSideConversationId = this.deps.sideConversationId(scope.scopeKey);
+    if (payload.sideConversationId && payload.sideConversationId !== activeSideConversationId) {
+      this.deps.store.deletePendingPrompt(scope.scopeKey, promptMessageId);
+      await this.deps.sendRendered(scope.scopeKey, messageWithTitle("BTW attachment prompt ended.", "Run /btw and resend the attachment."));
+      return;
+    }
     this.deps.store.deletePendingPrompt(scope.scopeKey, promptMessageId);
     const prompt = text.trim();
     if (!prompt) {
       await this.deps.sendRendered(scope.scopeKey, messageWithTitle("Attachment not submitted.", "Reply to the attachment prompt with what you want Codex to do."));
       return;
     }
+    const submit = payload.sideConversationId ? this.deps.submitTask : this.deps.submitParentTask;
     if (payload.kind === "image") {
-      await this.deps.submitTask(scope.scopeKey, prompt, payload.originalMessageId ?? promptMessageId, "auto", {
+      await submit(scope.scopeKey, prompt, payload.originalMessageId ?? promptMessageId, "auto", {
         text: prompt,
         attachments: payload.images.map((image) => ({ type: "localImage", path: image.path, ...(image.caption ? { caption: image.caption } : {}) })),
       });
       return;
     }
-    await this.deps.submitTask(scope.scopeKey, prompt, payload.originalMessageId ?? promptMessageId, "auto", {
+    await submit(scope.scopeKey, prompt, payload.originalMessageId ?? promptMessageId, "auto", {
       text: prompt,
       attachments: payload.kind === "audio"
         ? [{ type: "localAudio", path: payload.path, ...(payload.mimeType ? { mimeType: payload.mimeType } : {}) }]
@@ -404,8 +417,11 @@ export class MediaRelayService {
     });
   }
 
-  async sendAgentImageOutput(event: AgentImageOutputEvent): Promise<void> {
-    await this.outbound.sendAgentImageOutput(event);
+  async sendAgentImageOutput(
+    event: AgentImageOutputEvent,
+    options?: { replyToMessageId?: MessageId; appendTranscript?: boolean },
+  ): Promise<void> {
+    await this.outbound.sendAgentImageOutput(event, options);
   }
 
   async sendDebugImage(input: SendImageCapabilityRequest): Promise<{ path: string }> {
@@ -418,6 +434,8 @@ export class MediaRelayService {
 
   private async promptForMediaAction(conversationId: ConversationId, payload: PendingMediaActionPayload): Promise<void> {
     const scope = parseChatScopeKey(String(conversationId));
+    const sideConversationId = this.deps.sideConversationId(scope.scopeKey);
+    if (sideConversationId) payload = { ...payload, sideConversationId };
     const title = payload.kind === "image"
       ? `Received ${payload.images.length === 1 ? "an image" : `${payload.images.length} images`}.`
       : payload.kind === "audio"
@@ -467,6 +485,7 @@ function parseMediaActionPayload(payloadJson: string | undefined): PendingMediaA
       kind: "image",
       images,
       ...(isMessageId(record.originalMessageId) ? { originalMessageId: record.originalMessageId } : {}),
+      ...(typeof record.sideConversationId === "string" ? { sideConversationId: record.sideConversationId } : {}),
     };
   }
   if (record.kind === "file" || record.kind === "audio") {
@@ -478,6 +497,7 @@ function parseMediaActionPayload(payloadJson: string | undefined): PendingMediaA
       fileSize: record.fileSize,
       ...(typeof record.mimeType === "string" ? { mimeType: record.mimeType } : {}),
       ...(isMessageId(record.originalMessageId) ? { originalMessageId: record.originalMessageId } : {}),
+      ...(typeof record.sideConversationId === "string" ? { sideConversationId: record.sideConversationId } : {}),
     };
   }
   return undefined;

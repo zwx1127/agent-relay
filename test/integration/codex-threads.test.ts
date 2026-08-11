@@ -173,7 +173,12 @@ describe("CodexDriver thread operations", () => {
     );
 
     const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: "/tmp/demo" });
-    const result = await driver.sideConversation(status.sessionKey, "side question");
+    const sideEvents: AgentOutputEvent[] = [];
+    const opened = await driver.openSideConversation(status.sessionKey, {
+      onEvent: (event) => { sideEvents.push(event); },
+    });
+    const started = await driver.sendSideConversationInput(status.sessionKey, opened.threadId, { text: "side question" });
+    await sleep(30);
 
     const messages = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line));
     const fork = messages.find((message) => message.method === "thread/fork" && message.params.ephemeral);
@@ -191,8 +196,33 @@ describe("CodexDriver thread operations", () => {
     expect(injected.params.threadId).toBe("side-thread");
     expect(JSON.stringify(injected.params.items)).toContain("Side conversation boundary.");
     expect(turnStart.params.input[0].text).toBe("side question");
-    expect(messages.find((message) => message.method === "thread/unsubscribe").params).toEqual({ threadId: "side-thread" });
-    expect(result).toEqual({ message: "side answer", threadId: "side-thread", turnId: "turn-1" });
+    expect(started).toEqual({ turnId: "turn-1", steered: false });
+    expect(sideEvents).toContainEqual(expect.objectContaining({ type: "message", chunk: "side answer", turnId: "turn-1" }));
+    expect(sideEvents).toContainEqual(expect.objectContaining({ type: "turn_completed", status: "completed", turnId: "turn-1" }));
+    sideEvents.length = 0;
+    await driver.sendSideConversationInput(status.sessionKey, opened.threadId, { text: "failed turn" });
+    await sleep(30);
+    expect(sideEvents).toContainEqual(expect.objectContaining({
+      type: "turn_completed",
+      status: "failed",
+      error: expect.objectContaining({ message: "boom" }),
+    }));
+    const slow = await driver.sendSideConversationInput(status.sessionKey, opened.threadId, { text: "slow active" });
+    const steered = await driver.sendSideConversationInput(status.sessionKey, opened.threadId, { text: "second while active" });
+    expect(slow.steered).toBe(false);
+    expect(steered).toEqual({ turnId: slow.turnId, steered: true });
+    const sideRequests = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(sideRequests.filter((message) => message.method === "turn/steer"
+      && message.params.threadId === "side-thread"
+      && message.params.input[0]?.text === "slow active")).toHaveLength(0);
+    const steeredRequest = sideRequests.find((message) => message.method === "turn/steer"
+      && message.params.threadId === "side-thread"
+      && message.params.input[0]?.text === "second while active");
+    expect(steeredRequest.params).toMatchObject({ expectedTurnId: slow.turnId, input: [{ type: "text", text: "second while active" }] });
+    await driver.interruptSideConversation(status.sessionKey, opened.threadId);
+    await driver.closeSideConversation(status.sessionKey, opened.threadId);
+    const finalMessages = readLog(fake).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(finalMessages.find((message) => message.method === "thread/unsubscribe").params).toEqual({ threadId: "side-thread" });
     expect(driver.getStatus(status.sessionKey)?.threadId).toBe("thread-1");
     expect(events).toEqual([]);
     await driver.stop(status.sessionKey);

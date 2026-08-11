@@ -102,7 +102,7 @@ async function main(): Promise<void> {
   const pendingRequests = new Map<string, PendingServerRequest>();
   const relayedRequestIds = new Map<string, string>();
   const liveEvents = new GatewayLiveEventSequencer();
-  const relayControl = new GatewayRelayControl(() => clients.values(), (threadId) => observer?.anchor(threadId));
+  const relayControl = new GatewayRelayControl(() => clients.values());
   const startedAt = Date.now();
   const cleanup = (): void => {
     const state = readGatewayState(config.statePath);

@@ -1,4 +1,4 @@
-import type { AgentSessionStatus, AgentSideConversationResult } from "../../../ports/agent.ts";
+import type { AgentOutputEvent, AgentSessionStatus } from "../../../ports/agent.ts";
 import { BackgroundTerminalTracker } from "./background-terminals.ts";
 
 export interface RunningSession {
@@ -14,11 +14,12 @@ export interface PendingGlobalNotice {
 }
 
 export interface SideConversationCollector {
+  ownerSessionKey: string;
+  sessionKey: string;
   threadId: string;
-  text: string;
-  turnId?: string;
-  resolve(result: AgentSideConversationResult): void;
-  reject(error: Error): void;
+  activeTurnId?: string;
+  terminalTurnIds: Set<string>;
+  onEvent?(event: AgentOutputEvent): void | Promise<void>;
 }
 
 export function clearRecentError(running: RunningSession): void {

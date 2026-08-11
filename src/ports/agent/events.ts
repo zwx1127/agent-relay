@@ -1,6 +1,6 @@
 import type { AgentTaskInput } from "./input.ts";
 import type { AgentThreadGoal } from "./thread.ts";
-import type { AgentRelayCommandContent, AgentRelayCommandState, AgentRelayThreadState } from "./control.ts";
+import type { AgentRelayCommandState, AgentRelayThreadState } from "./control.ts";
 
 export type AgentOutputHandler = (event: AgentOutputEvent) => void | Promise<void>;
 export type AgentExitHandler = (event: AgentExitEvent) => void | Promise<void>;
@@ -27,7 +27,6 @@ export interface AgentRelayCommandStateEvent extends AgentRelayCommandState {
   sessionKey: string;
   gatewayEpoch: string;
   threadRevision: number;
-  content?: AgentRelayCommandContent;
 }
 
 export interface AgentRelayThreadStateEvent extends AgentRelayThreadState {

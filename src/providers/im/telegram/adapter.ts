@@ -193,7 +193,10 @@ export class TelegramAdapter implements ImAdapter {
     for (const [index, chunk] of chunks.entries()) {
       const isLastChunk = index === chunks.length - 1;
       const atMostOnce = options.deliveryMode === "at-most-once";
-      const deferInlineKeyboard = atMostOnce && isLastChunk && !options.forceReply && options.replyMarkup !== undefined;
+      // Telegram accepts only one reply_markup shape per send. When a control
+      // card needs both ForceReply and buttons, send ForceReply first so the
+      // client opens its reply composer, then replace the markup with buttons.
+      const deferInlineKeyboard = isLastChunk && options.replyMarkup !== undefined && (atMostOnce || options.forceReply === true);
       try {
         const result = await this.request<{ message_id?: number }>("sendMessage", {
           chat_id: conversationId,
@@ -203,7 +206,7 @@ export class TelegramAdapter implements ImAdapter {
           ...(chunk.entities.length > 0 ? { entities: chunk.entities } : {}),
           ...(replyParametersForOptions(options, index === 0)),
           ...(telegramThreadForOptions(options)),
-          ...(replyMarkupForOptions(options, isLastChunk && !deferInlineKeyboard)),
+          ...(replyMarkupForOptions(options, isLastChunk && (!deferInlineKeyboard || options.forceReply === true))),
         }, atMostOnce ? { retryAmbiguousErrors: false } : {});
         if (atMostOnce && result?.message_id === undefined) {
           throw new MessageDeliveryUnknownError(

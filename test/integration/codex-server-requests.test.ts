@@ -6,6 +6,45 @@ import { cleanupCodexHarness, fakeCodexBin, readLog, sleep } from "../support/co
 afterEach(cleanupCodexHarness);
 
 describe("CodexDriver server requests and recovery", () => {
+  test("keeps side-conversation input requests on the origin collector and cancels them on close", async () => {
+    const fake = fakeCodexBin();
+    const parentEvents: AgentOutputEvent[] = [];
+    const sideEvents: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => { parentEvents.push(event); },
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd() });
+    const first = await driver.openSideConversation(status.sessionKey, {
+      eventSessionKey: "codex-side:1:demo",
+      onEvent: (event) => { sideEvents.push(event); },
+    });
+    await driver.sendSideConversationInput(status.sessionKey, first.threadId, { text: "ask" });
+    await sleep(100);
+    expect(parentEvents).toEqual([]);
+    expect(sideEvents).toContainEqual(expect.objectContaining({
+      type: "user_input_request",
+      sessionKey: "codex-side:1:demo",
+      requestId: 900,
+    }));
+    await driver.respond("codex-side:1:demo", 900, { answers: { mode: { answers: ["Fast"] } } });
+    expect(sideEvents).toContainEqual({ type: "server_request_resolved", sessionKey: "codex-side:1:demo", requestId: 900 });
+    await driver.closeSideConversation(status.sessionKey, first.threadId);
+
+    sideEvents.length = 0;
+    const second = await driver.openSideConversation(status.sessionKey, {
+      eventSessionKey: "codex-side-2:1:demo",
+      onEvent: (event) => { sideEvents.push(event); },
+    });
+    await driver.sendSideConversationInput(status.sessionKey, second.threadId, { text: "ask" });
+    await sleep(100);
+    await driver.closeSideConversation(status.sessionKey, second.threadId);
+    expect(readLog(fake)).toContain('"id":900,"error":{"code":-32000,"message":"Side conversation closed."}');
+    await driver.stop(status.sessionKey);
+  });
+
   test("fans one shared thread out to multiple Relay scopes and unsubscribes only after the last release", async () => {
     const fake = fakeCodexBin();
     const events: AgentOutputEvent[] = [];

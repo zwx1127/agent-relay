@@ -22,12 +22,6 @@ export interface AgentThreadSwitchResult {
   threadName?: string;
 }
 
-export interface AgentSideConversationResult {
-  message: string;
-  threadId?: string;
-  turnId?: string;
-}
-
 export interface AgentBackgroundTerminalSummary {
   itemId?: string;
   processId?: string;

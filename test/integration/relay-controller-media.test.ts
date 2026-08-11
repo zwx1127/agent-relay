@@ -544,6 +544,48 @@ describe("relay controller tasks and media", () => {
     expect(image?.type === "localImage" ? image.caption : undefined).toBe("inspect this");
   });
 
+  test("photo prompts stay in the active multi-turn BTW child", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    adapter.downloads.set("photo-large", new Uint8Array([1, 2, 3]).buffer);
+
+    await router.handle(textMessage("/btw"));
+    await router.handle(mediaMessage("inspect this in BTW"));
+    await waitForStreamFlush();
+
+    expect(agent.sent).toEqual([]);
+    expect(agent.sideConversationOpens).toHaveLength(1);
+    expect(agent.sideConversationSends).toHaveLength(1);
+    expect(agent.sideConversationSends[0]?.text).toBe("inspect this in BTW");
+    expect(agent.sideConversationSends[0]?.input.attachments?.[0]).toMatchObject({ type: "localImage" });
+    expect(store.latestTranscriptEvent("1", "demo", "user")).toBeUndefined();
+  });
+
+  test("an unanswered BTW attachment prompt cannot fall through to the parent after exit", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/btw"));
+    const control = adapter.sent.at(-1)!;
+    const close = control.options?.replyMarkup?.inline_keyboard[0]?.[0]?.callback_data;
+    await router.handle(mediaMessage());
+    const attachmentPrompt = adapter.sent.at(-1)!;
+    expect(JSON.parse(store.getPendingPrompt("1", attachmentPrompt.messageId!)!.payloadJson!).sideConversationId).toBeTruthy();
+
+    await router.handle(callbackMessage(close!, 7, "cb-close-before-media", control.messageId));
+    await router.handle(textMessage("inspect it", 7, attachmentPrompt.messageId));
+
+    expect(agent.sent).toEqual([]);
+    expect(agent.sideConversationSends).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("BTW attachment prompt ended");
+  });
+
   test("photo captions can start the first Plan turn immediately", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");

@@ -860,22 +860,352 @@ describe("relay controller thread commands", () => {
     await router.handle(textMessage("/side where is config?"));
     await router.handle(textMessage("/btw what changed?"));
     await router.handle(textMessage("/side"));
+    await waitForStreamFlush();
 
     expect(agent.sent).toEqual([]);
+    expect(agent.sideConversationOpens).toHaveLength(1);
     expect(agent.sideConversations).toEqual([
       { key: "codex:1:demo", text: "where is config?" },
       { key: "codex:1:demo", text: "what changed?" },
     ]);
-    expect(adapter.sent.map((message) => message.text)).toEqual([
-      "Side conversation\n\nside: where is config?",
-      "Side conversation\n\nside: what changed?",
-      "Side question requested.",
-    ]);
+    expect(adapter.sent.map((message) => message.text)).toEqual(expect.arrayContaining([
+      expect.stringContaining("BTW mode is active."),
+      expect.stringContaining("Question: where is config?"),
+      expect.stringContaining("Question: what changed?"),
+    ]));
+    expect(adapter.edited.map((message) => message.text)).toEqual(expect.arrayContaining([
+      expect.stringContaining("Answer:\nside: where is config?"),
+      expect.stringContaining("Answer:\nside: what changed?"),
+    ]));
     expect(adapter.sent.at(-1)?.options?.forceReply).toBe(true);
-    expect(adapter.sent.at(-1)?.options?.forceReplyInstruction).toBe("Reply to this prompt, or send your next message with the side question.");
+    expect(adapter.sent.at(-1)?.options?.forceReplyInstruction).toBe("Reply here, or send your next message, to ask BTW.");
+    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard[0]?.[0]?.text).toBe("Return to main");
   });
 
-  test("/side is rejected during a review turn", async () => {
+  test("bare /btw reuses its prompt card and reacts to the actual question message", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle({ kind: "message", id: "10", messageId: "10", conversationId: "1", userId: 7, text: "/btw" });
+    const prompt = adapter.sent.at(-1)!;
+    expect(prompt.text).toContain("BTW mode is active.");
+
+    await router.handle({
+      kind: "message",
+      id: "20",
+      messageId: "20",
+      conversationId: "1",
+      userId: 7,
+      text: "summarize progress",
+      replyToMessageId: prompt.messageId,
+    });
+    await waitForStreamFlush();
+
+    expect(agent.sideConversations).toEqual([{ key: "codex:1:demo", text: "summarize progress" }]);
+    expect(adapter.sent).toHaveLength(2);
+    const workCard = adapter.sent.at(-1)!;
+    expect(adapter.edited.filter((message) => message.text.includes("Side conversation"))
+      .every((message) => String(message.options.messageId) === String(workCard.messageId))).toBe(true);
+    expect(adapter.edited.at(-1)?.text).toContain("Answer:\nside: summarize progress");
+    expect(adapter.edited.at(-1)?.text).toContain("Status: Completed");
+    expect(adapter.reactions).toEqual([
+      { conversationId: "1", messageId: "20", emoji: "🫡", options: { isBig: true } },
+      { conversationId: "1", messageId: "20", emoji: "✍", options: undefined },
+      { conversationId: "1", messageId: "20", emoji: "😎", options: undefined },
+    ]);
+    expect(store.latestTranscriptEvent("1", "demo", "user")).toBeUndefined();
+    expect(store.latestTranscriptEvent("1", "demo", "agent")).toBeUndefined();
+  });
+
+  test("BTW keeps one ephemeral child across completed turns and creates a fresh work card per turn", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle({ kind: "message", id: "21", messageId: "21", conversationId: "1", userId: 7, text: "/btw first question" });
+    await waitForStreamFlush();
+    await router.handle({ kind: "message", id: "22", messageId: "22", conversationId: "1", userId: 7, text: "second question" });
+    await waitForStreamFlush();
+
+    expect(agent.sideConversationOpens).toHaveLength(1);
+    expect(agent.sideConversationSends.map(({ text, steered }) => ({ text, steered }))).toEqual([
+      { text: "first question", steered: false },
+      { text: "second question", steered: false },
+    ]);
+    const workCards = adapter.sent.filter((message) => message.text.startsWith("Side conversation"));
+    expect(workCards).toHaveLength(2);
+    expect(workCards[0]?.messageId).not.toBe(workCards[1]?.messageId);
+    expect(store.latestTranscriptEvent("1", "demo", "user")).toBeUndefined();
+    expect(store.latestTranscriptEvent("1", "demo", "agent")).toBeUndefined();
+  });
+
+  test("BTW steers follow-ups into the running child turn and keeps one work card", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    let releaseSideConversation: () => void = () => {};
+    agent.sideConversationWait = new Promise<void>((resolve) => { releaseSideConversation = resolve; });
+
+    await router.handle({ kind: "message", id: "23", messageId: "23", conversationId: "1", userId: 7, text: "/btw inspect it" });
+    await router.handle({ kind: "message", id: "24", messageId: "24", conversationId: "1", userId: 7, text: "also summarize it" });
+
+    expect(agent.sideConversationSends.map(({ text, steered }) => ({ text, steered }))).toEqual([
+      { text: "inspect it", steered: false },
+      { text: "also summarize it", steered: true },
+    ]);
+    expect(adapter.sent.filter((message) => message.text.startsWith("Side conversation"))).toHaveLength(1);
+    expect(adapter.edited.at(-1)?.text).toContain("Follow-up: also summarize it");
+    releaseSideConversation();
+    await waitForStreamFlush();
+  });
+
+  test("BTW answers Codex questions through an isolated child session", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.sideConversationWait = new Promise<void>(() => undefined);
+
+    await router.handle({ kind: "message", id: "241", messageId: "241", conversationId: "1", userId: 7, text: "/btw inspect" });
+    const opened = agent.sideConversationOpens[0]!;
+    await agent.emitSideConversationEvent(opened.threadId, {
+      type: "user_input_request",
+      requestId: "side-request",
+      turnId: "side-turn-1",
+      questions: [{ id: "scope", header: "Scope", question: "Which area?", isOther: true }],
+    });
+    await Bun.sleep(10);
+    const question = adapter.sent.at(-1)!;
+    expect(question.text).toContain("Which area?");
+
+    await router.handle({
+      kind: "message",
+      id: "242",
+      messageId: "242",
+      conversationId: "1",
+      userId: 7,
+      text: "gateway only",
+      replyToMessageId: question.messageId,
+    });
+
+    expect(agent.responses).toEqual([{
+      key: opened.eventSessionKey,
+      requestId: "side-request",
+      result: { answers: { scope: { answers: ["gateway only"] } } },
+    }]);
+    expect(agent.sent).toEqual([]);
+    expect(store.getTask(1)).toBeUndefined();
+  });
+
+  test("BTW image output replies to its work card without entering the parent transcript", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.sideConversationWait = new Promise<void>(() => undefined);
+
+    await router.handle({ kind: "message", id: "243", messageId: "243", conversationId: "1", userId: 7, text: "/btw draw it" });
+    const opened = agent.sideConversationOpens[0]!;
+    const workCard = adapter.sent.find((message) => message.text.startsWith("Side conversation"))!;
+    await agent.emitSideConversationEvent(opened.threadId, {
+      type: "image",
+      data: "aW1hZ2U=",
+      mimeType: "image/png",
+      caption: "BTW result",
+      turnId: "side-turn-1",
+    });
+    await Bun.sleep(20);
+
+    expect(adapter.photos).toHaveLength(1);
+    expect(adapter.photos[0]?.options).toMatchObject({ caption: "BTW result", replyToMessageId: workCard.messageId });
+    expect(store.latestTranscriptEvent("1", "demo", "agent")).toBeUndefined();
+  });
+
+  test("Return to main interrupts and closes BTW before ordinary messages reach the parent", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.sideConversationWait = new Promise<void>(() => undefined);
+
+    await router.handle({ kind: "message", id: "25", messageId: "25", conversationId: "1", userId: 7, text: "/btw keep this aside" });
+    const control = adapter.sent.find((message) => message.text.startsWith("BTW mode is active"))!;
+    const close = control.options?.replyMarkup?.inline_keyboard[0]?.[0]?.callback_data;
+    await router.handle(textMessage("/new should-not-run"));
+    expect(agent.sideConversationCloses).toEqual([]);
+    expect(adapter.sent.at(-1)?.text).toContain("BTW mode is active");
+
+    await router.handle(callbackMessage(close!, 7, "cb-side-close", control.messageId));
+    expect(agent.sideConversationInterrupts).toHaveLength(1);
+    expect(agent.sideConversationCloses).toHaveLength(1);
+    expect(adapter.edited.at(-1)?.text).toContain("Returned to main chat");
+
+    await router.handle({ kind: "message", id: "26", messageId: "26", conversationId: "1", userId: 7, text: "continue on main" });
+    expect(agent.sent.at(-1)?.text).toBe("continue on main");
+  });
+
+  test("/btw releases the inbound queue while its side turn runs", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    let releaseSideConversation: () => void = () => {};
+    agent.sideConversationWait = new Promise<void>((resolve) => {
+      releaseSideConversation = resolve;
+    });
+
+    await router.handle({ kind: "message", id: "30", messageId: "30", conversationId: "1", userId: 7, text: "/btw keep checking" });
+    expect(adapter.sent.at(-1)?.text).toContain("Status: Working");
+
+    await Promise.race([
+      router.handle({ kind: "message", id: "31", messageId: "31", conversationId: "1", userId: 7, text: "/help" }),
+      Bun.sleep(100).then(() => { throw new Error("/btw kept the inbound queue blocked"); }),
+    ]);
+    expect(adapter.sent.at(-1)?.text).toContain("Relay commands");
+
+    releaseSideConversation();
+    await waitForStreamFlush();
+    expect(adapter.edited.at(-1)?.text).toContain("Status: Completed");
+    expect(agent.sent).toEqual([]);
+    expect(store.getTask(1)).toBeUndefined();
+  });
+
+  test("/btw streams side-answer deltas into the same working card", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    let releaseSideConversation: () => void = () => {};
+    agent.sideConversationChunks = ["partial answer"];
+    agent.sideConversationWait = new Promise<void>((resolve) => {
+      releaseSideConversation = resolve;
+    });
+
+    await router.handle({ kind: "message", id: "35", messageId: "35", conversationId: "1", userId: 7, text: "/btw stream it" });
+    const workingCard = adapter.sent.at(-1)!;
+    await Bun.sleep(550);
+
+    expect(adapter.edited.at(-1)?.options.messageId).toBe(workingCard.messageId);
+    expect(adapter.edited.at(-1)?.text).toContain("Answer:\npartial answer");
+    expect(adapter.edited.at(-1)?.text).toContain("Status: Working");
+
+    releaseSideConversation();
+    await waitForStreamFlush();
+    expect(adapter.edited.at(-1)?.text).toContain("Status: Completed");
+  });
+
+  test("/btw keeps an active parent turn and its task untouched", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    const status = await agent.start({ conversationId: "1", workspaceName: "demo", workspacePath: path });
+    status.activeTurnId = "parent-turn";
+    const parentTask = store.createTask({ conversationId: "1", workspaceName: "demo", text: "parent work", status: "running", userMessageId: "40" });
+    store.updateTask(parentTask.id, { turnId: "parent-turn" });
+
+    await router.handle({ kind: "message", id: "41", messageId: "41", conversationId: "1", userId: 7, text: "/btw summarize without interrupting" });
+    await waitForStreamFlush();
+
+    expect(agent.getStatus("codex:1:demo")?.activeTurnId).toBe("parent-turn");
+    expect(store.getTask(parentTask.id)?.status).toBe("running");
+    expect(agent.sent).toEqual([]);
+    expect(adapter.edited.at(-1)?.text).toContain("Status: Completed");
+    expect(store.latestTranscriptEvent("1", "demo", "user")).toBeUndefined();
+    expect(store.latestTranscriptEvent("1", "demo", "agent")).toBeUndefined();
+  });
+
+  test("/btw falls back to one final reply when its working card cannot be edited", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    let releaseSideConversation: () => void = () => {};
+    agent.sideConversationWait = new Promise<void>((resolve) => {
+      releaseSideConversation = resolve;
+    });
+
+    await router.handle({ kind: "message", id: "50", messageId: "50", conversationId: "1", userId: 7, text: "/btw fallback" });
+    expect(adapter.sent).toHaveLength(2);
+    adapter.failEditMessage = new Error("editing unavailable");
+    releaseSideConversation();
+    await waitForStreamFlush();
+
+    expect(adapter.sent).toHaveLength(3);
+    expect(adapter.sent[1]?.text).toContain("Status: Working");
+    expect(adapter.sent[2]?.text).toContain("Status: Completed");
+    expect(adapter.reactions.at(-1)).toEqual({ conversationId: "1", messageId: "50", emoji: "😎", options: undefined });
+  });
+
+  test("/btw preserves oversized answers through the existing page controls", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.sideConversationMessage = "long answer ".repeat(500);
+    agent.sideConversationChunks = [agent.sideConversationMessage];
+
+    await router.handle({ kind: "message", id: "60", messageId: "60", conversationId: "1", userId: 7, text: "/btw long answer" });
+    await waitForStreamFlush();
+
+    const finalEdit = adapter.edited.at(-1)!;
+    expect(finalEdit.text).toContain("Page 1/");
+    const buttons = finalEdit.options.replyMarkup?.inline_keyboard.flat() ?? [];
+    expect(buttons).toHaveLength(4);
+    expect(buttons.every((button) => button.callback_data.startsWith("ar:p:"))).toBe(true);
+    const [, , token] = buttons[0]!.callback_data.split(":");
+    expect(token && store.getPagedOutput(token)?.text).toContain("long answer");
+  });
+
+  test("/btw closes provider failures in the working card without a duplicate error message", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.sideConversationFailure = new Error("side transport failed");
+
+    await router.handle({ kind: "message", id: "70", messageId: "70", conversationId: "1", userId: 7, text: "/btw failure" });
+    await waitForStreamFlush();
+
+    expect(adapter.sent).toHaveLength(2);
+    expect(adapter.edited.at(-1)?.text).toContain("Error: side transport failed");
+    expect(adapter.edited.at(-1)?.text).toContain("Status: Failed");
+    expect(adapter.reactions.at(-1)).toEqual({ conversationId: "1", messageId: "70", emoji: "😱", options: undefined });
+  });
+
+  test("/btw continues updating its card when reactions are unavailable", async () => {
+    const { router, store, adapter, agent, root, logLines } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    adapter.failReaction = new Error("reaction unavailable");
+
+    await router.handle({ kind: "message", id: "80", messageId: "80", conversationId: "1", userId: 7, text: "/btw no reactions" });
+    await waitForStreamFlush();
+
+    expect(agent.sideConversations).toHaveLength(1);
+    expect(adapter.edited.at(-1)?.text).toContain("Status: Completed");
+    expect(logLines.join("\n")).toContain("router.side_conversation_reaction_failed");
+  });
+
+  test("/side remains available while the parent review turn is active", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -885,10 +1215,11 @@ describe("relay controller thread commands", () => {
     status.reviewInProgress = true;
 
     await router.handle(textMessage("/side explain the review"));
+    await waitForStreamFlush();
 
-    expect(agent.sideConversations).toEqual([]);
-    expect(adapter.sent.at(-1)?.text).toContain("Side conversation unavailable.");
-    expect(adapter.sent.at(-1)?.text).toContain("review to finish");
+    expect(agent.sideConversations).toEqual([{ key: "codex:1:demo", text: "explain the review" }]);
+    expect(status.reviewInProgress).toBe(true);
+    expect(adapter.edited.at(-1)?.text).toContain("Status: Completed");
   });
 
   test("/ps lists only Codex background terminals tracked by the driver", async () => {

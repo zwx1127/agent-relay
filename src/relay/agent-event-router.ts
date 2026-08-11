@@ -60,10 +60,7 @@ export interface RelayAgentEventRouterDeps {
 interface SharedCommandCardState {
   sessionKey: string;
   command: AgentRelayCommandState;
-  question: string;
-  answer: string;
   messageId?: MessageId;
-  timer?: Timer;
   flushPromise?: Promise<void>;
 }
 
@@ -140,17 +137,9 @@ export class RelayAgentEventRouter {
     const state = this.sharedCommandCards.get(key) ?? {
       sessionKey: event.sessionKey,
       command: event,
-      question: "",
-      answer: "",
     };
     state.command = event;
-    if (event.content?.type === "side_question") state.question = event.content.text;
-    if (event.content?.type === "side_delta") state.answer += event.content.text;
     this.sharedCommandCards.set(key, state);
-    if (event.content?.type === "side_delta" && !isRelayCommandTerminal(event.phase)) {
-      this.scheduleSharedCommandCard(key, parsed.scopeKey, state);
-      return;
-    }
     await this.flushSharedCommandCard(key, parsed.scopeKey, state);
     if (isRelayCommandTerminal(event.phase)) this.sharedCommandCards.delete(key);
   }
@@ -170,15 +159,12 @@ export class RelayAgentEventRouter {
     this.relaySnapshotRevisions.set(event.sessionKey, { gatewayEpoch: event.gatewayEpoch, revision: event.revision });
     this.applyRelayThreadState(event.sessionKey, event.threadState);
     for (const command of event.commands) {
-      if (!command.question && !command.answer) continue;
       const key = `${event.sessionKey}\0${command.commandId}`;
       if ((this.sharedCommandRevisions.get(key) ?? -1) >= command.revision) continue;
       this.sharedCommandRevisions.set(key, command.revision);
       const state: SharedCommandCardState = {
         sessionKey: event.sessionKey,
         command,
-        question: command.question ?? "",
-        answer: command.answer ?? "",
       };
       this.sharedCommandCards.set(key, state);
       await this.flushSharedCommandCard(key, parsed.scopeKey, state);
@@ -194,9 +180,8 @@ export class RelayAgentEventRouter {
 
   private clearSharedCommandState(sessionKey: string): void {
     const prefix = `${sessionKey}\0`;
-    for (const [key, state] of this.sharedCommandCards) {
+    for (const key of this.sharedCommandCards.keys()) {
       if (!key.startsWith(prefix)) continue;
-      if (state.timer) clearTimeout(state.timer);
       this.sharedCommandCards.delete(key);
     }
     for (const key of this.sharedCommandRevisions.keys()) {
@@ -216,19 +201,7 @@ export class RelayAgentEventRouter {
     else this.deps.store.requestCollaborationMode(sessionKey, state.collaborationMode);
   }
 
-  private scheduleSharedCommandCard(key: string, scopeKey: string, state: SharedCommandCardState): void {
-    if (state.timer) return;
-    state.timer = setTimeout(() => {
-      state.timer = undefined;
-      void this.flushSharedCommandCard(key, scopeKey, state);
-    }, 500);
-  }
-
-  private async flushSharedCommandCard(key: string, scopeKey: string, state: SharedCommandCardState): Promise<void> {
-    if (state.timer) {
-      clearTimeout(state.timer);
-      state.timer = undefined;
-    }
+  private async flushSharedCommandCard(_key: string, scopeKey: string, state: SharedCommandCardState): Promise<void> {
     const previous = state.flushPromise ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(async () => {
       const rendered = sharedCommandMessage(state);
@@ -250,7 +223,6 @@ export class RelayAgentEventRouter {
     state.flushPromise = current;
     await current;
     if (state.flushPromise === current) state.flushPromise = undefined;
-    if (!this.sharedCommandCards.has(key) && state.timer) clearTimeout(state.timer);
   }
 
   private async handleUserMessage(event: AgentUserMessageEvent): Promise<void> {
@@ -377,20 +349,13 @@ export class RelayAgentEventRouter {
 function sharedCommandMessage(state: SharedCommandCardState): RenderedTelegramText {
   const command = relayCommandLabel(state.command.kind);
   const phase = relayCommandPhaseLabel(state.command.phase);
-  if (state.command.kind !== "side") return messageWithTitle("Relay command · shared thread", `${command}\nStatus: ${phase}`);
-  const sections = [
-    state.question ? `Question: ${truncateSharedCardText(state.question)}` : undefined,
-    state.answer ? `Answer: ${truncateSharedCardText(state.answer)}` : undefined,
-    `Status: ${phase}`,
-  ].filter((section): section is string => Boolean(section));
-  return messageWithTitle("Side conversation · shared thread", sections.join("\n\n"));
+  return messageWithTitle("Relay command · shared thread", `${command}\nStatus: ${phase}`);
 }
 
 function relayCommandLabel(kind: AgentRelayCommandState["kind"]): string {
   switch (kind) {
     case "review": return "/review";
     case "compact": return "/compact";
-    case "side": return "/side · /btw";
     case "rename": return "/rename";
     case "goal_update": return "/goal update";
     case "goal_clear": return "/goal clear";
@@ -413,8 +378,4 @@ function relayCommandPhaseLabel(phase: AgentRelayCommandState["phase"]): string 
 
 function isRelayCommandTerminal(phase: AgentRelayCommandState["phase"]): boolean {
   return phase === "completed" || phase === "failed" || phase === "interrupted";
-}
-
-function truncateSharedCardText(text: string, limit = 3_000): string {
-  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
 }

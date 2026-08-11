@@ -38,7 +38,10 @@ export interface OutboundMediaDeps {
 export class OutboundMediaService {
   constructor(private readonly deps: OutboundMediaDeps) {}
 
-  async sendAgentImageOutput(event: AgentImageOutputEvent): Promise<void> {
+  async sendAgentImageOutput(
+    event: AgentImageOutputEvent,
+    options: { replyToMessageId?: MessageId; appendTranscript?: boolean } = {},
+  ): Promise<void> {
     const parsed = parseSessionKey(event.sessionKey);
     if (!parsed) return;
     const workspace = this.deps.currentWorkspace(parsed.scopeKey);
@@ -46,7 +49,14 @@ export class OutboundMediaService {
     try {
       const path = event.path ? await this.copyImage(workspace.path, event.path) : event.data ? await saveGeneratedImage(workspace.path, event.data) : undefined;
       if (!path) throw new Error("Codex image output did not include image data.");
-      await this.sendStoredImage(parsed.scopeKey, parsed.workspaceName, path, event.caption, this.deps.lastUserMessageId(event.sessionKey));
+      await this.sendStoredImage(
+        parsed.scopeKey,
+        parsed.workspaceName,
+        path,
+        event.caption,
+        options.replyToMessageId ?? this.deps.lastUserMessageId(event.sessionKey),
+        options.appendTranscript ?? true,
+      );
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       this.deps.logger.error("router.agent_image_send_failed", {
@@ -55,7 +65,7 @@ export class OutboundMediaService {
         error: error instanceof Error ? error : new Error(detail),
       });
       await this.deps.trySendRendered(parsed.scopeKey, formatErrorMessage(`Could not send image: ${detail}`), "router.agent_image_error_notice_failed", { session_key: event.sessionKey });
-      this.deps.appendSystem(parsed.scopeKey, `Error: Could not send image: ${detail}\n`);
+      if (options.appendTranscript ?? true) this.deps.appendSystem(parsed.scopeKey, `Error: Could not send image: ${detail}\n`);
     }
   }
 
@@ -148,7 +158,14 @@ export class OutboundMediaService {
     return await saveRelayFile(workspacePath, "outgoing", await readFile(sourcePath), { filename: basename(sourcePath) });
   }
 
-  private async sendStoredImage(conversationId: ConversationId, workspaceName: string, path: string, caption?: string, replyToMessageId?: MessageId): Promise<void> {
+  private async sendStoredImage(
+    conversationId: ConversationId,
+    workspaceName: string,
+    path: string,
+    caption?: string,
+    replyToMessageId?: MessageId,
+    appendTranscript = true,
+  ): Promise<void> {
     if (!this.deps.adapter.sendPhoto) throw new Error("IM adapter cannot send images.");
     const scope = parseChatScopeKey(String(conversationId));
     await this.deps.adapter.sendPhoto(scope.conversationId, await imageBlobFromPath(path), {
@@ -156,7 +173,9 @@ export class OutboundMediaService {
       ...(replyToMessageId ? { replyToMessageId } : {}),
       ...(scope.topic ? { topic: scope.topic } : {}),
     });
-    this.deps.store.appendTranscript({ conversationId: scope.conversationId, scopeKey: scope.scopeKey, workspaceName, role: "agent", text: `[image: ${path}]\n`, createdAt: Date.now() });
+    if (appendTranscript) {
+      this.deps.store.appendTranscript({ conversationId: scope.conversationId, scopeKey: scope.scopeKey, workspaceName, role: "agent", text: `[image: ${path}]\n`, createdAt: Date.now() });
+    }
   }
 
   private async sendStoredFile(conversationId: ConversationId, workspaceName: string, path: string, caption?: string, replyToMessageId?: MessageId): Promise<void> {

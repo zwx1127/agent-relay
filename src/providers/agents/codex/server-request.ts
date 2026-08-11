@@ -27,7 +27,7 @@ export async function handleCodexServerRequest(message: JsonRpcRequest, context:
   const key = keys[0];
   const sideConversation = threadId ? context.sideConversations.get(threadId) : undefined;
   if (sideConversation) {
-    await context.rpc.rejectRequest(message.id, -32000, "Interactive prompts and approvals are not supported in Relay side conversations.");
+    await handleSideConversationRequest(message, params, threadId!, sideConversation, context);
     return;
   }
   if (message.method === "item/tool/call" || message.method === "account/chatgptAuthTokens/refresh" || message.method === "attestation/generate") {
@@ -137,4 +137,87 @@ export async function handleCodexServerRequest(message: JsonRpcRequest, context:
   context.logger.error("codex.unsupported_server_request", { method: message.method, thread_id: threadId, session_key: key });
   await context.emitActivity(key, { kind: "notice", level: "error", title: "Unsupported Codex request", detail: message.method }, params);
   await context.rpc.rejectRequest(message.id, -32601, `Unsupported server request: ${message.method}`);
+}
+
+async function handleSideConversationRequest(
+  message: JsonRpcRequest,
+  params: Record<string, unknown> | undefined,
+  threadId: string,
+  side: SideConversationCollector,
+  context: ServerRequestContext,
+): Promise<void> {
+  const emit = async (event: Parameters<NonNullable<SideConversationCollector["onEvent"]>>[0]) => {
+    try {
+      await side.onEvent?.(event);
+    } catch (error) {
+      context.logger.warn("codex.side_conversation_request_delivery_failed", {
+        thread_id: threadId,
+        method: message.method,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
+  };
+
+  if (message.method === "item/tool/requestUserInput") {
+    const questions = Array.isArray(params?.questions) ? params.questions.map(toQuestion).filter(Boolean) as AgentUserInputQuestion[] : [];
+    context.registerRequest(message.id, threadId, [side.sessionKey]);
+    await emit({
+      type: "user_input_request",
+      sessionKey: side.sessionKey,
+      requestId: message.id,
+      questions,
+      ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
+      ...(typeof params?.itemId === "string" ? { itemId: params.itemId } : {}),
+    });
+    return;
+  }
+
+  if (message.method === "mcpServer/elicitation/request") {
+    const mode = getString(params, "mode");
+    if (mode === "openai/form" || (mode !== "form" && mode !== "url")) {
+      await context.rpc.respond(message.id, { action: "cancel", content: null, _meta: null });
+      return;
+    }
+    const requestedSchema = mode === "form" ? toMcpElicitationSchema(params?.requestedSchema) : undefined;
+    if (mode === "form" && !requestedSchema) {
+      await context.rpc.respond(message.id, { action: "cancel", content: null, _meta: null });
+      return;
+    }
+    context.registerRequest(message.id, threadId, [side.sessionKey]);
+    await emit({
+      type: "mcp_elicitation_request",
+      sessionKey: side.sessionKey,
+      requestId: message.id,
+      serverName: getString(params, "serverName") ?? "MCP server",
+      mode,
+      message: getString(params, "message") ?? "The MCP server requested additional input.",
+      ...(requestedSchema ? { requestedSchema } : {}),
+      ...(getString(params, "url") ? { url: getString(params, "url") } : {}),
+      ...(getString(params, "elicitationId") ? { elicitationId: getString(params, "elicitationId") } : {}),
+      ...(params?._meta !== undefined ? { meta: params._meta } : {}),
+      ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
+    });
+    return;
+  }
+
+  const approvalKind = approvalKindForMethod(message.method);
+  if (approvalKind) {
+    const { title, body } = approvalCopy(approvalKind, params);
+    context.registerRequest(message.id, threadId, [side.sessionKey]);
+    await emit({
+      type: "approval_request",
+      sessionKey: side.sessionKey,
+      requestId: message.id,
+      method: message.method,
+      approvalKind,
+      title,
+      body,
+      params: message.params,
+      ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
+      ...(typeof params?.itemId === "string" ? { itemId: params.itemId } : {}),
+    });
+    return;
+  }
+
+  await context.rpc.rejectRequest(message.id, -32601, `Unsupported server request in side conversation: ${message.method}`);
 }

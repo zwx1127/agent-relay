@@ -106,6 +106,37 @@ describe("experimental relay work Gateway approval arbitration", () => {
     expect(relayMessages).toEqual([raw]);
   });
 
+  test("keeps ephemeral fork events on the originating Gateway connection", () => {
+    const originMessages: string[] = [];
+    const peerMessages: string[] = [];
+    const makeClient = (id: string, output: string[]): ConnectedClient => ({
+      data: { id, connectedAt: 1, queued: [], threads: new Set(["parent"]), deliveredSeq: new Map() },
+      socket: { send: (raw: string) => output.push(raw) },
+    } as unknown as ConnectedClient);
+    const origin = makeClient("relay-origin", originMessages);
+    const peer = makeClient("codex-cli", peerMessages);
+    const clients = new Map([[origin.data.id, origin], [peer.data.id, peer]]);
+
+    updateClientFromRequest(origin.data, {
+      id: 20,
+      method: "thread/fork",
+      params: { threadId: "parent", ephemeral: true, excludeTurns: true },
+    });
+    updateClientFromBackend(origin.data, { id: 20, result: { thread: { id: "btw-child" } } });
+
+    expect(origin.data.threads.has("btw-child")).toBe(true);
+    expect(peer.data.threads.has("btw-child")).toBe(false);
+
+    const raw = JSON.stringify({
+      method: "item/agentMessage/delta",
+      params: { threadId: "btw-child", turnId: "btw-turn", delta: "private answer" },
+    });
+    deliverLiveEvent({ seq: 1, threadId: "btw-child", method: "item/agentMessage/delta" }, raw, origin, clients);
+
+    expect(originMessages).toEqual([raw]);
+    expect(peerMessages).toEqual([]);
+  });
+
   test("tracks resume and unsubscribe only after their RPC outcomes", () => {
     const client = { id: "relay", connectedAt: 1, queued: [], threads: new Set<string>(), deliveredSeq: new Map() };
     updateClientFromRequest(client, { id: 1, method: "thread/resume", params: { threadId: "thread-1" } });

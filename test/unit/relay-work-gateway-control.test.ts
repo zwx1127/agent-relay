@@ -78,7 +78,7 @@ describe("experimental Relay Gateway control plane", () => {
     expect(JSON.stringify(snapshot)).not.toContain("origin-1");
   });
 
-  test("relays side questions and deltas live and restores their full in-memory content", () => {
+  test("keeps ephemeral BTW forks outside Relay control snapshots", () => {
     const origin = client("origin", "agent-relay", ["parent"]);
     const peer = client("peer", "agent-relay", ["parent"]);
     const clients = new Map([[origin.data.id, origin], [peer.data.id, peer]]);
@@ -86,12 +86,12 @@ describe("experimental Relay Gateway control plane", () => {
     hello(control, origin);
     hello(control, peer);
 
-    control.handleFrontend(origin, {
+    const routed = control.handleFrontend(origin, {
       id: 10,
       method: "thread/fork",
       params: { threadId: "parent", ephemeral: true, excludeTurns: true },
-      relayControl: { version: RELAY_CONTROL_PROTOCOL_VERSION, commandId: "side-1", kind: "side", originToken: "side-origin" },
     });
+    expect(routed).toEqual({ handled: false, message: expect.objectContaining({ method: "thread/fork" }) });
     control.handleBackend(origin, { id: 10, result: { thread: { id: "child" } } });
     control.handleFrontend(origin, {
       id: 11,
@@ -108,19 +108,12 @@ describe("experimental Relay Gateway control plane", () => {
       params: { threadId: "child", turn: { id: "side-turn", status: "completed" } },
     });
 
-    const live = notifications(peer, RELAY_CONTROL_COMMAND_METHOD).map((message) => message.params as Record<string, unknown>);
-    expect(live).toContainEqual(expect.objectContaining({ commandId: "side-1", content: { type: "side_question", text: "private live question" } }));
-    expect(live).toContainEqual(expect.objectContaining({ commandId: "side-1", content: { type: "side_delta", text: "live answer" } }));
-    expect(live.at(-1)).toMatchObject({ commandId: "side-1", phase: "completed" });
-    expect(live.every((event) => event.gatewayEpoch === control.gatewayEpoch && typeof event.threadRevision === "number")).toBe(true);
+    expect(notifications(peer, RELAY_CONTROL_COMMAND_METHOD)).toHaveLength(0);
 
     peer.sent.length = 0;
     control.sendSnapshot(peer, "parent");
     const snapshot = notifications(peer, RELAY_CONTROL_SNAPSHOT_METHOD).at(-1)?.params;
-    expect(snapshot).toMatchObject({
-      consistency: "live",
-      commands: [expect.objectContaining({ question: "private live question", answer: "live answer", phase: "completed" })],
-    });
+    expect(snapshot).toMatchObject({ consistency: "live", commands: [] });
   });
 
   test("observes supported native operations for Relay peers and ignores unrelated threads", () => {
@@ -160,7 +153,7 @@ describe("experimental Relay Gateway control plane", () => {
     expect(events[1]?.params).toMatchObject({ kind: "delete", phase: "completed" });
   });
 
-  test("keeps an active side command after disconnect and lets the observer complete it", () => {
+  test("does not keep ephemeral BTW work alive as a shared control command after disconnect", () => {
     const origin = client("origin", "agent-relay", ["parent"]);
     const peer = client("peer", "agent-relay", ["parent"]);
     const clients = new Map([[origin.data.id, origin], [peer.data.id, peer]]);
@@ -171,14 +164,13 @@ describe("experimental Relay Gateway control plane", () => {
       id: 30,
       method: "thread/fork",
       params: { threadId: "parent", ephemeral: true },
-      relayControl: { version: RELAY_CONTROL_PROTOCOL_VERSION, commandId: "side-disconnect", kind: "side", originToken: "origin-side" },
     });
     control.handleBackend(origin, { id: 30, result: { thread: { id: "side-child" } } });
     control.handleFrontend(origin, { id: 31, method: "turn/start", params: { threadId: "side-child", input: [{ type: "text", text: "keep going" }] } });
     control.handleBackend(origin, { id: 31, result: { turn: { id: "side-turn", status: "inProgress" } } });
 
     peer.sent.length = 0;
-    control.clientDisconnected("origin");
+    expect(control.clientDisconnected("origin")).toBe(false);
     expect(notifications(peer, RELAY_CONTROL_COMMAND_METHOD)).toHaveLength(0);
     control.handleObserver({
       method: "item/agentMessage/delta",
@@ -188,11 +180,7 @@ describe("experimental Relay Gateway control plane", () => {
       method: "turn/completed",
       params: { threadId: "side-child", turn: { id: "side-turn", status: "completed" } },
     });
-    expect(notifications(peer, RELAY_CONTROL_COMMAND_METHOD).at(-1)?.params).toMatchObject({
-      commandId: "side-disconnect",
-      phase: "completed",
-      answer: "after disconnect",
-    });
+    expect(notifications(peer, RELAY_CONTROL_COMMAND_METHOD)).toHaveLength(0);
   });
 
   test("starts a fresh Gateway epoch in native Default mode and supports ACK plus resync", () => {

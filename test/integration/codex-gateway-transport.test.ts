@@ -56,7 +56,7 @@ describe("experimental Codex Gateway transport", () => {
           const params = message.params as Record<string, unknown> | undefined;
           const send = (result: unknown) => socket.send(JSON.stringify({ id, result }));
           if (method === "initialize") send({ userAgent: "codex-cli 0.145.0" });
-          else if (method === "agent-relay/control/hello") send({ version: 2, gatewayEpoch: "test-gateway" });
+          else if (method === "agent-relay/control/hello") send({ version: 3, gatewayEpoch: "test-gateway" });
           else if (method === "agent-relay/control/resync") {
             socket.send(JSON.stringify({
               method: "agent-relay/control/snapshot",
@@ -237,7 +237,7 @@ describe("experimental Codex Gateway transport", () => {
           const params = message.params as Record<string, unknown> | undefined;
           const send = (result: unknown) => socket.send(JSON.stringify({ id, result }));
           if (method === "initialize") send({ userAgent: "codex-cli 0.145.0" });
-          else if (method === "agent-relay/control/hello") send({ version: 2, gatewayEpoch: "test-gateway" });
+          else if (method === "agent-relay/control/hello") send({ version: 3, gatewayEpoch: "test-gateway" });
           else if (method === "agent-relay/control/resync") {
             socket.send(JSON.stringify({
               method: "agent-relay/control/snapshot",
@@ -349,14 +349,22 @@ describe("experimental Codex Gateway transport", () => {
       expect((turnStart?.params as Record<string, unknown>)?.clientUserMessageId).toBe("agent-relay:scope-one");
       expect(turnStart?.params as Record<string, unknown>).not.toHaveProperty("collaborationMode");
 
-      expect(await driver.sideConversation(first.sessionKey, "side question")).toMatchObject({ message: "side response", threadId: "side-thread" });
+      outputs.length = 0;
+      const sideEvents: Record<string, unknown>[] = [];
+      const opened = await driver.openSideConversation(first.sessionKey, {
+        eventSessionKey: "codex-side:1:demo",
+        onEvent: (event) => { sideEvents.push(event as unknown as Record<string, unknown>); },
+      });
+      expect(await driver.sendSideConversationInput(first.sessionKey, opened.threadId, { text: "side question" }))
+        .toMatchObject({ turnId: "new-turn", steered: false });
+      await Bun.sleep(20);
+      expect(sideEvents).toContainEqual(expect.objectContaining({ type: "message", chunk: "side response" }));
+      expect(sideEvents).toContainEqual(expect.objectContaining({ type: "turn_completed", status: "completed" }));
+      expect(outputs).toEqual([]);
       const sideFork = received.find((message) => message.method === "thread/fork" && (message.params as Record<string, unknown>)?.ephemeral === true);
       const sideForkParams = sideFork?.params as Record<string, unknown>;
       expect(sideForkParams).toMatchObject({ threadId: "shared-thread", ephemeral: true, excludeTurns: true });
-      const sideRelayControl = sideFork?.relayControl as Record<string, unknown>;
-      expect(sideRelayControl).toMatchObject({ version: 2, kind: "side" });
-      expect(sideRelayControl.commandId).toMatch(/^agent-relay:/);
-      expect(sideRelayControl.originToken).toMatch(/^agent-relay:/);
+      expect(sideFork).not.toHaveProperty("relayControl");
       for (const field of ["cwd", "approvalPolicy", "approvalsReviewer", "sandbox", "developerInstructions", "baseInstructions"]) {
         expect(sideForkParams).not.toHaveProperty(field);
       }
@@ -364,33 +372,8 @@ describe("experimental Codex Gateway transport", () => {
         && (message.params as Record<string, unknown>)?.threadId === "side-thread");
       expect(JSON.stringify(sideBoundary?.params)).toContain("side conversation");
 
-      outputs.length = 0;
-      sendNotification?.({
-        method: "agent-relay/control/command",
-        params: {
-          gatewayEpoch: "test-gateway",
-          threadRevision: 1,
-          commandId: sideRelayControl.commandId,
-          threadId: "shared-thread",
-          childThreadId: "side-thread",
-          kind: "side",
-          phase: "completed",
-          source: "relay",
-          revision: 1,
-          createdAt: 1,
-          updatedAt: 2,
-          originToken: sideRelayControl.originToken,
-          content: { type: "side_delta", text: "mirrored peer answer" },
-        },
-      });
-      await Bun.sleep(10);
-      expect(outputs).toContainEqual(expect.objectContaining({
-        type: "relay_command_state",
-        sessionKey: second.sessionKey,
-        commandId: sideRelayControl.commandId,
-        content: { type: "side_delta", text: "mirrored peer answer" },
-      }));
-      expect(outputs).not.toContainEqual(expect.objectContaining({ type: "relay_command_state", sessionKey: first.sessionKey }));
+      expect(outputs).not.toContainEqual(expect.objectContaining({ type: "relay_command_state", kind: "side" }));
+      await driver.closeSideConversation(first.sessionKey, opened.threadId);
 
       expect(await driver.syncThreadCollaborationMode(first.sessionKey, "default", { operation: "set", mode: "plan" })).toBe("plan");
       expect(received.find((message) => message.method === "agent-relay/control/threadState/update")?.params).toMatchObject({

@@ -527,6 +527,38 @@ describe("telegram adapter", () => {
     ]);
   });
 
+  test("opens ForceReply before attaching inline controls", async () => {
+    const requests: Array<{ method: string; body: Record<string, unknown> }> = [];
+    const adapter = new TelegramAdapter("token", async (input, init) => {
+      const method = String(input).split("/").at(-1)!;
+      requests.push({ method, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+      return method === "sendMessage"
+        ? Response.json({ ok: true, result: { message_id: 10 } })
+        : Response.json({ ok: true, result: true });
+    });
+    const replyMarkup = { inline_keyboard: [[{ text: "Return to main", callback_data: "ar:cmd:side:t:close" }]] };
+
+    await expect(adapter.sendMessage(1, "Side conversation active.", {
+      deliveryMode: "at-most-once",
+      forceReply: true,
+      inputFieldPlaceholder: "Side question",
+      replyMarkup,
+    })).resolves.toEqual({ messageId: "10" });
+
+    expect(requests).toEqual([
+      {
+        method: "sendMessage",
+        body: {
+          chat_id: 1,
+          text: "Side conversation active.",
+          disable_web_page_preview: true,
+          reply_markup: { force_reply: true, selective: true, input_field_placeholder: "Side question" },
+        },
+      },
+      { method: "editMessageReplyMarkup", body: { chat_id: 1, message_id: 10, reply_markup: replyMarkup } },
+    ]);
+  });
+
   test("does not retry non-rate-limit client errors", async () => {
     let calls = 0;
     const adapter = new TelegramAdapter("token", async () => {

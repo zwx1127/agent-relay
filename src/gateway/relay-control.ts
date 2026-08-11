@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type {
   AgentCollaborationMode,
-  AgentRelayCommandContent,
   AgentRelayCommandKind,
   AgentRelayCommandMetadata,
   AgentRelayCommandPhase,
@@ -84,7 +83,6 @@ export class GatewayRelayControl {
   private readonly commandIdsByThread = new Map<string, string[]>();
   private readonly pendingByRequest = new Map<string, string>();
   private readonly commandByTurn = new Map<string, string>();
-  private readonly commandByChildThread = new Map<string, string>();
   private readonly pendingModesByRequest = new Map<string, PendingModeUpdate>();
   private readonly pendingModeStartsByThread = new Map<string, PendingModeStart>();
   private readonly threadStates = new Map<string, AgentRelayThreadState>();
@@ -93,7 +91,6 @@ export class GatewayRelayControl {
 
   constructor(
     private readonly clients: () => Iterable<RelayControlClient>,
-    private readonly onThreadAnchor: (threadId: string) => void = () => undefined,
   ) {
     setInterval(() => this.pruneAll(), 60_000).unref();
   }
@@ -125,13 +122,6 @@ export class GatewayRelayControl {
       this.pendingModesByRequest.set(requestKey(client.data.id, message.id), { threadId: explicitMode.threadId, mode: explicitMode.mode });
       if (method === "turn/start") this.pendingModeStartsByThread.set(explicitMode.threadId, { ...explicitMode, createdAt: Date.now() });
       this.setThreadMode(explicitMode.threadId, explicitMode.mode, false);
-    }
-
-    const childCommand = method === "turn/start" ? this.commandForChildThread(getString(params, "threadId")) : undefined;
-    if (childCommand && isRequest(message)) {
-      this.pendingByRequest.set(requestKey(client.data.id, message.id), childCommand.commandId);
-      const question = inputText(params?.input);
-      if (question) this.broadcastCommand(childCommand, { type: "side_question", text: question });
     }
 
     const kind = commandKind(method, params);
@@ -193,23 +183,10 @@ export class GatewayRelayControl {
         return;
       }
       const result = asRecord(message.result);
-      if (command.kind === "side" && !command.childThreadId) {
-        const childThreadId = resultThreadId(result);
-        if (!childThreadId) {
-          this.transition(command, "failed");
-          return;
-        }
-        command.childThreadId = childThreadId;
-        this.commandByChildThread.set(childThreadId, command.commandId);
-        this.onThreadAnchor(childThreadId);
-        this.touch(command);
-        this.broadcastCommand(command);
-        return;
-      }
       const turnId = resultTurnId(result);
-      if ((command.kind === "review" || command.kind === "compact" || command.kind === "side") && turnId) {
+      if ((command.kind === "review" || command.kind === "compact") && turnId) {
         command.turnId = turnId;
-        const turnThreadId = command.childThreadId ?? (command.kind === "review" ? getString(result, "reviewThreadId") : undefined) ?? command.threadId;
+        const turnThreadId = (command.kind === "review" ? getString(result, "reviewThreadId") : undefined) ?? command.threadId;
         command.operationThreadId = turnThreadId;
         this.commandByTurn.set(turnKey(turnThreadId, turnId), command.commandId);
         this.transition(command, "running");
@@ -235,7 +212,6 @@ export class GatewayRelayControl {
       const mode = getString(asRecord(asRecord(params?.threadSettings)?.collaborationMode), "mode");
       if (mode === "default" || mode === "plan") this.setThreadMode(threadId, mode, true);
     }
-    const side = this.commandForChildThread(threadId);
     if (message.method === "turn/started") {
       const pendingMode = this.pendingModeStartsByThread.get(threadId);
       if (pendingMode && pendingMode.createdAt >= Date.now() - 30_000) {
@@ -251,14 +227,9 @@ export class GatewayRelayControl {
         this.transition(command, "running");
       }
     }
-    if (side && (message.method === "item/agentMessage/delta" || message.method === "item/plan/delta")) {
-      const delta = getString(params, "delta");
-      if (delta) this.broadcastCommand(side, { type: "side_delta", text: delta });
-      return;
-    }
     if (message.method === "turn/completed") {
       const turnId = resultTurnId(params);
-      const command = turnId ? this.commands.get(this.commandByTurn.get(turnKey(threadId, turnId)) ?? "") : side;
+      const command = turnId ? this.commands.get(this.commandByTurn.get(turnKey(threadId, turnId)) ?? "") : undefined;
       if (!command) return;
       const status = getString(asRecord(params?.turn), "status");
       this.transition(command, status === "completed" ? "completed" : status === "interrupted" ? "interrupted" : "failed");
@@ -446,10 +417,7 @@ export class GatewayRelayControl {
     command.updatedAt = Date.now();
   }
 
-  private broadcastCommand(command: InternalCommand, content?: AgentRelayCommandContent): void {
-    if (content?.type === "side_question") command.question = content.text;
-    if (content?.type === "side_delta") command.answer = `${command.answer ?? ""}${content.text}`;
-    if (content) this.touch(command);
+  private broadcastCommand(command: InternalCommand): void {
     const notification = JSON.stringify({
       method: RELAY_CONTROL_COMMAND_METHOD,
       params: {
@@ -457,7 +425,6 @@ export class GatewayRelayControl {
         threadRevision: command.revision,
         ...publicCommand(command),
         ...(command.originToken ? { originToken: command.originToken } : {}),
-        ...(content ? { content } : {}),
       },
     });
     for (const client of this.clients()) {
@@ -482,10 +449,6 @@ export class GatewayRelayControl {
       if (command?.kind === kind && !isTerminal(command.phase)) return command;
     }
     return undefined;
-  }
-
-  private commandForChildThread(threadId: string | undefined): InternalCommand | undefined {
-    return threadId ? this.commands.get(this.commandByChildThread.get(threadId) ?? "") : undefined;
   }
 
   private nextRevision(threadId: string): number {
@@ -530,8 +493,7 @@ export class GatewayRelayControl {
   private deleteCommand(command: InternalCommand): void {
     this.commands.delete(command.commandId);
     for (const [key, commandId] of this.pendingByRequest) if (commandId === command.commandId) this.pendingByRequest.delete(key);
-    if (command.turnId) this.commandByTurn.delete(turnKey(command.operationThreadId ?? command.childThreadId ?? command.threadId, command.turnId));
-    if (command.childThreadId) this.commandByChildThread.delete(command.childThreadId);
+    if (command.turnId) this.commandByTurn.delete(turnKey(command.operationThreadId ?? command.threadId, command.turnId));
   }
 
   private shouldObserveNotification(clientId: string, message: Record<string, unknown>, now = Date.now()): boolean {
@@ -553,7 +515,7 @@ export class GatewayRelayControl {
   }
 }
 
-function commandKind(method: string, params: Record<string, unknown> | undefined): AgentRelayCommandKind | undefined {
+function commandKind(method: string, _params: Record<string, unknown> | undefined): AgentRelayCommandKind | undefined {
   switch (method) {
     case "review/start": return "review";
     case "thread/compact/start": return "compact";
@@ -564,7 +526,7 @@ function commandKind(method: string, params: Record<string, unknown> | undefined
     case "thread/delete": return "delete";
     case "thread/backgroundTerminals/clean": return "terminals_clean";
     case "thread/backgroundTerminals/terminate": return "terminal_stop";
-    case "thread/fork": return params?.ephemeral === true ? "side" : undefined;
+    case "thread/fork": return undefined;
     default: return undefined;
   }
 }
@@ -593,7 +555,7 @@ function relayControlMetadata(value: unknown): AgentRelayCommandMetadata | undef
 }
 
 function isCommandKind(value: string | undefined): value is AgentRelayCommandKind {
-  return value === "review" || value === "compact" || value === "side" || value === "rename"
+  return value === "review" || value === "compact" || value === "rename"
     || value === "goal_update" || value === "goal_clear" || value === "archive" || value === "delete"
     || value === "terminals_clean" || value === "terminal_stop";
 }
@@ -608,15 +570,12 @@ function publicCommand(command: InternalCommand): AgentRelayCommandState {
   return {
     commandId: command.commandId,
     threadId: command.threadId,
-    ...(command.childThreadId ? { childThreadId: command.childThreadId } : {}),
     kind: command.kind,
     phase: command.phase,
     source: command.source,
     revision: command.revision,
     createdAt: command.createdAt,
     updatedAt: command.updatedAt,
-    ...(command.question ? { question: command.question } : {}),
-    ...(command.answer ? { answer: command.answer } : {}),
   };
 }
 
@@ -624,21 +583,6 @@ function explicitCollaborationMode(params: Record<string, unknown> | undefined):
   const threadId = getString(params, "threadId");
   const mode = getString(asRecord(params?.collaborationMode), "mode");
   return threadId && (mode === "default" || mode === "plan") ? { threadId, mode } : undefined;
-}
-
-function inputText(value: unknown): string | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const parts = value
-    .map(asRecord)
-    .filter((item): item is Record<string, unknown> => Boolean(item))
-    .filter((item) => item.type === "text")
-    .map((item) => getString(item, "text"))
-    .filter((text): text is string => text !== undefined);
-  return parts.length ? parts.join("\n") : undefined;
-}
-
-function resultThreadId(record: Record<string, unknown> | undefined): string | undefined {
-  return getString(asRecord(record?.thread), "id");
 }
 
 function resultTurnId(record: Record<string, unknown> | undefined): string | undefined {
