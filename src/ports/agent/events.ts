@@ -73,6 +73,8 @@ export interface AgentServerRequestResolvedEvent {
   threadId?: string;
   turnId?: string;
   requestMethod?: string;
+  /** Present when Relay observed the winning JSON-RPC response result. */
+  result?: unknown;
 }
 
 /**

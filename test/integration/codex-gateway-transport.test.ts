@@ -103,7 +103,17 @@ fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({ args: process.arg
           const method = message.method;
           const params = message.params as Record<string, unknown> | undefined;
           const send = (result: unknown) => socket.send(JSON.stringify({ id, result }));
-          if (method === "initialize") send({ userAgent: "codex-cli 0.145.0" });
+          if (id === "shared-question" && method === undefined && Object.prototype.hasOwnProperty.call(message, "result")) {
+            socket.send(JSON.stringify({
+              method: "serverRequest/resolved",
+              params: {
+                threadId: "shared-thread",
+                requestId: "shared-question",
+                result: { answers: { mode: { answers: ["Fast"] } } },
+              },
+            }));
+          }
+          else if (method === "initialize") send({ userAgent: "codex-cli 0.145.0" });
           else if (method === "agent-relay/control/hello") send({ version: 4, gatewayEpoch: "test-gateway" });
           else if (method === "agent-relay/control/resync") {
             socket.send(JSON.stringify({
@@ -155,10 +165,6 @@ fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({ args: process.arg
                 questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [] }],
               },
             }));
-            setTimeout(() => socket.send(JSON.stringify({
-              method: "serverRequest/resolved",
-              params: { threadId: "shared-thread", requestId: "shared-question" },
-            })), 5);
             socket.send(JSON.stringify({
               method: "item/agentMessage/delta",
               params: { threadId: "shared-thread", turnId: "active-turn", itemId: "reply", delta: "live after connection" },
@@ -228,6 +234,8 @@ fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({ args: process.arg
         activities: [{ itemId: "reason", activity: { kind: "reasoning", summary: "Already working" } }],
       });
       await Bun.sleep(20);
+      await driver.respond(status.sessionKey, "shared-question", { answers: { mode: { answers: ["Slow"] } } });
+      await Bun.sleep(10);
       await driver.send(status.sessionKey, "steer from IM");
       await Bun.sleep(10);
       const resume = received.find((message) => message.method === "thread/resume");
@@ -253,7 +261,20 @@ fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({ args: process.arg
       }));
       expect(outputs).not.toContainEqual(expect.objectContaining({ type: "user_message", input: expect.objectContaining({ text: "steer from IM" }) }));
       expect(outputs).toContainEqual(expect.objectContaining({ type: "user_input_request", requestId: "shared-question" }));
-      expect(outputs).toContainEqual(expect.objectContaining({ type: "server_request_resolved", sessionKey: status.sessionKey, requestId: "shared-question" }));
+      expect(received).toContainEqual(expect.objectContaining({
+        id: "shared-question",
+        result: { answers: { mode: { answers: ["Slow"] } } },
+      }));
+      expect(outputs).toContainEqual(expect.objectContaining({
+        type: "server_request_resolved",
+        sessionKey: status.sessionKey,
+        requestId: "shared-question",
+        result: { answers: { mode: { answers: ["Fast"] } } },
+      }));
+      expect(outputs).not.toContainEqual(expect.objectContaining({
+        type: "server_request_resolved",
+        result: { answers: { mode: { answers: ["Slow"] } } },
+      }));
       expect(driver.getStatus(status.sessionKey)?.activeTurnId).toBe("active-turn");
       expect(driver.getStatus(status.sessionKey)?.waitingForUserInput).toBe(false);
     } finally {

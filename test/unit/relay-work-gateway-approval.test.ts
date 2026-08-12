@@ -28,7 +28,7 @@ describe("experimental relay work Gateway approval arbitration", () => {
       socket: { send: (raw: string) => originMessages.push(raw) },
     } as unknown as ConnectedClient;
     const peer = {
-      data: { id: "relay", connectedAt: 2, queued: [], threads: new Set(["thread-1"]), deliveredSeq: new Map() },
+      data: { id: "relay", connectedAt: 2, relayInstanceId: "relay-instance", queued: [], threads: new Set(["thread-1"]), deliveredSeq: new Map() },
       socket: { send: (raw: string) => peerMessages.push(raw) },
     } as unknown as ConnectedClient;
     const clients = new Map([[origin.data.id, origin], [peer.data.id, peer]]);
@@ -47,7 +47,10 @@ describe("experimental relay work Gateway approval arbitration", () => {
     expect(routeServerRequestResponse(origin.data, { id: 7, result: { decision: "decline" } }, JSON.stringify({ id: 7, result: { decision: "decline" } }), clients, pending, relayed)).toBe(true);
     expect(backendMessages).toHaveLength(1);
     expect(JSON.parse(originMessages[0]!)).toEqual({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: 7 } });
-    expect(JSON.parse(peerMessages[1]!)).toEqual({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: shared.id } });
+    expect(JSON.parse(peerMessages[1]!)).toEqual({
+      method: "serverRequest/resolved",
+      params: { threadId: "thread-1", requestId: shared.id, result: { decision: "accept" } },
+    });
   });
 
   test("coalesces the same logical approval from multiple app-server connections", () => {
@@ -62,7 +65,7 @@ describe("experimental relay work Gateway approval arbitration", () => {
       socket: { send: (raw: string) => desktopMessages.push(raw) },
     } as unknown as ConnectedClient;
     const relay = {
-      data: { id: "relay", connectedAt: 2, backend: relayBackend, queued: [], threads: new Set(["thread-1"]), deliveredSeq: new Map() },
+      data: { id: "relay", connectedAt: 2, relayInstanceId: "relay-instance", backend: relayBackend, queued: [], threads: new Set(["thread-1"]), deliveredSeq: new Map() },
       socket: { send: (raw: string) => relayMessages.push(raw) },
     } as unknown as ConnectedClient;
     const clients = new Map([[desktop.data.id, desktop], [relay.data.id, relay]]);
@@ -97,7 +100,10 @@ describe("experimental relay work Gateway approval arbitration", () => {
     expect(JSON.parse(desktopBackendMessages[0]!)).toEqual({ id: 7, result: { decision: "accept" } });
     expect(JSON.parse(relayBackendMessages[0]!)).toEqual({ id: 19, result: { decision: "accept" } });
     expect(JSON.parse(desktopMessages[0]!)).toEqual({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: 7 } });
-    expect(JSON.parse(relayMessages[1]!)).toEqual({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: relayRequest.id } });
+    expect(JSON.parse(relayMessages[1]!)).toEqual({
+      method: "serverRequest/resolved",
+      params: { threadId: "thread-1", requestId: relayRequest.id, result: { decision: "accept" } },
+    });
 
     expect(shareServerRequest(relay, { ...first, id: 19 }, relayBackend, clients, pending, relayed)).toEqual({
       kind: "duplicate",
@@ -171,7 +177,7 @@ describe("experimental relay work Gateway approval arbitration", () => {
 
     expect(JSON.parse(newMessages[0]!)).toEqual({
       method: "serverRequest/resolved",
-      params: { threadId: "thread-1", requestId: visibleRequestId },
+      params: { threadId: "thread-1", requestId: visibleRequestId, result: { answers: {} } },
     });
   });
 

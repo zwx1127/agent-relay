@@ -91,7 +91,7 @@ Gateway 与其 app-server 属于同一故障域：正常停止会终止二者；
 - 活动 turn 期间的普通 IM 输入采用 Codex TUI Enter/Steer 语义。接力工作不增加 Tab/Queue、Gateway 输入锁或 thread 所有权锁。
 - 原生 Codex 客户端或其他 IM scope 新发送的用户消息会实时同步到同一 thread 上的其余 IM scope；Relay 不会把消息回显到来源 scope。IM 来源消息会保留 Relay 支持的文本格式，以及对已同步用户消息和助手最终回复的引用关系；同步副本沿用 IM 用户消息样式，不再显示 shared-thread 标题。原生 Codex 消息或缺少本地展示上下文的 IM 消息仍使用 shared-thread 兜底标题。非文本输入只显示附件类型与数量，不会下载或重新上传。
 - 同步引用别名是有界的 Relay 进程内状态。Relay 重启或被引用消息已无映射时，消息仍会同步，但不再附带引用关系。
-- 审批、用户输入和 MCP elicitation 可以出现在关联同一 thread 的全部已连接客户端中。第一份有效响应胜出，resolved 通知会清除重复控件。
+- 审批、用户输入和 MCP elicitation 可以出现在关联同一 thread 的全部已连接客户端中。第一份有效响应胜出；resolved 通知会清除重复控件，并在结果可用时把获胜答案或决定显示到 Relay IM 卡片。用户输入答案（包括 secret 问题中输入的值）会显示给挂接同一父 thread 的所有已连接 Relay IM scope，但不会写入 Gateway 日志或持久化状态。
 - Relay 支持的 thread 内部操作会作为指令状态同步到同一 thread 的其他 Relay scope，包括 review、compact、rename、Goal 修改、archive/delete、后台终端清理和 Plan 模式状态。操作只在来源客户端执行一次，其他 scope 不会重新执行同步到的指令。
 - `/side` 和 `/btw` 会进入当前 IM scope 独享的多轮 BTW 模式，并复用一个临时 fork。裸 `/btw` 立即创建子 thread，并发送带 **Return to main** 的 ForceReply 控制卡；`/btw <prompt>` 会创建并提交，或继续已有子 thread。BTW 模式下的普通文本和结构化附件都发往子 thread；子 turn 运行时的新输入使用 Steer，每个新子 turn 都有独立的流式工作卡和进度 reaction；审批、用户问答和 MCP elicitation 仍可交互。BTW 的问题、答案、状态和子 thread 通知不会同步给其他 Gateway 客户端，不进入父 transcript，也不修改父任务或活动状态，因此原生 Codex CLI TUI 和 Desktop 可以独立继续使用父 thread。点击 **Return to main** 关闭子 thread 前，chat/workspace 导航会被阻止。
 - `/plan` 切换同步模式；`/plan --on` 与 `/plan --off` 可以显式选择。Gateway/app-server 重启后采用 Codex 原生进程重启语义，Plan 恢复为 Default，不从 Relay 持久数据反推。

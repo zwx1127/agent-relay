@@ -40,14 +40,22 @@ describe("relay controller Codex prompts", () => {
       requestId: 77,
       result: { answers: { choice: { answers: ["Fast"] } } },
     }]);
-    expect(adapter.edited.at(-1)?.text).toContain("Answered");
-    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
     expect(adapter.reactions).toEqual([
       { conversationId: "1", messageId: "1", emoji: "🫡", options: { isBig: true } },
       { conversationId: "1", messageId: "1", emoji: "✍" },
       { conversationId: "1", messageId: "1", emoji: "🤔" },
       { conversationId: "1", messageId: "1", emoji: "✍" },
     ]);
+    await router.handleAgentOutput({
+      type: "server_request_resolved",
+      sessionKey: "codex:1:demo",
+      requestId: 77,
+      result: { answers: { choice: { answers: ["Fast"] } } },
+    });
+    expect(adapter.edited.at(-1)?.text).toContain("Answered");
+    expect(adapter.edited.at(-1)?.text).toContain("Fast");
+    expect(adapter.edited.at(-1)?.text).not.toContain("Codex request resolved");
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
   });
 
   test("codex option question keeps pending state when callback card edit fails", async () => {
@@ -566,6 +574,42 @@ describe("relay controller Codex prompts", () => {
         second: { answers: ["B"] },
       },
     });
+    await router.handleAgentOutput({
+      type: "server_request_resolved",
+      sessionKey: "codex:1:demo",
+      requestId: 88,
+      result: { answers: { first: { answers: ["A"] }, second: { answers: ["B"] } } },
+    });
+    expect(adapter.edited.at(-1)?.text).toContain("First: A");
+    expect(adapter.edited.at(-1)?.text).toContain("Second: B");
+  });
+
+  test("a secret answer resolved in another IM scope is shown on the terminal card", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "codex:1:demo",
+      requestId: "secret-answer",
+      questions: [{ id: "token", header: "Token", question: "Enter token.", isSecret: true }],
+    });
+    const prompt = adapter.sent.at(-1)!;
+
+    await router.handleAgentOutput({
+      type: "server_request_resolved",
+      sessionKey: "codex:1:demo",
+      requestId: "secret-answer",
+      result: { answers: { token: { answers: ["secret-value"] } } },
+    });
+
+    expect(store.getPendingPrompt("1", prompt.messageId!)).toBeUndefined();
+    expect(adapter.edited.at(-1)?.text).toContain("Answered:");
+    expect(adapter.edited.at(-1)?.text).toContain("secret-value");
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
   });
 
   test("stale codex question does not forward answer to Codex", async () => {
@@ -665,6 +709,7 @@ describe("relay controller Codex prompts", () => {
       threadId: approval.threadId,
     });
     expect(store.getPendingPrompt("1", approvalCard.messageId!)).toBeUndefined();
+    expect(adapter.edited.at(-1)?.text).toContain("Codex request resolved.");
 
     const question = {
       type: "user_input_request" as const,
@@ -715,8 +760,10 @@ describe("relay controller Codex prompts", () => {
       sessionKey: elicitation.sessionKey,
       requestId: "mcp-copy",
       threadId: elicitation.threadId,
+      result: { action: "accept", content: null, _meta: null },
     });
     expect(store.getPendingPrompt("1", mcpCard.messageId!)).toBeUndefined();
+    expect(adapter.edited.at(-1)?.text).toContain("MCP action completed.");
   });
 
   test("allows an MCP request to retry after its first card render fails", async () => {
@@ -817,13 +864,18 @@ describe("relay controller Codex prompts", () => {
     });
     const prompt = adapter.sent.at(-1)!;
 
-    await router.handleAgentOutput({ type: "server_request_resolved", sessionKey: "codex:1:demo", requestId: "shared-91" });
+    await router.handleAgentOutput({
+      type: "server_request_resolved",
+      sessionKey: "codex:1:demo",
+      requestId: "shared-91",
+      result: { decision: "acceptForSession" },
+    });
 
     expect(agent.responses).toEqual([]);
     expect(store.getPendingPrompt("1", prompt.messageId!)).toBeUndefined();
     expect(store.getTask(1)?.status).toBe("running");
-    expect(adapter.edited.at(-1)?.text).toContain("Codex request resolved.");
-    expect(adapter.edited.at(-1)?.text).toContain("a connected client");
+    expect(adapter.edited.at(-1)?.text).toContain("Approved for this session.");
+    expect(adapter.edited.at(-1)?.text).toContain("Approve command?");
     expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
   });
 
@@ -852,10 +904,12 @@ describe("relay controller Codex prompts", () => {
       type: "server_request_resolved",
       sessionKey: "codex:1:demo",
       requestId: "shared-edit-failure",
+      result: { answers: { choice: { answers: ["Fast"] } } },
     });
 
     expect(store.getPendingPrompt("1", prompt.messageId!)).toBeUndefined();
-    expect(adapter.sent.at(-1)?.text).toContain("Codex request resolved.");
+    expect(adapter.sent.at(-1)?.text).toContain("Answered:");
+    expect(adapter.sent.at(-1)?.text).toContain("Fast");
     expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard).toEqual([]);
   });
 

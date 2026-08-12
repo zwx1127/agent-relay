@@ -503,6 +503,7 @@ export function rebindPendingRequestParticipant(
         params: {
           ...(pending.threadId ? { threadId: pending.threadId } : {}),
           requestId: visibleRequestId,
+          ...relayResolutionResult(pending, client.data),
         },
       }));
     }
@@ -556,6 +557,9 @@ export function handleServerRequestResolved(
       && (!threadId || candidate.threadId === threadId)
   ));
   if (!pending) return false;
+  if (!pending.response && params && Object.prototype.hasOwnProperty.call(params, "result")) {
+    pending.response = { result: params.result };
+  }
   pending.resolved = true;
   notifyServerRequestResolved(pending, clients);
   schedulePendingRequestRemoval(pending, pendingRequests, relayedRequestIds);
@@ -576,9 +580,22 @@ function notifyServerRequestResolved(
       params: {
         ...(pending.threadId ? { threadId: pending.threadId } : {}),
         requestId: visibleRequestId,
+        ...relayResolutionResult(pending, client.data),
       },
     }));
   }
+}
+
+function relayResolutionResult(
+  pending: PendingServerRequest,
+  client: GatewayClientData,
+): { result: unknown } | Record<string, never> {
+  if (
+    !client.relayInstanceId
+    || !pending.response
+    || !Object.prototype.hasOwnProperty.call(pending.response, "result")
+  ) return {};
+  return { result: pending.response.result };
 }
 
 function removePendingRequest(

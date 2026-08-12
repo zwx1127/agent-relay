@@ -199,6 +199,8 @@ interface PendingInteractiveRequest {
   deliveryStarted: Set<string>;
   requestDelivered: Set<string>;
   resolved: boolean;
+  hasResolutionResult: boolean;
+  resolutionResult?: unknown;
   resolutionDelivered: Set<string>;
   sideResolutionDelivered: boolean;
   resolutionRetryCount: number;
@@ -821,12 +823,27 @@ export class CodexDriver implements AgentDriver {
       ?? requestsWithId.find((candidate) => candidate.sessionKeys.has(sessionKey));
     if (request) {
       if (request.resolved) throw new Error("This Codex request has already been resolved.");
+      const gateway = this.usesGateway();
       request.resolved = true;
+      if (!gateway) {
+        request.hasResolutionResult = true;
+        request.resolutionResult = result;
+      }
       try {
         await this.rpc.respond(requestId, result);
       } catch (error) {
         request.resolved = false;
+        request.hasResolutionResult = false;
+        request.resolutionResult = undefined;
         throw error;
+      }
+      if (gateway) {
+        // The Gateway arbitrates the first response across native and Relay
+        // clients. A successful socket write only means this response reached
+        // the Gateway; wait for its authoritative resolved notification before
+        // presenting a winning value.
+        this.clearThreadWaitingState(request.threadId);
+        return;
       }
       // A Relay IM callback runs inside its per-conversation queue. Resolution
       // delivery re-enters that same queue, so awaiting presentation here would
@@ -1424,7 +1441,13 @@ export class CodexDriver implements AgentDriver {
     if (sideConversation && await this.handleSideConversationNotification(sideConversation, message, params)) return;
     if (message.method === "serverRequest/resolved") {
       const requestId = params?.requestId;
-      if (typeof requestId === "string" || typeof requestId === "number") await this.resolveInteractiveRequest(requestId, threadId);
+      if (typeof requestId === "string" || typeof requestId === "number") {
+        await this.resolveInteractiveRequest(
+          requestId,
+          threadId,
+          params && Object.prototype.hasOwnProperty.call(params, "result") ? { result: params.result } : undefined,
+        );
+      }
       return;
     }
     const keys = threadId ? this.sessionKeysForThread(threadId) : [];
@@ -1843,7 +1866,11 @@ export class CodexDriver implements AgentDriver {
     if (message.method === "serverRequest/resolved") {
       const requestId = params?.requestId;
       if (typeof requestId === "string" || typeof requestId === "number") {
-        await this.resolveInteractiveRequest(requestId, collector.threadId);
+        await this.resolveInteractiveRequest(
+          requestId,
+          collector.threadId,
+          params && Object.prototype.hasOwnProperty.call(params, "result") ? { result: params.result } : undefined,
+        );
       }
       return true;
     }
@@ -2372,6 +2399,7 @@ export class CodexDriver implements AgentDriver {
       deliveryStarted: new Set(),
       requestDelivered: new Set(),
       resolved: false,
+      hasResolutionResult: false,
       resolutionDelivered: new Set(),
       sideResolutionDelivered: false,
       resolutionRetryCount: 0,
@@ -2387,11 +2415,23 @@ export class CodexDriver implements AgentDriver {
     return true;
   }
 
-  private async resolveInteractiveRequest(requestId: string | number, threadId?: string): Promise<void> {
+  private async resolveInteractiveRequest(
+    requestId: string | number,
+    threadId?: string,
+    resolution?: { result: unknown },
+  ): Promise<void> {
     const request = threadId
       ? this.pendingInteractiveRequests.get(interactiveRequestKey(threadId, requestId))
       : [...this.pendingInteractiveRequests.values()].find((candidate) => sameInteractiveRequestId(candidate.requestId, requestId) && !candidate.resolved);
     if (!request) return;
+    if (resolution && !request.hasResolutionResult) {
+      request.hasResolutionResult = true;
+      request.resolutionResult = resolution.result;
+      if (request.resolved) {
+        request.resolutionDelivered.clear();
+        request.sideResolutionDelivered = false;
+      }
+    }
     request.resolved = true;
     await this.finishInteractiveRequest(requestId, request);
   }
@@ -2424,6 +2464,7 @@ export class CodexDriver implements AgentDriver {
           threadId: request.threadId,
           ...(request.turnId ? { turnId: request.turnId } : {}),
           requestMethod: request.requestMethod,
+          ...(request.hasResolutionResult ? { result: request.resolutionResult } : {}),
         });
         request.sideResolutionDelivered = true;
       } catch (error) {
@@ -2451,6 +2492,7 @@ export class CodexDriver implements AgentDriver {
           threadId: request.threadId,
           ...(request.turnId ? { turnId: request.turnId } : {}),
           requestMethod: request.requestMethod,
+          ...(request.hasResolutionResult ? { result: request.resolutionResult } : {}),
         });
         request.resolutionDelivered.add(key);
       } catch (error) {

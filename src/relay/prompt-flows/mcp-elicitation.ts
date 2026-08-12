@@ -33,6 +33,7 @@ export class McpElicitationFlow {
     sessionKey: string;
     requestId: string | number;
     scopeKey: string;
+    mode: AgentMcpElicitationRequestEvent["mode"];
     timer: ReturnType<typeof setTimeout>;
     promptMessageId?: MessageId;
   }>();
@@ -51,9 +52,10 @@ export class McpElicitationFlow {
       sessionKey: string;
       requestId: string | number;
       scopeKey: string;
+      mode: AgentMcpElicitationRequestEvent["mode"];
       timer: ReturnType<typeof setTimeout>;
       promptMessageId?: MessageId;
-    } = { sessionKey: event.sessionKey, requestId: event.requestId, scopeKey: parsed.scopeKey, timer };
+    } = { sessionKey: event.sessionKey, requestId: event.requestId, scopeKey: parsed.scopeKey, mode: event.mode, timer };
     this.requests.set(requestKey, request);
     try {
       if (event.mode === "url") {
@@ -180,7 +182,7 @@ export class McpElicitationFlow {
     }
   }
 
-  async resolve(sessionKey: string, requestId: string | number): Promise<void> {
+  async resolve(sessionKey: string, requestId: string | number, result?: unknown): Promise<void> {
     const key = codexRequestKey(sessionKey, requestId);
     const request = this.requests.get(key);
     if (!request) return;
@@ -190,7 +192,8 @@ export class McpElicitationFlow {
       return;
     }
     this.deps.store.deletePendingPrompt(request.scopeKey, request.promptMessageId);
-    const finalState = messageWithTitle("Codex request resolved.", "The request was answered from a connected client.");
+    const finalState = resolvedMcpMessage(request.mode, result)
+      ?? messageWithTitle("Codex request resolved.", "The request was answered from a connected client.");
     let lastError: unknown;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
@@ -307,4 +310,15 @@ export class McpElicitationFlow {
     if (pending?.sessionKey && state?.requestId !== undefined) await this.respond(pending.sessionKey, state.requestId as string | number, "cancel", null);
     await this.deps.renderStrictCallbackPage(message, messageWithTitle("MCP request expired."), { inline_keyboard: [] });
   }
+}
+
+function resolvedMcpMessage(
+  mode: AgentMcpElicitationRequestEvent["mode"],
+  result: unknown,
+): RenderedTelegramText | undefined {
+  const action = asPromptRecord(result)?.action;
+  if (action === "accept") return messageWithTitle(mode === "form" ? "MCP form submitted." : "MCP action completed.");
+  if (action === "decline") return messageWithTitle("MCP request declined.");
+  if (action === "cancel") return messageWithTitle("MCP request cancelled.");
+  return undefined;
 }

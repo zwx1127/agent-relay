@@ -53,6 +53,7 @@ interface InteractiveRequestClaim {
   logicalKey: string;
   kind: InteractiveRequestKind;
   signature: string;
+  request: InteractiveRequestEvent;
   state: "rendering" | "active" | "resolved";
   expiresAt: number;
   requestIds: Map<string, string | number>;
@@ -517,17 +518,19 @@ export class CodexPromptFlow {
     }
     if (rendered) {
       this.deps.store.deletePendingPrompt(rendered.scopeKey, rendered.promptMessageId);
-      await this.retireResolvedPrompt(rendered.scopeKey, rendered.promptMessageId, event);
+      await this.retireResolvedPrompt(rendered.scopeKey, rendered.promptMessageId, event, claim?.request);
     }
-    for (const requestId of requestIds) await this.mcp.resolve(event.sessionKey, requestId);
+    for (const requestId of requestIds) await this.mcp.resolve(event.sessionKey, requestId, event.result);
   }
 
   private async retireResolvedPrompt(
     scopeKey: ConversationId,
     promptMessageId: MessageId,
     event: AgentServerRequestResolvedEvent,
+    request: InteractiveRequestEvent | undefined,
   ): Promise<void> {
-    const finalState = messageWithTitle("Codex request resolved.", "The request was answered from a connected client.");
+    const finalState = resolvedPromptMessage(request, event.result)
+      ?? messageWithTitle("Codex request resolved.", "The request was answered from a connected client.");
     let lastError: unknown;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
@@ -583,6 +586,7 @@ export class CodexPromptFlow {
       logicalKey,
       kind: event.type,
       signature,
+      request: event,
       state: "rendering",
       expiresAt: now + CODEX_PROMPT_TTL_MS,
       requestIds: new Map([[alias, event.requestId]]),
@@ -663,4 +667,57 @@ function canonicalJson(value: unknown): string {
 
 function expiredQuestionMessage(): RenderedTelegramText {
   return messageWithTitle("Question expired.", "Use Interrupt on the latest activity card, then resend your instruction.");
+}
+
+function resolvedPromptMessage(
+  request: InteractiveRequestEvent | undefined,
+  result: unknown,
+): RenderedTelegramText | undefined {
+  if (!request) return undefined;
+  if (request.type === "user_input_request") return resolvedUserInputMessage(request.questions, result);
+  if (request.type === "approval_request") {
+    const decision = resolvedApprovalDecision(request.approvalKind, result);
+    return decision ? formatApprovalDecisionMessage(decision, request.title, request.body) : undefined;
+  }
+  return undefined;
+}
+
+function resolvedUserInputMessage(
+  questions: AgentUserInputQuestion[],
+  result: unknown,
+): RenderedTelegramText | undefined {
+  const answers = asPromptRecord(asPromptRecord(result)?.answers);
+  if (!answers) return undefined;
+  const answered = questions.flatMap((question) => {
+    const values = asPromptRecord(answers[question.id])?.answers;
+    if (!Array.isArray(values)) return [];
+    const textValues = values.filter((value): value is string => typeof value === "string");
+    return textValues.length > 0 ? [{ question, values: textValues }] : [];
+  });
+  if (answered.length === 0) return undefined;
+  if (questions.length === 1 && answered.length === 1) return answeredMessage(answered[0]!.values.join("\n"));
+  return messageWithTitle("Answered:", answered.map(({ question, values }) => {
+    const label = question.header || question.id;
+    return values.length === 1 ? `${label}: ${values[0]}` : `${label}:\n${values.join("\n")}`;
+  }).join("\n\n"));
+}
+
+function resolvedApprovalDecision(kind: AgentApprovalKind, result: unknown): string | undefined {
+  const record = asPromptRecord(result);
+  if (!record) return undefined;
+  if (kind === "permissions") {
+    const permissions = asPromptRecord(record.permissions);
+    if (!permissions || Object.keys(permissions).length === 0) return "Denied.";
+    return record.scope === "session" ? "Allowed for this session." : record.scope === "turn" ? "Allowed for this turn." : undefined;
+  }
+  const decision = record.decision;
+  if (decision === "approved") return "Approved.";
+  if (decision === "denied" || decision === "decline") return "Denied.";
+  if (decision === "cancel") return "Cancelled.";
+  if (decision === "accept") return "Approved once.";
+  if (decision === "acceptForSession") return "Approved for this session.";
+  const amendment = asPromptRecord(decision);
+  if (amendment?.acceptWithExecpolicyAmendment) return "Approved command rule.";
+  if (amendment?.applyNetworkPolicyAmendment) return "Approved network rule.";
+  return undefined;
 }

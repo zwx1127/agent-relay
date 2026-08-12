@@ -30,7 +30,12 @@ describe("CodexDriver server requests and recovery", () => {
       requestId: 900,
     }));
     await driver.respond("codex-side:1:demo", 900, { answers: { mode: { answers: ["Fast"] } } });
-    expect(sideEvents).toContainEqual(expect.objectContaining({ type: "server_request_resolved", sessionKey: "codex-side:1:demo", requestId: 900 }));
+    expect(sideEvents).toContainEqual(expect.objectContaining({
+      type: "server_request_resolved",
+      sessionKey: "codex-side:1:demo",
+      requestId: 900,
+      result: { answers: { mode: { answers: ["Fast"] } } },
+    }));
     await driver.closeSideConversation(status.sessionKey, first.threadId);
 
     sideEvents.length = 0;
@@ -67,9 +72,9 @@ describe("CodexDriver server requests and recovery", () => {
     expect(driver.getStatus(second.sessionKey)?.waitingForUserInput).toBe(true);
 
     await driver.respond(second.sessionKey, 900, { answers: { mode: { answers: ["Fast"] } } });
-    expect(events.filter((event) => event.type === "server_request_resolved").map((event) => event.sessionKey)).toEqual([
-      first.sessionKey,
-      second.sessionKey,
+    expect(events.filter((event) => event.type === "server_request_resolved")).toEqual([
+      expect.objectContaining({ sessionKey: first.sessionKey, result: { answers: { mode: { answers: ["Fast"] } } } }),
+      expect.objectContaining({ sessionKey: second.sessionKey, result: { answers: { mode: { answers: ["Fast"] } } } }),
     ]);
     expect(driver.getStatus(first.sessionKey)?.activeTurnId).toBe("turn-1");
     expect(driver.getStatus(second.sessionKey)?.activeTurnId).toBe("turn-1");
@@ -154,6 +159,7 @@ describe("CodexDriver server requests and recovery", () => {
       type: "server_request_resolved",
       sessionKey: status.sessionKey,
       requestId: 900,
+      result: { answers: { mode: { answers: ["Fast"] } } },
     }));
     await driver.release(status.sessionKey);
   });
