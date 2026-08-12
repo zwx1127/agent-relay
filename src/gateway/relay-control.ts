@@ -5,6 +5,8 @@ import type {
   AgentRelayCommandMetadata,
   AgentRelayCommandPhase,
   AgentRelayCommandState,
+  AgentRelayPlanDecisionPhase,
+  AgentRelayPlanDecisionState,
   AgentRelayThreadState,
 } from "../ports/agent.ts";
 import {
@@ -14,6 +16,10 @@ import {
   RELAY_CONTROL_PROTOCOL_VERSION,
   RELAY_CONTROL_RESYNC_METHOD,
   RELAY_CONTROL_SNAPSHOT_METHOD,
+  RELAY_CONTROL_PLAN_DECISION_CLAIM_METHOD,
+  RELAY_CONTROL_PLAN_DECISION_FAIL_METHOD,
+  RELAY_CONTROL_PLAN_DECISION_METHOD,
+  RELAY_CONTROL_PLAN_DECISION_REGISTER_METHOD,
   RELAY_CONTROL_THREAD_STATE_METHOD,
   RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
 } from "../ports/agent/control.ts";
@@ -26,6 +32,10 @@ export {
   RELAY_CONTROL_PROTOCOL_VERSION,
   RELAY_CONTROL_RESYNC_METHOD,
   RELAY_CONTROL_SNAPSHOT_METHOD,
+  RELAY_CONTROL_PLAN_DECISION_CLAIM_METHOD,
+  RELAY_CONTROL_PLAN_DECISION_FAIL_METHOD,
+  RELAY_CONTROL_PLAN_DECISION_METHOD,
+  RELAY_CONTROL_PLAN_DECISION_REGISTER_METHOD,
   RELAY_CONTROL_THREAD_STATE_METHOD,
   RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
 };
@@ -35,6 +45,7 @@ const ACTIVE_TTL_MS = 24 * 60 * 60_000;
 const ACTIVE_LIMIT_PER_THREAD = 100;
 const TERMINAL_LIMIT_PER_THREAD = 100;
 const SNAPSHOT_TERMINAL_LIMIT = 20;
+const PLAN_IMPLEMENT_START_TIMEOUT_MS = 30_000;
 
 export interface RelayControlClientData {
   id: string;
@@ -55,6 +66,13 @@ interface InternalCommand extends AgentRelayCommandState {
   originToken?: string;
   turnId?: string;
   operationThreadId?: string;
+}
+
+interface InternalPlanDecision extends AgentRelayPlanDecisionState {
+  claimClientId?: string;
+  claimRelayInstanceId?: string;
+  implementationRequestKey?: string;
+  implementationTimer?: Timer;
 }
 
 interface PendingModeUpdate {
@@ -86,6 +104,9 @@ export class GatewayRelayControl {
   private readonly pendingModesByRequest = new Map<string, PendingModeUpdate>();
   private readonly pendingModeStartsByThread = new Map<string, PendingModeStart>();
   private readonly threadStates = new Map<string, AgentRelayThreadState>();
+  private readonly planDecisions = new Map<string, InternalPlanDecision>();
+  private readonly planDecisionKeysByThread = new Map<string, string[]>();
+  private readonly planImplementationByRequest = new Map<string, string>();
   private readonly threadRevisions = new Map<string, number>();
   private readonly recentNotifications = new Map<string, RecentNotification>();
 
@@ -102,6 +123,12 @@ export class GatewayRelayControl {
     }
     if (message.method === RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD) {
       this.handleThreadStateUpdate(client, message);
+      return { handled: true };
+    }
+    if (message.method === RELAY_CONTROL_PLAN_DECISION_REGISTER_METHOD
+      || message.method === RELAY_CONTROL_PLAN_DECISION_CLAIM_METHOD
+      || message.method === RELAY_CONTROL_PLAN_DECISION_FAIL_METHOD) {
+      this.handlePlanDecisionRequest(client, message);
       return { handled: true };
     }
     if (message.method === RELAY_CONTROL_ACK_METHOD) {
@@ -123,6 +150,7 @@ export class GatewayRelayControl {
       if (method === "turn/start") this.pendingModeStartsByThread.set(explicitMode.threadId, { ...explicitMode, createdAt: Date.now() });
       this.setThreadMode(explicitMode.threadId, explicitMode.mode, false);
     }
+    if (method === "turn/start" && isRequest(message)) this.bindPlanImplementationRequest(client, message, params);
 
     const kind = commandKind(method, params);
     if (!kind || !isRequest(message)) {
@@ -172,6 +200,20 @@ export class GatewayRelayControl {
         this.pendingModesByRequest.delete(key);
         if (message.error === undefined) this.setThreadMode(pendingMode.threadId, pendingMode.mode, true);
         this.pendingModeStartsByThread.delete(pendingMode.threadId);
+      }
+      const implementationDecisionKey = this.planImplementationByRequest.get(key);
+      if (implementationDecisionKey) {
+        const decision = this.planDecisions.get(implementationDecisionKey);
+        if (decision?.phase === "implementing") {
+          if (message.error !== undefined) this.transitionPlanDecision(decision, "failed");
+          else {
+            const implementationTurnId = resultTurnId(asRecord(message.result));
+            if (implementationTurnId) {
+              decision.implementationTurnId = implementationTurnId;
+              this.transitionPlanDecision(decision, "implementation_started");
+            }
+          }
+        }
       }
       const commandId = this.pendingByRequest.get(key);
       if (!commandId) return;
@@ -226,6 +268,19 @@ export class GatewayRelayControl {
         this.commandByTurn.set(turnKey(threadId, turnId), command.commandId);
         this.transition(command, "running");
       }
+      if (turnId) {
+        const decisions = this.planDecisionsForThread(threadId);
+        const implementing = [...decisions].reverse().find((decision) => decision.phase === "implementing"
+          && decision.implementationRequestKey
+          && (sourceId === "gateway-observer" || decision.claimClientId === sourceId));
+        if (implementing) {
+          implementing.implementationTurnId = turnId;
+          this.transitionPlanDecision(implementing, "implementation_started");
+        }
+        for (const decision of decisions) {
+          if (decision.phase === "ready") this.transitionPlanDecision(decision, "expired");
+        }
+      }
     }
     if (message.method === "turn/completed") {
       const turnId = resultTurnId(params);
@@ -247,6 +302,7 @@ export class GatewayRelayControl {
     }
     if (message.method === "thread/deleted") {
       this.threadStates.delete(threadId);
+      this.deletePlanDecisions(threadId);
     }
   }
 
@@ -268,6 +324,7 @@ export class GatewayRelayControl {
         consistency: "live",
         threadState,
         commands: [...active, ...terminal].map(publicCommand),
+        planDecisions: this.planDecisionsForThread(threadId).map(publicPlanDecision),
       },
     }));
   }
@@ -330,6 +387,53 @@ export class GatewayRelayControl {
     client.socket.send(JSON.stringify({ id: message.id, result: state }));
   }
 
+  private handlePlanDecisionRequest(client: RelayControlClient, message: Record<string, unknown>): void {
+    if (!isRequest(message) || !this.isRelayControlClient(client)) {
+      if (isRequest(message)) this.sendError(client, message.id, -32600, "Relay control is not negotiated.");
+      return;
+    }
+    const params = asRecord(message.params);
+    const threadId = getString(params, "threadId");
+    const planTurnId = getString(params, "planTurnId");
+    if (!threadId || !planTurnId || !client.data.threads.has(threadId)) {
+      this.sendError(client, message.id, -32602, "Invalid Plan decision request.");
+      return;
+    }
+    const key = planDecisionKey(threadId, planTurnId);
+    let decision = this.planDecisions.get(key);
+    if (message.method === RELAY_CONTROL_PLAN_DECISION_REGISTER_METHOD) {
+      if (!decision) decision = this.createPlanDecision(threadId, planTurnId);
+      client.socket.send(JSON.stringify({ id: message.id, result: publicPlanDecision(decision) }));
+      return;
+    }
+    if (!decision) {
+      this.sendError(client, message.id, -32000, "Plan decision is unavailable.");
+      return;
+    }
+    if (message.method === RELAY_CONTROL_PLAN_DECISION_CLAIM_METHOD) {
+      const action = getString(params, "action");
+      if (action !== "implement" && action !== "continue") {
+        this.sendError(client, message.id, -32602, "Invalid Plan decision action.");
+        return;
+      }
+      let claimed = false;
+      if (decision.phase === "ready") {
+        claimed = true;
+        decision.action = action;
+        decision.claimClientId = client.data.id;
+        decision.claimRelayInstanceId = client.data.relayInstanceId;
+        this.transitionPlanDecision(decision, action === "implement" ? "implementing" : "continued");
+        if (action === "implement") this.armPlanImplementationTimeout(decision);
+      }
+      client.socket.send(JSON.stringify({ id: message.id, result: { claimed, state: publicPlanDecision(decision) } }));
+      return;
+    }
+    if (decision.phase === "implementing" && isPlanClaimOwner(decision, client)) {
+      this.transitionPlanDecision(decision, "failed");
+    }
+    client.socket.send(JSON.stringify({ id: message.id, result: publicPlanDecision(decision) }));
+  }
+
   private handleAck(client: RelayControlClient, message: Record<string, unknown>): void {
     if (!this.isRelayControlClient(client)) return;
     const params = asRecord(message.params);
@@ -363,6 +467,11 @@ export class GatewayRelayControl {
 
   private setThreadMode(threadId: string, mode: AgentRelayThreadState["collaborationMode"], applied: boolean): AgentRelayThreadState {
     const previous = this.threadState(threadId);
+    if (mode === "default") {
+      for (const decision of this.planDecisionsForThread(threadId)) {
+        if (decision.phase === "ready") this.transitionPlanDecision(decision, "expired");
+      }
+    }
     if (previous.collaborationMode === mode && previous.collaborationModeApplied === applied) return previous;
     const state: AgentRelayThreadState = {
       threadId,
@@ -405,6 +514,81 @@ export class GatewayRelayControl {
     return command;
   }
 
+  private createPlanDecision(threadId: string, planTurnId: string): InternalPlanDecision {
+    const now = Date.now();
+    const decision: InternalPlanDecision = {
+      threadId,
+      planTurnId,
+      phase: "ready",
+      revision: this.nextRevision(threadId),
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.planDecisions.set(planDecisionKey(threadId, planTurnId), decision);
+    const keys = this.planDecisionKeysByThread.get(threadId) ?? [];
+    keys.push(planDecisionKey(threadId, planTurnId));
+    this.planDecisionKeysByThread.set(threadId, keys.slice(-100));
+    this.broadcastPlanDecision(decision);
+    return decision;
+  }
+
+  private bindPlanImplementationRequest(
+    client: RelayControlClient,
+    message: Record<string, unknown> & { id: string | number },
+    params: Record<string, unknown> | undefined,
+  ): void {
+    const threadId = getString(params, "threadId");
+    if (!threadId || client.data.relayControlVersion !== RELAY_CONTROL_PROTOCOL_VERSION) return;
+    const decision = [...this.planDecisionsForThread(threadId)].reverse().find((candidate) => candidate.phase === "implementing"
+      && isPlanClaimOwner(candidate, client)
+      && !candidate.implementationRequestKey);
+    if (!decision) return;
+    decision.claimClientId = client.data.id;
+    const key = requestKey(client.data.id, message.id);
+    decision.implementationRequestKey = key;
+    this.planImplementationByRequest.set(key, planDecisionKey(decision.threadId, decision.planTurnId));
+  }
+
+  private transitionPlanDecision(decision: InternalPlanDecision, phase: AgentRelayPlanDecisionPhase): void {
+    if (isPlanDecisionTerminal(decision.phase)) return;
+    if (decision.implementationTimer) {
+      clearTimeout(decision.implementationTimer);
+      decision.implementationTimer = undefined;
+    }
+    if (isPlanDecisionTerminal(phase) && decision.implementationRequestKey) {
+      this.planImplementationByRequest.delete(decision.implementationRequestKey);
+      decision.implementationRequestKey = undefined;
+    }
+    decision.phase = phase;
+    decision.revision = this.nextRevision(decision.threadId);
+    decision.updatedAt = Date.now();
+    this.broadcastPlanDecision(decision);
+  }
+
+  private armPlanImplementationTimeout(decision: InternalPlanDecision): void {
+    decision.implementationTimer = setTimeout(() => {
+      decision.implementationTimer = undefined;
+      if (decision.phase === "implementing") this.transitionPlanDecision(decision, "failed");
+    }, PLAN_IMPLEMENT_START_TIMEOUT_MS);
+    decision.implementationTimer.unref();
+  }
+
+  private planDecisionsForThread(threadId: string): InternalPlanDecision[] {
+    return (this.planDecisionKeysByThread.get(threadId) ?? [])
+      .map((key) => this.planDecisions.get(key))
+      .filter((decision): decision is InternalPlanDecision => Boolean(decision));
+  }
+
+  private deletePlanDecisions(threadId: string): void {
+    for (const key of this.planDecisionKeysByThread.get(threadId) ?? []) {
+      const decision = this.planDecisions.get(key);
+      if (decision?.implementationTimer) clearTimeout(decision.implementationTimer);
+      if (decision?.implementationRequestKey) this.planImplementationByRequest.delete(decision.implementationRequestKey);
+      this.planDecisions.delete(key);
+    }
+    this.planDecisionKeysByThread.delete(threadId);
+  }
+
   private transition(command: InternalCommand, phase: AgentRelayCommandPhase): void {
     if (isTerminal(command.phase)) return;
     command.phase = phase;
@@ -439,6 +623,20 @@ export class GatewayRelayControl {
     });
     for (const client of this.clients()) {
       if (this.isRelayControlClient(client) && client.data.threads.has(state.threadId)) client.socket.send(notification);
+    }
+  }
+
+  private broadcastPlanDecision(decision: InternalPlanDecision): void {
+    const notification = JSON.stringify({
+      method: RELAY_CONTROL_PLAN_DECISION_METHOD,
+      params: {
+        gatewayEpoch: this.gatewayEpoch,
+        threadRevision: decision.revision,
+        ...publicPlanDecision(decision),
+      },
+    });
+    for (const client of this.clients()) {
+      if (this.isRelayControlClient(client) && client.data.threads.has(decision.threadId)) client.socket.send(notification);
     }
   }
 
@@ -479,7 +677,22 @@ export class GatewayRelayControl {
       if (command) this.deleteCommand(command);
     }
     const kept = [...keptActive, ...keptTerminal];
-    if (kept.length > 0 || this.threadStates.has(threadId)) this.commandIdsByThread.set(threadId, kept);
+    const decisionKeys = this.planDecisionKeysByThread.get(threadId) ?? [];
+    const keptDecisions: string[] = [];
+    for (const key of decisionKeys) {
+      const decision = this.planDecisions.get(key);
+      if (!decision) continue;
+      const ttl = isPlanDecisionTerminal(decision.phase) ? TERMINAL_TTL_MS : ACTIVE_TTL_MS;
+      if (decision.updatedAt >= now - ttl) keptDecisions.push(key);
+      else {
+        if (decision.implementationTimer) clearTimeout(decision.implementationTimer);
+        if (decision.implementationRequestKey) this.planImplementationByRequest.delete(decision.implementationRequestKey);
+        this.planDecisions.delete(key);
+      }
+    }
+    if (keptDecisions.length > 0) this.planDecisionKeysByThread.set(threadId, keptDecisions.slice(-100));
+    else this.planDecisionKeysByThread.delete(threadId);
+    if (kept.length > 0 || keptDecisions.length > 0 || this.threadStates.has(threadId)) this.commandIdsByThread.set(threadId, kept);
     else {
       this.commandIdsByThread.delete(threadId);
       this.threadRevisions.delete(threadId);
@@ -487,7 +700,8 @@ export class GatewayRelayControl {
   }
 
   private pruneAll(now = Date.now()): void {
-    for (const threadId of this.commandIdsByThread.keys()) this.prune(threadId, now);
+    const threadIds = new Set([...this.commandIdsByThread.keys(), ...this.planDecisionKeysByThread.keys()]);
+    for (const threadId of threadIds) this.prune(threadId, now);
   }
 
   private deleteCommand(command: InternalCommand): void {
@@ -576,6 +790,21 @@ function publicCommand(command: InternalCommand): AgentRelayCommandState {
     revision: command.revision,
     createdAt: command.createdAt,
     updatedAt: command.updatedAt,
+    ...(command.turnId ? { turnId: command.turnId } : {}),
+    ...(command.operationThreadId ? { operationThreadId: command.operationThreadId } : {}),
+  };
+}
+
+function publicPlanDecision(decision: InternalPlanDecision): AgentRelayPlanDecisionState {
+  return {
+    threadId: decision.threadId,
+    planTurnId: decision.planTurnId,
+    phase: decision.phase,
+    ...(decision.action ? { action: decision.action } : {}),
+    ...(decision.implementationTurnId ? { implementationTurnId: decision.implementationTurnId } : {}),
+    revision: decision.revision,
+    createdAt: decision.createdAt,
+    updatedAt: decision.updatedAt,
   };
 }
 
@@ -597,6 +826,10 @@ function turnKey(threadId: string, turnId: string): string {
   return `${threadId}\0${turnId}`;
 }
 
+function planDecisionKey(threadId: string, planTurnId: string): string {
+  return `${threadId}\0${planTurnId}`;
+}
+
 function isRequest(message: Record<string, unknown>): message is Record<string, unknown> & { id: string | number; method: string } {
   return (typeof message.id === "string" || typeof message.id === "number") && typeof message.method === "string";
 }
@@ -607,6 +840,17 @@ function isResponse(message: Record<string, unknown>): message is Record<string,
 
 function isTerminal(phase: AgentRelayCommandPhase): boolean {
   return phase === "completed" || phase === "failed" || phase === "interrupted";
+}
+
+function isPlanDecisionTerminal(phase: AgentRelayPlanDecisionPhase): boolean {
+  return phase === "implementation_started" || phase === "continued" || phase === "failed" || phase === "expired";
+}
+
+function isPlanClaimOwner(decision: InternalPlanDecision, client: RelayControlClient): boolean {
+  if (decision.claimRelayInstanceId && client.data.relayInstanceId) {
+    return decision.claimRelayInstanceId === client.data.relayInstanceId;
+  }
+  return decision.claimClientId === client.data.id;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

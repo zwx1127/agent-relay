@@ -30,7 +30,7 @@ describe("CodexDriver server requests and recovery", () => {
       requestId: 900,
     }));
     await driver.respond("codex-side:1:demo", 900, { answers: { mode: { answers: ["Fast"] } } });
-    expect(sideEvents).toContainEqual({ type: "server_request_resolved", sessionKey: "codex-side:1:demo", requestId: 900 });
+    expect(sideEvents).toContainEqual(expect.objectContaining({ type: "server_request_resolved", sessionKey: "codex-side:1:demo", requestId: 900 }));
     await driver.closeSideConversation(status.sessionKey, first.threadId);
 
     sideEvents.length = 0;
@@ -79,6 +79,64 @@ describe("CodexDriver server requests and recovery", () => {
     expect((readLog(fake).match(/"method":"thread\/unsubscribe"/g) ?? [])).toHaveLength(0);
     await driver.release(second.sessionKey);
     expect((readLog(fake).match(/"method":"thread\/unsubscribe"/g) ?? [])).toHaveLength(1);
+  });
+
+  test("does not deliver a late question card to another scope after a fast shared answer", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    let driver!: CodexDriver;
+    driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      async (event) => {
+        events.push(event);
+        if (event.type === "user_input_request") {
+          await driver.respond(event.sessionKey, event.requestId, { answers: { mode: { answers: ["Fast"] } } });
+        }
+      },
+      () => undefined,
+    );
+
+    const first = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd(), threadId: "thread-1" });
+    const second = await driver.start({ conversationId: 2, workspaceName: "demo", workspacePath: process.cwd(), threadId: "thread-1" });
+    await driver.send(first.sessionKey, "ask");
+    await sleep(100);
+
+    expect(events.filter((event) => event.type === "user_input_request").map((event) => event.sessionKey)).toEqual([first.sessionKey]);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "server_request_resolved",
+      sessionKey: first.sessionKey,
+      requestId: 900,
+      threadId: "thread-1",
+    }));
+    expect(driver.getStatus(first.sessionKey)?.waitingForUserInput).toBe(false);
+    expect(driver.getStatus(second.sessionKey)?.waitingForUserInput).toBe(false);
+    await driver.release(first.sessionKey);
+    await driver.release(second.sessionKey);
+  });
+
+  test("delivers a concurrently duplicated server request once per shared Relay scope", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => { events.push(event); },
+      () => undefined,
+    );
+
+    const first = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd(), threadId: "thread-1" });
+    const second = await driver.start({ conversationId: 2, workspaceName: "demo", workspacePath: process.cwd(), threadId: "thread-1" });
+    await driver.send(first.sessionKey, "ask duplicate");
+    await sleep(100);
+
+    const requests = events.filter((event) => event.type === "user_input_request");
+    expect(requests.map((event) => event.sessionKey)).toEqual([first.sessionKey, second.sessionKey]);
+    expect(requests.every((event) => event.type === "user_input_request" && event.questions[0]?.question === "Pick the first question.")).toBe(true);
+    expect(driver.getStatus(first.sessionKey)?.waitingForUserInput).toBe(true);
+    expect(driver.getStatus(second.sessionKey)?.waitingForUserInput).toBe(true);
+
+    await driver.respond(first.sessionKey, 904, { answers: { mode: { answers: ["Fast"] } } });
+    await driver.release(first.sessionKey);
+    await driver.release(second.sessionKey);
   });
 
   test("normalizes typed MCP form elicitations and returns MCP response metadata", async () => {

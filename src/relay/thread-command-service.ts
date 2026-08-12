@@ -5,6 +5,7 @@ import type {
   AgentBuiltinCommand,
   AgentDriver,
   AgentOutputEvent,
+  AgentRelayCommandStateEvent,
   AgentSessionStatus,
   AgentSideConversationResult,
   AgentTaskInput,
@@ -86,6 +87,11 @@ interface ActiveSideConversation {
   closing: boolean;
 }
 
+interface ThreadConfirmationCard {
+  scopeKey: string;
+  messageId: MessageId;
+}
+
 export class ThreadCommandService {
   private readonly attachments: AttachmentPicker;
   private readonly backgroundTerminals: BackgroundTerminalService;
@@ -93,6 +99,7 @@ export class ThreadCommandService {
   private readonly plans: PlanCommandService;
   private readonly sideConversations: SideConversationPresenter;
   private readonly activeSideConversations = new Map<string, ActiveSideConversation>();
+  private readonly threadConfirmationCards = new Map<string, ThreadConfirmationCard>();
 
   constructor(private readonly deps: ThreadCommandDeps) {
     this.sideConversations = new SideConversationPresenter({
@@ -121,6 +128,7 @@ export class ThreadCommandService {
       commandSession: (conversationId) => this.commandSession(conversationId),
       requireCurrentWorkspace: deps.requireCurrentWorkspace,
       sendRendered: deps.sendRendered,
+      editRendered: deps.editRendered,
       renderStrictCallbackPage: deps.renderStrictCallbackPage,
     });
     this.goals = new GoalCommandService({
@@ -152,12 +160,15 @@ export class ThreadCommandService {
       hasTaskCreatedAfter: deps.hasTaskCreatedAfter,
       submitTask: deps.submitTask,
       sendRendered: deps.sendRendered,
+      editRendered: deps.editRendered,
       renderStrictCallbackPage: deps.renderStrictCallbackPage,
     });
   }
 
   async clearSessionState(sessionKeyValue: string): Promise<void> {
     this.plans.clearSession(sessionKeyValue);
+    this.goals.clearSession(sessionKeyValue);
+    this.threadConfirmationCards.delete(sessionKeyValue);
     const active = [...this.activeSideConversations.values()].find((side) => side.ownerSessionKey === sessionKeyValue);
     if (active) await this.closeSideConversationState(active, undefined, true);
   }
@@ -618,6 +629,22 @@ export class ThreadCommandService {
       await this.sendBusyCommandNotice(conversationId);
       return;
     }
+    const previous = this.threadConfirmationCards.get(key);
+    if (previous) {
+      this.threadConfirmationCards.delete(key);
+      this.deps.store.deletePendingPrompt(previous.scopeKey, previous.messageId);
+      await this.deps.editRendered(
+        previous.scopeKey,
+        messageWithTitle("Command confirmation expired.", "A newer confirmation card is available."),
+        { messageId: previous.messageId, replyMarkup: { inline_keyboard: [] } },
+      ).catch((error) => {
+        this.deps.logger.warn("router.thread_confirmation_edit_failed", {
+          session_key: key,
+          message_id: previous.messageId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      });
+    }
     const token = shortToken();
     const result = await this.deps.sendRendered(conversationId, messageWithTitle(title, body), {
       replyMarkup: commandConfirmKeyboard(token, command, confirmLabel, stage),
@@ -632,6 +659,7 @@ export class ThreadCommandService {
       payloadJson: JSON.stringify({ command, token, stage, threadId: status.threadId }),
       expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
     });
+    this.threadConfirmationCards.set(key, { scopeKey: String(conversationId), messageId: result.messageId });
   }
 
   private async commandSession(conversationId: ConversationId): Promise<{ workspace: WorkspaceRecord; status: AgentSessionStatus; key: string }> {
@@ -864,6 +892,7 @@ export class ThreadCommandService {
     action: string | undefined,
   ): Promise<void> {
     if (action === "cancel") {
+      this.forgetThreadConfirmation(pending);
       await this.deps.renderStrictCallbackPage(message, messageWithTitle(`${capitalize(command)} cancelled.`), { inline_keyboard: [] });
       this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
       return;
@@ -883,15 +912,18 @@ export class ThreadCommandService {
     const key = sessionKey(message.conversationId, workspace.name);
     const status = this.deps.agent.getStatus(key);
     if (!status?.running || status.threadId !== data.threadId || pending.sessionKey !== key) {
+      this.forgetThreadConfirmation(pending);
       await this.deps.renderStrictCallbackPage(message, messageWithTitle(`${capitalize(command)} expired.`, "The active chat changed."), { inline_keyboard: [] });
       this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
       return;
     }
     if (this.commandBusy(message.conversationId, workspace.name, status)) {
+      this.forgetThreadConfirmation(pending);
       await this.deps.renderStrictCallbackPage(message, messageWithTitle("Codex is busy.", "Wait for the current work to finish and run the command again."), { inline_keyboard: [] });
       this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
       return;
     }
+    this.forgetThreadConfirmation(pending);
     await this.deps.renderStrictCallbackPage(message, messageWithTitle(`${capitalize(command)} in progress.`), { inline_keyboard: [] });
     this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
     if (command === "compact") {
@@ -971,6 +1003,50 @@ export class ThreadCommandService {
     await this.plans.sendReadyPrompt(sessionKeyValue, completedTurnId);
   }
 
+  async handlePlanDecisionState(event: import("../ports/agent.ts").AgentRelayPlanDecisionStateEvent): Promise<void> {
+    await this.plans.handleDecisionState(event);
+  }
+
+  async handlePlanDecisionSnapshot(
+    sessionKeyValue: string,
+    gatewayEpoch: string,
+    decisions: import("../ports/agent.ts").AgentRelayPlanDecisionState[] | undefined,
+  ): Promise<void> {
+    await this.plans.handleDecisionSnapshot(sessionKeyValue, gatewayEpoch, decisions ?? []);
+  }
+
+  async handleSharedGoalState(sessionKeyValue: string, goal: import("../ports/agent.ts").AgentThreadGoal | null): Promise<void> {
+    await this.goals.syncExternal(sessionKeyValue, goal);
+  }
+
+  async handleSharedCommandState(event: AgentRelayCommandStateEvent): Promise<void> {
+    if (event.phase === "accepted" || event.phase === "running") {
+      const card = this.threadConfirmationCards.get(event.sessionKey);
+      if (card) {
+        this.threadConfirmationCards.delete(event.sessionKey);
+        this.deps.store.deletePendingPrompt(card.scopeKey, card.messageId);
+        await this.deps.editRendered(
+          card.scopeKey,
+          messageWithTitle("Command confirmation expired.", "Another shared thread operation has already started."),
+          { messageId: card.messageId, replyMarkup: { inline_keyboard: [] } },
+        ).catch((error) => {
+          this.deps.logger.warn("router.thread_confirmation_edit_failed", {
+            session_key: event.sessionKey,
+            message_id: card.messageId,
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+        });
+      }
+    }
+    if (event.kind === "terminal_stop" || event.kind === "terminals_clean") {
+      if (event.phase === "accepted" || event.phase === "running") {
+        await this.backgroundTerminals.retireControls(event.sessionKey);
+      } else {
+        await this.backgroundTerminals.refreshSession(event.sessionKey);
+      }
+    }
+  }
+
   private async restoreThreadAfterFailedSwitch(
     conversationId: ConversationId,
     workspace: WorkspaceRecord,
@@ -1006,6 +1082,12 @@ export class ThreadCommandService {
 
   private commandBusy(conversationId: ConversationId, workspaceName: string, status: AgentSessionStatus | undefined): boolean {
     return hasBusyWorkspaceWork(this.deps.store, conversationId, workspaceName, status);
+  }
+
+  private forgetThreadConfirmation(pending: PendingPrompt): void {
+    if (!pending.sessionKey) return;
+    const card = this.threadConfirmationCards.get(pending.sessionKey);
+    if (card && String(card.messageId) === String(pending.promptMessageId)) this.threadConfirmationCards.delete(pending.sessionKey);
   }
 
   async answerRelayCommandPrompt(conversationId: ConversationId, promptMessageId: MessageId, text: string, userMessageId?: MessageId): Promise<void> {

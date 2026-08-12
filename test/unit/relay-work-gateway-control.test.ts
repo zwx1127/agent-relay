@@ -5,6 +5,9 @@ import {
   RELAY_CONTROL_ACK_METHOD,
   RELAY_CONTROL_HELLO_METHOD,
   RELAY_CONTROL_PROTOCOL_VERSION,
+  RELAY_CONTROL_PLAN_DECISION_CLAIM_METHOD,
+  RELAY_CONTROL_PLAN_DECISION_METHOD,
+  RELAY_CONTROL_PLAN_DECISION_REGISTER_METHOD,
   RELAY_CONTROL_RESYNC_METHOD,
   RELAY_CONTROL_SNAPSHOT_METHOD,
   RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
@@ -76,6 +79,91 @@ describe("experimental Relay Gateway control plane", () => {
     expect(snapshot.commands).toEqual([expect.objectContaining({ commandId: "command-1", kind: "review", phase: "completed" })]);
     expect(JSON.stringify(snapshot)).not.toContain("uncommittedChanges");
     expect(JSON.stringify(snapshot)).not.toContain("origin-1");
+  });
+
+  test("arbitrates one shared Plan decision and completes it on the implementation turn", () => {
+    const origin = client("origin", "agent-relay", ["thread-1"]);
+    const peer = client("peer", "agent-relay", ["thread-1"]);
+    const clients = new Map([[origin.data.id, origin], [peer.data.id, peer]]);
+    const control = new GatewayRelayControl(() => clients.values());
+    hello(control, origin);
+    hello(control, peer);
+
+    control.handleFrontend(origin, {
+      id: 50,
+      method: RELAY_CONTROL_PLAN_DECISION_REGISTER_METHOD,
+      params: { threadId: "thread-1", planTurnId: "plan-turn" },
+    });
+    expect(notifications(peer, RELAY_CONTROL_PLAN_DECISION_METHOD).at(-1)?.params).toMatchObject({
+      threadId: "thread-1",
+      planTurnId: "plan-turn",
+      phase: "ready",
+    });
+
+    control.handleFrontend(peer, {
+      id: 51,
+      method: RELAY_CONTROL_PLAN_DECISION_CLAIM_METHOD,
+      params: { threadId: "thread-1", planTurnId: "plan-turn", action: "implement" },
+    });
+    control.handleFrontend(origin, {
+      id: 52,
+      method: RELAY_CONTROL_PLAN_DECISION_CLAIM_METHOD,
+      params: { threadId: "thread-1", planTurnId: "plan-turn", action: "continue" },
+    });
+    expect(peer.sent.find((message) => message.id === 51)?.result).toMatchObject({ claimed: true, state: { phase: "implementing", action: "implement" } });
+    expect(origin.sent.find((message) => message.id === 52)?.result).toMatchObject({ claimed: false, state: { phase: "implementing", action: "implement" } });
+
+    control.handleObserver({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "unrelated-turn" } } });
+    expect(notifications(origin, RELAY_CONTROL_PLAN_DECISION_METHOD).at(-1)?.params).toMatchObject({ phase: "implementing" });
+
+    const reconnectedPeer = client("peer-reconnected", "agent-relay", ["thread-1"]);
+    clients.delete(peer.data.id);
+    clients.set(reconnectedPeer.data.id, reconnectedPeer);
+    control.handleFrontend(reconnectedPeer, {
+      id: 53,
+      method: RELAY_CONTROL_HELLO_METHOD,
+      params: { version: RELAY_CONTROL_PROTOCOL_VERSION, instanceId: "instance-peer" },
+    });
+    control.handleFrontend(reconnectedPeer, { id: 54, method: "turn/start", params: { threadId: "thread-1", input: [{ type: "text", text: "Implement the approved plan." }] } });
+    control.handleObserver({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "implementation-turn" } } });
+    expect(notifications(origin, RELAY_CONTROL_PLAN_DECISION_METHOD).at(-1)?.params).toMatchObject({
+      phase: "implementation_started",
+      implementationTurnId: "implementation-turn",
+    });
+
+    origin.sent.length = 0;
+    control.sendSnapshot(origin, "thread-1");
+    const snapshot = notifications(origin, RELAY_CONTROL_SNAPSHOT_METHOD).at(-1)?.params as Record<string, unknown>;
+    expect(snapshot.planDecisions).toEqual([expect.objectContaining({ planTurnId: "plan-turn", phase: "implementation_started" })]);
+  });
+
+  test("expires ready Plan decisions when the shared thread returns to Default mode", () => {
+    const relay = client("relay", "agent-relay", ["thread-1"]);
+    const clients = new Map([[relay.data.id, relay]]);
+    const control = new GatewayRelayControl(() => clients.values());
+    hello(control, relay);
+    control.handleFrontend(relay, {
+      id: 60,
+      method: RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
+      params: { threadId: "thread-1", operation: "set", mode: "plan" },
+    });
+    control.handleFrontend(relay, {
+      id: 61,
+      method: RELAY_CONTROL_PLAN_DECISION_REGISTER_METHOD,
+      params: { threadId: "thread-1", planTurnId: "plan-turn" },
+    });
+    control.handleFrontend(relay, {
+      id: 62,
+      method: RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
+      params: { threadId: "thread-1", operation: "set", mode: "default" },
+    });
+    control.handleFrontend(relay, {
+      id: 63,
+      method: RELAY_CONTROL_PLAN_DECISION_CLAIM_METHOD,
+      params: { threadId: "thread-1", planTurnId: "plan-turn", action: "continue" },
+    });
+
+    expect(relay.sent.find((message) => message.id === 63)?.result).toMatchObject({ claimed: false, state: { phase: "expired" } });
   });
 
   test("keeps ephemeral BTW forks outside Relay control snapshots", () => {

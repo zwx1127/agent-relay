@@ -45,6 +45,22 @@ interface PendingPrompt {
   expiresAt?: number;
 }
 
+type InteractiveRequestEvent = AgentUserInputRequestEvent | AgentApprovalRequestEvent | AgentMcpElicitationRequestEvent;
+type InteractiveRequestKind = InteractiveRequestEvent["type"];
+
+interface InteractiveRequestClaim {
+  sessionKey: string;
+  logicalKey: string;
+  kind: InteractiveRequestKind;
+  signature: string;
+  state: "rendering" | "active" | "resolved";
+  expiresAt: number;
+  requestIds: Map<string, string | number>;
+}
+
+const RESOLVED_REQUEST_TOMBSTONE_MS = 5 * 60_000;
+const MAX_INTERACTIVE_REQUEST_CLAIMS = 2_000;
+
 export interface CodexPromptFlowDeps {
   store: RelayStore;
   agent: Pick<AgentDriver, "respond">;
@@ -65,54 +81,75 @@ export class CodexPromptFlow {
     answers: Record<string, { answers: string[] }>;
   }>();
   private readonly renderedRequests = new Map<string, { scopeKey: string; promptMessageId: MessageId }>();
+  private readonly requestClaims = new Map<string, InteractiveRequestClaim>();
+  private readonly requestAliases = new Map<string, string>();
   private readonly mcp: McpElicitationFlow;
 
   constructor(private readonly deps: CodexPromptFlowDeps) {
     this.mcp = new McpElicitationFlow(deps);
   }
 
-  async handleUserInputRequest(event: AgentUserInputRequestEvent): Promise<void> {
+  async handleUserInputRequest(event: AgentUserInputRequestEvent): Promise<boolean> {
     const parsed = parseSessionKey(event.sessionKey);
-    if (!parsed) return;
+    if (!parsed) return false;
+    const claim = this.beginRequest(event);
+    if (!claim) return false;
     const token = shortToken();
     const expiresAt = Date.now() + CODEX_PROMPT_TTL_MS;
     const key = codexRequestKey(event.sessionKey, event.requestId);
     this.codexRequests.set(key, { sessionKey: event.sessionKey, requestId: event.requestId, questions: event.questions, answers: {} });
 
-    const first = event.questions[0];
-    if (!first) throw new Error("Codex requested user input without questions.");
-    await this.sendCodexQuestion(parsed.scopeKey, event.sessionKey, event.requestId, first, 0, token, expiresAt);
+    try {
+      const first = event.questions[0];
+      if (!first) throw new Error("Codex requested user input without questions.");
+      await this.sendCodexQuestion(parsed.scopeKey, event.sessionKey, event.requestId, first, 0, token, expiresAt);
+      claim.state = "active";
+      return true;
+    } catch (error) {
+      this.codexRequests.delete(key);
+      this.releaseRequestClaim(claim);
+      throw error;
+    }
   }
 
-  async handleApprovalRequest(event: AgentApprovalRequestEvent): Promise<void> {
+  async handleApprovalRequest(event: AgentApprovalRequestEvent): Promise<boolean> {
     const parsed = parseSessionKey(event.sessionKey);
-    if (!parsed) return;
+    if (!parsed) return false;
+    const claim = this.beginRequest(event);
+    if (!claim) return false;
     const token = shortToken();
     const expiresAt = Date.now() + CODEX_PROMPT_TTL_MS;
-    const result = await this.deps.sendRendered(parsed.scopeKey, formatApprovalMessage(event.title, event.body), {
-      replyMarkup: approvalKeyboard(token, approvalChoices(event.approvalKind, event.params)),
-      disableWebPagePreview: true,
-    });
-    if (!result.messageId) throw new Error("IM adapter did not return an approval prompt message id.");
-    this.deps.store.setPendingPrompt({
-      conversationId: parsed.conversationId,
-      scopeKey: parsed.scopeKey,
-      promptMessageId: result.messageId,
-      kind: "codex_approval",
-      createdAt: Date.now(),
-      sessionKey: event.sessionKey,
-      payloadJson: JSON.stringify({
-        token,
-        requestId: event.requestId,
-        method: event.method,
-        approvalKind: event.approvalKind,
-        title: event.title,
-        body: event.body,
-        params: event.params,
-      }),
-      expiresAt,
-    });
-    this.rememberRenderedRequest(event.sessionKey, event.requestId, parsed.scopeKey, result.messageId);
+    try {
+      const result = await this.deps.sendRendered(parsed.scopeKey, formatApprovalMessage(event.title, event.body), {
+        replyMarkup: approvalKeyboard(token, approvalChoices(event.approvalKind, event.params)),
+        disableWebPagePreview: true,
+      });
+      if (!result.messageId) throw new Error("IM adapter did not return an approval prompt message id.");
+      this.deps.store.setPendingPrompt({
+        conversationId: parsed.conversationId,
+        scopeKey: parsed.scopeKey,
+        promptMessageId: result.messageId,
+        kind: "codex_approval",
+        createdAt: Date.now(),
+        sessionKey: event.sessionKey,
+        payloadJson: JSON.stringify({
+          token,
+          requestId: event.requestId,
+          method: event.method,
+          approvalKind: event.approvalKind,
+          title: event.title,
+          body: event.body,
+          params: event.params,
+        }),
+        expiresAt,
+      });
+      this.rememberRenderedRequest(event.sessionKey, event.requestId, parsed.scopeKey, result.messageId);
+      claim.state = "active";
+      return true;
+    } catch (error) {
+      this.releaseRequestClaim(claim);
+      throw error;
+    }
   }
 
   private async sendCodexQuestion(
@@ -338,8 +375,18 @@ export class CodexPromptFlow {
     if (response) await this.respondToCodexPrompt(response);
   }
 
-  async handleMcpElicitationRequest(event: AgentMcpElicitationRequestEvent): Promise<void> {
-    await this.mcp.handle(event);
+  async handleMcpElicitationRequest(event: AgentMcpElicitationRequestEvent): Promise<boolean> {
+    if (!parseSessionKey(event.sessionKey)) return false;
+    const claim = this.beginRequest(event);
+    if (!claim) return false;
+    try {
+      await this.mcp.handle(event);
+      claim.state = "active";
+      return true;
+    } catch (error) {
+      this.releaseRequestClaim(claim);
+      throw error;
+    }
   }
 
   async answerMcpCallback(message: CallbackMessage, payload: string): Promise<void> {
@@ -377,7 +424,6 @@ export class CodexPromptFlow {
 
   private async respondToCodexPrompt(response: { sessionKey: string; requestId: string | number; result: unknown }): Promise<void> {
     if (!this.deps.agent.respond) throw new Error("Agent driver cannot answer Codex prompts.");
-    this.renderedRequests.delete(codexRequestKey(response.sessionKey, response.requestId));
     await this.deps.agent.respond(response.sessionKey, response.requestId, response.result);
     await this.deps.markActiveTask(response.sessionKey, "running");
   }
@@ -403,7 +449,6 @@ export class CodexPromptFlow {
       { inline_keyboard: [] },
     );
     this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
-    this.renderedRequests.delete(codexRequestKey(pending.sessionKey, data.requestId as string | number));
     await this.deps.agent.respond(pending.sessionKey, data.requestId as string | number, approvalResponse(data.approvalKind as AgentApprovalKind, decision ?? "decline", data.params));
     await this.deps.markActiveTask(pending.sessionKey, "running");
   }
@@ -454,34 +499,166 @@ export class CodexPromptFlow {
     for (const key of this.renderedRequests.keys()) {
       if (key.startsWith(`${sessionKeyValue}:`)) this.renderedRequests.delete(key);
     }
+    for (const claim of [...this.requestClaims.values()]) {
+      if (claim.sessionKey === sessionKeyValue) this.releaseRequestClaim(claim);
+    }
     this.mcp.clearForSession(sessionKeyValue);
   }
 
   async handleRequestResolved(event: AgentServerRequestResolvedEvent): Promise<void> {
-    const key = codexRequestKey(event.sessionKey, event.requestId);
-    this.codexRequests.delete(key);
-    const rendered = this.renderedRequests.get(key);
-    this.renderedRequests.delete(key);
+    const claim = this.resolveRequestClaim(event);
+    const requestIds = claim ? [...claim.requestIds.values()] : [event.requestId];
+    let rendered: { scopeKey: string; promptMessageId: MessageId } | undefined;
+    for (const requestId of requestIds) {
+      const key = codexRequestKey(event.sessionKey, requestId);
+      this.codexRequests.delete(key);
+      rendered ??= this.renderedRequests.get(key);
+      this.renderedRequests.delete(key);
+    }
     if (rendered) {
       this.deps.store.deletePendingPrompt(rendered.scopeKey, rendered.promptMessageId);
-      await this.deps.editRendered(
-        rendered.scopeKey,
-        messageWithTitle("Codex request resolved.", "Answered from another connected client."),
-        { messageId: rendered.promptMessageId, replyMarkup: { inline_keyboard: [] } },
-      ).catch((error) => {
+      await this.retireResolvedPrompt(rendered.scopeKey, rendered.promptMessageId, event);
+    }
+    for (const requestId of requestIds) await this.mcp.resolve(event.sessionKey, requestId);
+  }
+
+  private async retireResolvedPrompt(
+    scopeKey: ConversationId,
+    promptMessageId: MessageId,
+    event: AgentServerRequestResolvedEvent,
+  ): Promise<void> {
+    const finalState = messageWithTitle("Codex request resolved.", "The request was answered from a connected client.");
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await this.deps.editRendered(scopeKey, finalState, { messageId: promptMessageId, replyMarkup: { inline_keyboard: [] } });
+        return;
+      } catch (error) {
+        lastError = error;
         this.deps.logger.warn("router.codex_resolved_prompt_edit_failed", {
           session_key: event.sessionKey,
           request_id: String(event.requestId),
+          attempt,
           error: error instanceof Error ? error : new Error(String(error)),
         });
-      });
+      }
     }
-    await this.mcp.resolve(event.sessionKey, event.requestId);
+    const replacement = await this.deps.sendRendered(scopeKey, finalState, { replyMarkup: { inline_keyboard: [] } });
+    if (replacement.messageId === undefined) throw lastError;
   }
 
   private rememberRenderedRequest(sessionKeyValue: string, requestId: string | number, scopeKey: string, promptMessageId: MessageId): void {
     this.renderedRequests.set(codexRequestKey(sessionKeyValue, requestId), { scopeKey, promptMessageId });
   }
+
+  private beginRequest(event: InteractiveRequestEvent): InteractiveRequestClaim | undefined {
+    const now = Date.now();
+    this.pruneRequestClaims(now);
+    const alias = codexRequestKey(event.sessionKey, event.requestId);
+    const signature = interactiveRequestSignature(event);
+    const computedLogicalKey = interactiveRequestLogicalKey(event, signature);
+    const aliasedLogicalKey = this.requestAliases.get(alias);
+    const aliasedClaim = aliasedLogicalKey ? this.requestClaims.get(aliasedLogicalKey) : undefined;
+    if (aliasedClaim?.state === "resolved" && aliasedClaim.logicalKey !== computedLogicalKey) this.releaseRequestClaim(aliasedClaim);
+    const currentAliasedLogicalKey = this.requestAliases.get(alias);
+    const logicalKey = currentAliasedLogicalKey ?? computedLogicalKey;
+    const existing = this.requestClaims.get(logicalKey);
+    if (existing) {
+      const conflict = existing.kind !== event.type || existing.signature !== signature;
+      const fields = {
+        session_key: event.sessionKey,
+        request_id: String(event.requestId),
+        request_type: event.type,
+        original_request_type: existing.kind,
+        state: existing.state,
+      };
+      if (conflict) this.deps.logger.warn("router.conflicting_duplicate_interactive_request_ignored", fields);
+      else this.deps.logger.info("router.duplicate_interactive_request_suppressed", fields);
+      existing.requestIds.set(alias, event.requestId);
+      this.requestAliases.set(alias, existing.logicalKey);
+      return undefined;
+    }
+    const claim: InteractiveRequestClaim = {
+      sessionKey: event.sessionKey,
+      logicalKey,
+      kind: event.type,
+      signature,
+      state: "rendering",
+      expiresAt: now + CODEX_PROMPT_TTL_MS,
+      requestIds: new Map([[alias, event.requestId]]),
+    };
+    this.requestClaims.set(logicalKey, claim);
+    this.requestAliases.set(alias, logicalKey);
+    this.trimRequestClaims();
+    return claim;
+  }
+
+  private resolveRequestClaim(event: AgentServerRequestResolvedEvent): InteractiveRequestClaim | undefined {
+    this.pruneRequestClaims(Date.now());
+    const alias = codexRequestKey(event.sessionKey, event.requestId);
+    const logicalKey = this.requestAliases.get(alias);
+    const claim = logicalKey ? this.requestClaims.get(logicalKey) : undefined;
+    if (!claim) return undefined;
+    claim.state = "resolved";
+    claim.expiresAt = Date.now() + RESOLVED_REQUEST_TOMBSTONE_MS;
+    return claim;
+  }
+
+  private releaseRequestClaim(claim: InteractiveRequestClaim): void {
+    if (this.requestClaims.get(claim.logicalKey) !== claim) return;
+    this.requestClaims.delete(claim.logicalKey);
+    for (const alias of claim.requestIds.keys()) {
+      if (this.requestAliases.get(alias) === claim.logicalKey) this.requestAliases.delete(alias);
+    }
+  }
+
+  private pruneRequestClaims(now: number): void {
+    for (const claim of [...this.requestClaims.values()]) {
+      if (claim.expiresAt <= now) this.releaseRequestClaim(claim);
+    }
+  }
+
+  private trimRequestClaims(): void {
+    while (this.requestClaims.size > MAX_INTERACTIVE_REQUEST_CLAIMS) {
+      const oldest = this.requestClaims.values().next().value as InteractiveRequestClaim | undefined;
+      if (!oldest) return;
+      this.releaseRequestClaim(oldest);
+    }
+  }
+}
+
+function interactiveRequestLogicalKey(event: InteractiveRequestEvent, signature: string): string {
+  const method = event.type === "approval_request" ? event.method : event.type;
+  const stableId = "itemId" in event && typeof event.itemId === "string"
+    ? `item:${event.itemId}`
+    : "elicitationId" in event && typeof event.elicitationId === "string"
+      ? `elicitation:${event.elicitationId}`
+      : `payload:${signature}`;
+  return `${event.sessionKey}\0${event.threadId ?? ""}\0${event.turnId ?? ""}\0${method}\0${stableId}`;
+}
+
+function interactiveRequestSignature(event: InteractiveRequestEvent): string {
+  if (event.type === "approval_request") {
+    return canonicalJson({ type: event.type, method: event.method, approvalKind: event.approvalKind, title: event.title, body: event.body, params: event.params });
+  }
+  if (event.type === "user_input_request") return canonicalJson({ type: event.type, questions: event.questions });
+  return canonicalJson({
+    type: event.type,
+    serverName: event.serverName,
+    mode: event.mode,
+    message: event.message,
+    requestedSchema: event.requestedSchema,
+    url: event.url,
+    elicitationId: event.elicitationId,
+    meta: event.meta,
+  });
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "undefined";
+  if (Array.isArray(value)) return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 }
 
 function expiredQuestionMessage(): RenderedTelegramText {

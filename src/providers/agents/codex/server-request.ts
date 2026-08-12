@@ -13,7 +13,10 @@ export interface ServerRequestContext {
   logger: Logger;
   onOutput: AgentOutputHandler;
   emitActivity(key: string, activity: AgentActivity, params?: Record<string, unknown>): Promise<void>;
-  registerRequest(requestId: string | number, threadId: string, sessionKeys: string[]): void;
+  registerRequest(requestId: string | number, threadId: string, sessionKeys: string[], method: string, turnId: string | undefined, signature: string): boolean;
+  requestIsResolved(requestId: string | number, threadId: string): boolean;
+  claimRequestDelivery(requestId: string | number, threadId: string, sessionKey: string): boolean;
+  markRequestDelivered(requestId: string | number, threadId: string, sessionKey: string): Promise<void>;
 }
 
 export async function handleCodexServerRequest(message: JsonRpcRequest, context: ServerRequestContext): Promise<void> {
@@ -52,18 +55,35 @@ export async function handleCodexServerRequest(message: JsonRpcRequest, context:
 
   if (message.method === "item/tool/requestUserInput") {
     const questions = Array.isArray(params?.questions) ? params.questions.map(toQuestion).filter(Boolean) as AgentUserInputQuestion[] : [];
-    context.registerRequest(message.id, threadId!, keys);
+    const turnId = getTurnId(params);
+    if (!context.registerRequest(message.id, threadId!, keys, message.method, turnId, serverRequestSignature(message))) return;
     for (const sessionKey of keys) {
-      await context.onOutput({
-        type: "user_input_request",
-        sessionKey,
-        requestId: message.id,
-        questions,
-        turnId: getTurnId(params),
-        itemId: typeof params?.itemId === "string" ? params.itemId : undefined,
-      });
       const running = context.sessions.get(sessionKey);
       if (running) running.status.waitingForUserInput = true;
+    }
+    for (const sessionKey of keys) {
+      if (context.requestIsResolved(message.id, threadId!)) break;
+      if (!context.claimRequestDelivery(message.id, threadId!, sessionKey)) continue;
+      try {
+        await context.onOutput({
+          type: "user_input_request",
+          sessionKey,
+          requestId: message.id,
+          threadId: threadId!,
+          questions,
+          turnId,
+          itemId: typeof params?.itemId === "string" ? params.itemId : undefined,
+        });
+      } catch (error) {
+        context.logger.warn("codex.user_input_request_delivery_failed", {
+          session_key: sessionKey,
+          thread_id: threadId,
+          request_id: String(message.id),
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      } finally {
+        await context.markRequestDelivered(message.id, threadId!, sessionKey);
+      }
     }
     return;
   }
@@ -88,23 +108,40 @@ export async function handleCodexServerRequest(message: JsonRpcRequest, context:
       if (running) running.status.recentError = "Codex sent an invalid MCP elicitation schema.";
       return;
     }
-    context.registerRequest(message.id, threadId!, keys);
+    const turnId = getTurnId(params);
+    if (!context.registerRequest(message.id, threadId!, keys, message.method, turnId, serverRequestSignature(message))) return;
     for (const sessionKey of keys) {
-      await context.onOutput({
-        type: "mcp_elicitation_request",
-        sessionKey,
-        requestId: message.id,
-        serverName: getString(params, "serverName") ?? "MCP server",
-        mode,
-        message: getString(params, "message") ?? "The MCP server requested additional input.",
-        ...(requestedSchema ? { requestedSchema } : {}),
-        ...(getString(params, "url") ? { url: getString(params, "url") } : {}),
-        ...(getString(params, "elicitationId") ? { elicitationId: getString(params, "elicitationId") } : {}),
-        ...(params?._meta !== undefined ? { meta: params._meta } : {}),
-        ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
-      });
       const running = context.sessions.get(sessionKey);
       if (running) running.status.waitingForUserInput = true;
+    }
+    for (const sessionKey of keys) {
+      if (context.requestIsResolved(message.id, threadId!)) break;
+      if (!context.claimRequestDelivery(message.id, threadId!, sessionKey)) continue;
+      try {
+        await context.onOutput({
+          type: "mcp_elicitation_request",
+          sessionKey,
+          requestId: message.id,
+          threadId: threadId!,
+          serverName: getString(params, "serverName") ?? "MCP server",
+          mode,
+          message: getString(params, "message") ?? "The MCP server requested additional input.",
+          ...(requestedSchema ? { requestedSchema } : {}),
+          ...(getString(params, "url") ? { url: getString(params, "url") } : {}),
+          ...(getString(params, "elicitationId") ? { elicitationId: getString(params, "elicitationId") } : {}),
+          ...(params?._meta !== undefined ? { meta: params._meta } : {}),
+          ...(turnId ? { turnId } : {}),
+        });
+      } catch (error) {
+        context.logger.warn("codex.mcp_elicitation_request_delivery_failed", {
+          session_key: sessionKey,
+          thread_id: threadId,
+          request_id: String(message.id),
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      } finally {
+        await context.markRequestDelivered(message.id, threadId!, sessionKey);
+      }
     }
     return;
   }
@@ -112,22 +149,39 @@ export async function handleCodexServerRequest(message: JsonRpcRequest, context:
   const approvalKind = approvalKindForMethod(message.method);
   if (approvalKind) {
     const { title, body } = approvalCopy(approvalKind, params);
-    context.registerRequest(message.id, threadId!, keys);
+    const turnId = getTurnId(params);
+    if (!context.registerRequest(message.id, threadId!, keys, message.method, turnId, serverRequestSignature(message))) return;
     for (const sessionKey of keys) {
-      await context.onOutput({
-        type: "approval_request",
-        sessionKey,
-        requestId: message.id,
-        method: message.method,
-        approvalKind,
-        title,
-        body,
-        params: message.params,
-        turnId: getTurnId(params),
-        itemId: typeof params?.itemId === "string" ? params.itemId : undefined,
-      });
       const running = context.sessions.get(sessionKey);
       if (running) running.status.waitingForApproval = true;
+    }
+    for (const sessionKey of keys) {
+      if (context.requestIsResolved(message.id, threadId!)) break;
+      if (!context.claimRequestDelivery(message.id, threadId!, sessionKey)) continue;
+      try {
+        await context.onOutput({
+          type: "approval_request",
+          sessionKey,
+          requestId: message.id,
+          threadId: threadId!,
+          method: message.method,
+          approvalKind,
+          title,
+          body,
+          params: message.params,
+          turnId,
+          itemId: typeof params?.itemId === "string" ? params.itemId : undefined,
+        });
+      } catch (error) {
+        context.logger.warn("codex.approval_request_delivery_failed", {
+          session_key: sessionKey,
+          thread_id: threadId,
+          request_id: String(message.id),
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      } finally {
+        await context.markRequestDelivered(message.id, threadId!, sessionKey);
+      }
     }
     return;
   }
@@ -160,15 +214,21 @@ async function handleSideConversationRequest(
 
   if (message.method === "item/tool/requestUserInput") {
     const questions = Array.isArray(params?.questions) ? params.questions.map(toQuestion).filter(Boolean) as AgentUserInputQuestion[] : [];
-    context.registerRequest(message.id, threadId, [side.sessionKey]);
-    await emit({
-      type: "user_input_request",
-      sessionKey: side.sessionKey,
-      requestId: message.id,
-      questions,
-      ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
-      ...(typeof params?.itemId === "string" ? { itemId: params.itemId } : {}),
-    });
+    if (!context.registerRequest(message.id, threadId, [side.sessionKey], message.method, getTurnId(params), serverRequestSignature(message))) return;
+    if (!context.claimRequestDelivery(message.id, threadId, side.sessionKey)) return;
+    try {
+      await emit({
+        type: "user_input_request",
+        sessionKey: side.sessionKey,
+        requestId: message.id,
+        threadId,
+        questions,
+        ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
+        ...(typeof params?.itemId === "string" ? { itemId: params.itemId } : {}),
+      });
+    } finally {
+      await context.markRequestDelivered(message.id, threadId, side.sessionKey);
+    }
     return;
   }
 
@@ -183,41 +243,57 @@ async function handleSideConversationRequest(
       await context.rpc.respond(message.id, { action: "cancel", content: null, _meta: null });
       return;
     }
-    context.registerRequest(message.id, threadId, [side.sessionKey]);
-    await emit({
-      type: "mcp_elicitation_request",
-      sessionKey: side.sessionKey,
-      requestId: message.id,
-      serverName: getString(params, "serverName") ?? "MCP server",
-      mode,
-      message: getString(params, "message") ?? "The MCP server requested additional input.",
-      ...(requestedSchema ? { requestedSchema } : {}),
-      ...(getString(params, "url") ? { url: getString(params, "url") } : {}),
-      ...(getString(params, "elicitationId") ? { elicitationId: getString(params, "elicitationId") } : {}),
-      ...(params?._meta !== undefined ? { meta: params._meta } : {}),
-      ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
-    });
+    if (!context.registerRequest(message.id, threadId, [side.sessionKey], message.method, getTurnId(params), serverRequestSignature(message))) return;
+    if (!context.claimRequestDelivery(message.id, threadId, side.sessionKey)) return;
+    try {
+      await emit({
+        type: "mcp_elicitation_request",
+        sessionKey: side.sessionKey,
+        requestId: message.id,
+        threadId,
+        serverName: getString(params, "serverName") ?? "MCP server",
+        mode,
+        message: getString(params, "message") ?? "The MCP server requested additional input.",
+        ...(requestedSchema ? { requestedSchema } : {}),
+        ...(getString(params, "url") ? { url: getString(params, "url") } : {}),
+        ...(getString(params, "elicitationId") ? { elicitationId: getString(params, "elicitationId") } : {}),
+        ...(params?._meta !== undefined ? { meta: params._meta } : {}),
+        ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
+      });
+    } finally {
+      await context.markRequestDelivered(message.id, threadId, side.sessionKey);
+    }
     return;
   }
 
   const approvalKind = approvalKindForMethod(message.method);
   if (approvalKind) {
     const { title, body } = approvalCopy(approvalKind, params);
-    context.registerRequest(message.id, threadId, [side.sessionKey]);
-    await emit({
-      type: "approval_request",
-      sessionKey: side.sessionKey,
-      requestId: message.id,
-      method: message.method,
-      approvalKind,
-      title,
-      body,
-      params: message.params,
-      ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
-      ...(typeof params?.itemId === "string" ? { itemId: params.itemId } : {}),
-    });
+    if (!context.registerRequest(message.id, threadId, [side.sessionKey], message.method, getTurnId(params), serverRequestSignature(message))) return;
+    if (!context.claimRequestDelivery(message.id, threadId, side.sessionKey)) return;
+    try {
+      await emit({
+        type: "approval_request",
+        sessionKey: side.sessionKey,
+        requestId: message.id,
+        threadId,
+        method: message.method,
+        approvalKind,
+        title,
+        body,
+        params: message.params,
+        ...(getTurnId(params) ? { turnId: getTurnId(params) } : {}),
+        ...(typeof params?.itemId === "string" ? { itemId: params.itemId } : {}),
+      });
+    } finally {
+      await context.markRequestDelivered(message.id, threadId, side.sessionKey);
+    }
     return;
   }
 
   await context.rpc.rejectRequest(message.id, -32601, `Unsupported server request in side conversation: ${message.method}`);
+}
+
+function serverRequestSignature(message: JsonRpcRequest): string {
+  return JSON.stringify({ method: message.method, params: message.params ?? null });
 }

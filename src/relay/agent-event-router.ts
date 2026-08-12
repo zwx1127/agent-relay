@@ -7,6 +7,7 @@ import type {
   AgentRelayCommandState,
   AgentRelayCommandStateEvent,
   AgentRelayControlSnapshotEvent,
+  AgentRelayPlanDecisionStateEvent,
   AgentRelayThreadState,
   AgentRelayThreadStateEvent,
   AgentServerRequestResolvedEvent,
@@ -20,7 +21,7 @@ import { parseSessionKey } from "../domain/session.ts";
 import type { RelayStore } from "../storage/store.ts";
 import { splitRenderedForTelegram, type RenderedTelegramText } from "../presentation/telegram/text.ts";
 import type { ConversationId, MessageId } from "../domain/ids.ts";
-import type { SendMessageOptions } from "../ports/im.ts";
+import type { InlineKeyboardMarkup, SendMessageOptions } from "../ports/im.ts";
 import { messageWithTitle } from "./ui/text-parts.ts";
 import { transcriptTextForInput } from "./tasks/input.ts";
 import { PAGE_MAX_CHARS } from "./ui/constants.ts";
@@ -37,18 +38,22 @@ export interface RelayAgentEventRouterDeps {
   };
   media: { sendAgentImageOutput(event: AgentImageOutputEvent): Promise<void> };
   prompts: {
-    handleUserInputRequest(event: AgentUserInputRequestEvent): Promise<void>;
-    handleApprovalRequest(event: AgentApprovalRequestEvent): Promise<void>;
-    handleMcpElicitationRequest(event: AgentMcpElicitationRequestEvent): Promise<void>;
+    handleUserInputRequest(event: AgentUserInputRequestEvent): Promise<boolean>;
+    handleApprovalRequest(event: AgentApprovalRequestEvent): Promise<boolean>;
+    handleMcpElicitationRequest(event: AgentMcpElicitationRequestEvent): Promise<boolean>;
     handleRequestResolved(event: AgentServerRequestResolvedEvent): Promise<void>;
   };
   finalizeOutput(sessionKey: string): Promise<void>;
   sendPlanReadyPrompt(sessionKey: string, turnId?: string): Promise<void>;
+  handlePlanDecisionState(event: AgentRelayPlanDecisionStateEvent): Promise<void>;
+  handlePlanDecisionSnapshot(sessionKey: string, gatewayEpoch: string, decisions: AgentRelayControlSnapshotEvent["planDecisions"]): Promise<void>;
+  handleSharedGoalState(sessionKey: string, goal: import("../ports/agent.ts").AgentThreadGoal | null): Promise<void>;
+  handleSharedCommandState(event: AgentRelayCommandStateEvent): Promise<void>;
   appendSystem(scopeKey: ConversationId, text: string): void;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
   sharedMessages: SharedMessageRegistry;
   setReplyToMessageId(sessionKey: string, messageId: MessageId): void;
-  editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: { messageId: MessageId; disableWebPagePreview?: boolean }): Promise<void>;
+  editRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options: { messageId: MessageId; disableWebPagePreview?: boolean; replyMarkup?: InlineKeyboardMarkup }): Promise<void>;
   completeTask(sessionKey: string, turnId: string | undefined, status: "done" | "interrupted" | "failed"): Promise<void>;
   markActiveTask(sessionKey: string, status: "blocked" | "running", turnId?: string): Promise<void>;
   cancelActiveTasks(sessionKey: string): Promise<void>;
@@ -75,6 +80,7 @@ export class RelayAgentEventRouter {
     switch (event.type) {
       case "activity":
         await this.deps.activity.handle(event);
+        if (event.activity.kind === "goal") await this.deps.handleSharedGoalState(event.sessionKey, event.activity.goal);
         return true;
       case "turn_stalled":
         if (this.deps.currentThreadId(event.sessionKey) === event.threadId) {
@@ -94,6 +100,9 @@ export class RelayAgentEventRouter {
         return true;
       case "relay_thread_state":
         await this.handleRelayThreadState(event);
+        return true;
+      case "relay_plan_decision_state":
+        await this.deps.handlePlanDecisionState(event);
         return true;
       case "relay_control_snapshot":
         await this.handleRelayControlSnapshot(event);
@@ -134,6 +143,7 @@ export class RelayAgentEventRouter {
     if ((this.sharedCommandRevisions.get(key) ?? -1) >= event.revision) return;
     this.sharedCommandRevisions.set(key, event.revision);
     this.trimSharedCommandRevisions();
+    await this.deps.handleSharedCommandState(event);
     const state = this.sharedCommandCards.get(key) ?? {
       sessionKey: event.sessionKey,
       command: event,
@@ -155,13 +165,21 @@ export class RelayAgentEventRouter {
     if (!parsed) return;
     const previous = this.relaySnapshotRevisions.get(event.sessionKey);
     if (previous?.gatewayEpoch === event.gatewayEpoch && previous.revision >= event.revision) return;
-    if (previous && previous.gatewayEpoch !== event.gatewayEpoch) this.clearSharedCommandState(event.sessionKey);
+    if (previous && previous.gatewayEpoch !== event.gatewayEpoch) await this.clearSharedCommandState(event.sessionKey, parsed.scopeKey);
     this.relaySnapshotRevisions.set(event.sessionKey, { gatewayEpoch: event.gatewayEpoch, revision: event.revision });
     this.applyRelayThreadState(event.sessionKey, event.threadState);
+    await this.deps.handlePlanDecisionSnapshot(event.sessionKey, event.gatewayEpoch, event.planDecisions);
     for (const command of event.commands) {
       const key = `${event.sessionKey}\0${command.commandId}`;
       if ((this.sharedCommandRevisions.get(key) ?? -1) >= command.revision) continue;
       this.sharedCommandRevisions.set(key, command.revision);
+      await this.deps.handleSharedCommandState({
+        type: "relay_command_state",
+        sessionKey: event.sessionKey,
+        gatewayEpoch: event.gatewayEpoch,
+        threadRevision: command.revision,
+        ...command,
+      });
       const state: SharedCommandCardState = {
         sessionKey: event.sessionKey,
         command,
@@ -178,11 +196,25 @@ export class RelayAgentEventRouter {
     await this.deps.sendRendered(parsed.scopeKey, messageWithTitle("Shared Relay state", lines.join("\n")));
   }
 
-  private clearSharedCommandState(sessionKey: string): void {
+  private async clearSharedCommandState(sessionKey: string, scopeKey: string): Promise<void> {
     const prefix = `${sessionKey}\0`;
-    for (const key of this.sharedCommandCards.keys()) {
+    for (const [key, state] of this.sharedCommandCards) {
       if (!key.startsWith(prefix)) continue;
       this.sharedCommandCards.delete(key);
+      if (state.flushPromise) await state.flushPromise.catch(() => undefined);
+      if (state.messageId !== undefined) {
+        await this.deps.editRendered(
+          scopeKey,
+          messageWithTitle("Relay command state expired.", "The Gateway restarted; use the latest shared state."),
+          { messageId: state.messageId, replyMarkup: { inline_keyboard: [] } },
+        ).catch((error) => {
+          this.deps.logger.warn("router.shared_command_epoch_retire_failed", {
+            session_key: sessionKey,
+            command_id: state.command.commandId,
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+        });
+      }
     }
     for (const key of this.sharedCommandRevisions.keys()) {
       if (key.startsWith(prefix)) this.sharedCommandRevisions.delete(key);
@@ -275,8 +307,9 @@ export class RelayAgentEventRouter {
 
   private async handleRequestResolved(event: AgentServerRequestResolvedEvent): Promise<void> {
     await this.deps.prompts.handleRequestResolved(event);
+    if (event.threadId && this.deps.currentThreadId(event.sessionKey) !== event.threadId) return;
     await this.deps.activity.setPhase(event.sessionKey, "working");
-    await this.deps.markActiveTask(event.sessionKey, "running");
+    await this.deps.markActiveTask(event.sessionKey, "running", event.turnId);
   }
 
   private async handleTurnCompleted(event: AgentTurnCompletedEvent): Promise<void> {
@@ -308,12 +341,12 @@ export class RelayAgentEventRouter {
   private async blockForPrompt(
     event: AgentUserInputRequestEvent | AgentApprovalRequestEvent | AgentMcpElicitationRequestEvent,
     phase: "waitingForInput" | "waitingForApproval",
-    render: () => Promise<void>,
+    render: () => Promise<boolean>,
   ): Promise<void> {
     await this.deps.finalizeOutput(event.sessionKey);
+    if (!await render()) return;
     await this.deps.activity.setPhase(event.sessionKey, phase);
     await this.deps.markActiveTask(event.sessionKey, "blocked", event.turnId);
-    await render();
   }
 
   private async handleThreadLifecycle(event: AgentThreadLifecycleEvent): Promise<void> {

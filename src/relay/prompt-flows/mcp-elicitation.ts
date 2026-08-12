@@ -45,51 +45,64 @@ export class McpElicitationFlow {
     const token = shortToken();
     const expiresAt = Date.now() + CODEX_PROMPT_TTL_MS;
     const requestKey = codexRequestKey(event.sessionKey, event.requestId);
+    if (this.requests.has(requestKey)) return;
     const timer = setTimeout(() => { void this.timeout(requestKey); }, CODEX_PROMPT_TTL_MS);
-    this.requests.set(requestKey, { sessionKey: event.sessionKey, requestId: event.requestId, scopeKey: parsed.scopeKey, timer });
-    if (event.mode === "url") {
-      const result = await this.deps.sendRendered(parsed.scopeKey, messageWithTitle(
-        `MCP request from ${event.serverName}`,
-        `${event.message}\n\n${event.url ?? "URL unavailable"}`,
-      ), {
-        replyMarkup: mcpElicitationKeyboard(token, [
-          { action: "complete", label: "Complete" },
-          { action: "decline", label: "Decline" },
-          { action: "cancel", label: "Cancel" },
-        ]),
-        disableWebPagePreview: true,
-      });
-      if (!result.messageId) throw new Error("IM adapter did not return an MCP elicitation message id.");
-      this.deps.store.setPendingPrompt({
-        conversationId: parsed.conversationId,
-        scopeKey: parsed.scopeKey,
-        promptMessageId: result.messageId,
-        kind: "codex_mcp_elicitation",
-        createdAt: Date.now(),
-        sessionKey: event.sessionKey,
-        payloadJson: JSON.stringify({ token, requestId: event.requestId, mode: "url", serverName: event.serverName }),
-        expiresAt,
-      });
-      const request = this.requests.get(requestKey);
-      if (request) request.promptMessageId = result.messageId;
-      return;
-    }
+    const request: {
+      sessionKey: string;
+      requestId: string | number;
+      scopeKey: string;
+      timer: ReturnType<typeof setTimeout>;
+      promptMessageId?: MessageId;
+    } = { sessionKey: event.sessionKey, requestId: event.requestId, scopeKey: parsed.scopeKey, timer };
+    this.requests.set(requestKey, request);
+    try {
+      if (event.mode === "url") {
+        const result = await this.deps.sendRendered(parsed.scopeKey, messageWithTitle(
+          `MCP request from ${event.serverName}`,
+          `${event.message}\n\n${event.url ?? "URL unavailable"}`,
+        ), {
+          replyMarkup: mcpElicitationKeyboard(token, [
+            { action: "complete", label: "Complete" },
+            { action: "decline", label: "Decline" },
+            { action: "cancel", label: "Cancel" },
+          ]),
+          disableWebPagePreview: true,
+        });
+        if (!result.messageId) throw new Error("IM adapter did not return an MCP elicitation message id.");
+        this.deps.store.setPendingPrompt({
+          conversationId: parsed.conversationId,
+          scopeKey: parsed.scopeKey,
+          promptMessageId: result.messageId,
+          kind: "codex_mcp_elicitation",
+          createdAt: Date.now(),
+          sessionKey: event.sessionKey,
+          payloadJson: JSON.stringify({ token, requestId: event.requestId, mode: "url", serverName: event.serverName }),
+          expiresAt,
+        });
+        request.promptMessageId = result.messageId;
+        return;
+      }
 
-    const fields = Object.entries(event.requestedSchema?.properties ?? {}).map(([name, schema]) => ({
-      name,
-      schema,
-      required: event.requestedSchema?.required?.includes(name) ?? false,
-    }));
-    await this.sendFormStep(parsed.scopeKey, event.sessionKey, {
-      token,
-      requestId: event.requestId,
-      mode: "form",
-      serverName: event.serverName,
-      message: event.message,
-      fields,
-      index: 0,
-      answers: {},
-    }, expiresAt);
+      const fields = Object.entries(event.requestedSchema?.properties ?? {}).map(([name, schema]) => ({
+        name,
+        schema,
+        required: event.requestedSchema?.required?.includes(name) ?? false,
+      }));
+      await this.sendFormStep(parsed.scopeKey, event.sessionKey, {
+        token,
+        requestId: event.requestId,
+        mode: "form",
+        serverName: event.serverName,
+        message: event.message,
+        fields,
+        index: 0,
+        answers: {},
+      }, expiresAt);
+    } catch (error) {
+      clearTimeout(timer);
+      if (this.requests.get(requestKey) === request) this.requests.delete(requestKey);
+      throw error;
+    }
   }
 
   async answerCallback(message: CallbackMessage, payload: string): Promise<void> {
@@ -172,20 +185,35 @@ export class McpElicitationFlow {
     const request = this.requests.get(key);
     if (!request) return;
     clearTimeout(request.timer);
-    this.requests.delete(key);
-    if (request.promptMessageId === undefined) return;
+    if (request.promptMessageId === undefined) {
+      this.requests.delete(key);
+      return;
+    }
     this.deps.store.deletePendingPrompt(request.scopeKey, request.promptMessageId);
-    await this.deps.editRendered(
-      request.scopeKey,
-      messageWithTitle("Codex request resolved.", "Answered from another connected client."),
-      { messageId: request.promptMessageId, replyMarkup: { inline_keyboard: [] } },
-    ).catch((error) => {
-      this.deps.logger.warn("router.mcp_resolved_prompt_edit_failed", {
-        session_key: sessionKey,
-        request_id: String(requestId),
-        error: error instanceof Error ? error : new Error(String(error)),
-      });
-    });
+    const finalState = messageWithTitle("Codex request resolved.", "The request was answered from a connected client.");
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await this.deps.editRendered(
+          request.scopeKey,
+          finalState,
+          { messageId: request.promptMessageId, replyMarkup: { inline_keyboard: [] } },
+        );
+        this.requests.delete(key);
+        return;
+      } catch (error) {
+        lastError = error;
+        this.deps.logger.warn("router.mcp_resolved_prompt_edit_failed", {
+          session_key: sessionKey,
+          request_id: String(requestId),
+          attempt,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
+    const replacement = await this.deps.sendRendered(request.scopeKey, finalState, { replyMarkup: { inline_keyboard: [] } });
+    if (replacement.messageId === undefined) throw lastError;
+    this.requests.delete(key);
   }
 
   private async sendFormStep(conversationId: ConversationId, sessionKey: string, state: Record<string, unknown>, expiresAt: number, forceInput = false): Promise<void> {
@@ -260,8 +288,8 @@ export class McpElicitationFlow {
     const key = codexRequestKey(sessionKey, requestId);
     const request = this.requests.get(key);
     if (request) clearTimeout(request.timer);
-    this.requests.delete(key);
     await this.deps.agent.respond(sessionKey, requestId, { action, content, _meta: null });
+    this.requests.delete(key);
     await this.deps.markActiveTask(sessionKey, "running");
   }
 

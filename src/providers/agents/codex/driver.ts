@@ -24,6 +24,9 @@ import type {
   AgentRelayCommandMetadata,
   AgentRelayCommandPhase,
   AgentRelayCommandState,
+  AgentRelayPlanDecisionClaimResult,
+  AgentRelayPlanDecisionPhase,
+  AgentRelayPlanDecisionState,
   AgentRelayThreadState,
   AgentRelayThreadStateUpdate,
   AgentSessionStatus,
@@ -49,6 +52,10 @@ import {
   RELAY_CONTROL_PROTOCOL_VERSION,
   RELAY_CONTROL_RESYNC_METHOD,
   RELAY_CONTROL_SNAPSHOT_METHOD,
+  RELAY_CONTROL_PLAN_DECISION_CLAIM_METHOD,
+  RELAY_CONTROL_PLAN_DECISION_FAIL_METHOD,
+  RELAY_CONTROL_PLAN_DECISION_METHOD,
+  RELAY_CONTROL_PLAN_DECISION_REGISTER_METHOD,
   RELAY_CONTROL_THREAD_STATE_METHOD,
   RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
 } from "../../../ports/agent/control.ts";
@@ -96,6 +103,28 @@ function relayCommandState(record: Record<string, unknown> | undefined): AgentRe
     revision: record.revision,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+    ...(getString(record, "turnId") ? { turnId: getString(record, "turnId") } : {}),
+    ...(getString(record, "operationThreadId") ? { operationThreadId: getString(record, "operationThreadId") } : {}),
+  };
+}
+
+function relayPlanDecisionState(value: unknown): AgentRelayPlanDecisionState | undefined {
+  const record = asRecord(value);
+  const threadId = getString(record, "threadId");
+  const planTurnId = getString(record, "planTurnId");
+  const phase = relayPlanDecisionPhase(getString(record, "phase"));
+  const action = getString(record, "action");
+  if (!threadId || !planTurnId || !phase || (action !== undefined && action !== "implement" && action !== "continue")) return undefined;
+  if (typeof record?.revision !== "number" || typeof record.createdAt !== "number" || typeof record.updatedAt !== "number") return undefined;
+  return {
+    threadId,
+    planTurnId,
+    phase,
+    ...(action ? { action } : {}),
+    ...(getString(record, "implementationTurnId") ? { implementationTurnId: getString(record, "implementationTurnId") } : {}),
+    revision: record.revision,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
   };
 }
 
@@ -128,8 +157,31 @@ function isRelayCommandTerminal(phase: AgentRelayCommandPhase): boolean {
   return phase === "completed" || phase === "failed" || phase === "interrupted";
 }
 
-function interactiveRequestKey(requestId: string | number): string {
-  return `${typeof requestId}:${String(requestId)}`;
+function relayPlanDecisionPhase(value: string | undefined): AgentRelayPlanDecisionPhase | undefined {
+  return value === "ready" || value === "implementing" || value === "implementation_started"
+    || value === "continued" || value === "failed" || value === "expired" ? value : undefined;
+}
+
+function interactiveRequestKey(threadId: string, requestId: string | number): string {
+  return `${threadId}\0${typeof requestId}:${String(requestId)}`;
+}
+
+function sameInteractiveRequestId(left: string | number, right: string | number): boolean {
+  return typeof left === typeof right && left === right;
+}
+
+function waitingKindForRequest(method: string): "approval" | "userInput" {
+  return method.includes("requestApproval") ? "approval" : "userInput";
+}
+
+function localPlanDecision(
+  threadId: string,
+  planTurnId: string,
+  phase: AgentRelayPlanDecisionPhase,
+  action?: "implement" | "continue",
+): AgentRelayPlanDecisionState {
+  const now = Date.now();
+  return { threadId, planTurnId, phase, ...(action ? { action } : {}), revision: 0, createdAt: now, updatedAt: now };
 }
 
 function commandExecutionFailed(item: Record<string, unknown>): boolean {
@@ -140,9 +192,17 @@ function commandExecutionFailed(item: Record<string, unknown>): boolean {
 interface PendingInteractiveRequest {
   requestId: string | number;
   threadId: string;
+  requestMethod: string;
+  requestSignature: string;
+  turnId?: string;
   sessionKeys: Set<string>;
+  deliveryStarted: Set<string>;
+  requestDelivered: Set<string>;
   resolved: boolean;
-  resolutionEmitted: boolean;
+  resolutionDelivered: Set<string>;
+  sideResolutionDelivered: boolean;
+  resolutionRetryCount: number;
+  resolutionRetryTimer?: Timer;
 }
 
 interface PendingUserMessageOrigin {
@@ -197,6 +257,7 @@ export class CodexDriver implements AgentDriver {
   // Codex notifications are thread-scoped, while relay routing is session-scoped.
   private readonly threadToSessions = new Map<string, Set<string>>();
   private readonly pendingInteractiveRequests = new Map<string, PendingInteractiveRequest>();
+  private readonly resolvedWaitingFences = new Map<string, Set<"approval" | "userInput">>();
   private readonly pendingUserMessageOrigins = new Map<string, PendingUserMessageOrigin>();
   private readonly mirroredUserMessageItems = new Map<string, number>();
   private readonly relayCommandOrigins = new Map<string, PendingRelayCommandOrigin>();
@@ -214,7 +275,7 @@ export class CodexDriver implements AgentDriver {
   private appServerCommand?: CodexSpawnCommand;
   private readonly sideConversations = new Map<string, SideConversationCollector>();
   private readonly requestedLifecycle = new Map<string, "archived" | "deleted">();
-  private readonly requestedGoalMutation = new Map<string, { action: "updated" | "cleared"; objective?: string; expiresAt: number }>();
+  private readonly requestedGoalMutation = new Map<string, { action: "updated" | "cleared"; sessionKey: string; objective?: string; expiresAt: number }>();
   private readonly pendingGlobalNotices: PendingGlobalNotice[] = [];
   private readonly globalNoticeKeys = new Set<string>();
   private readonly terminalTurns = new Map<string, number>();
@@ -601,6 +662,46 @@ export class CodexDriver implements AgentDriver {
     return mode;
   }
 
+  async registerPlanDecision(key: string, planTurnId: string): Promise<AgentRelayPlanDecisionState> {
+    const running = this.requireRunningSession(key);
+    if (!running.status.threadId) throw new Error("Plan decision requires an active thread.");
+    if (!this.usesGateway()) return localPlanDecision(running.status.threadId, planTurnId, "ready");
+    const state = relayPlanDecisionState(await this.request(RELAY_CONTROL_PLAN_DECISION_REGISTER_METHOD, {
+      threadId: running.status.threadId,
+      planTurnId,
+    }));
+    if (!state) throw new Error("Relay Gateway returned an invalid Plan decision.");
+    return state;
+  }
+
+  async claimPlanDecision(key: string, planTurnId: string, action: "implement" | "continue"): Promise<AgentRelayPlanDecisionClaimResult> {
+    const running = this.requireRunningSession(key);
+    if (!running.status.threadId) throw new Error("Plan decision requires an active thread.");
+    if (!this.usesGateway()) {
+      return { claimed: true, state: localPlanDecision(running.status.threadId, planTurnId, action === "implement" ? "implementing" : "continued", action) };
+    }
+    const result = asRecord(await this.request(RELAY_CONTROL_PLAN_DECISION_CLAIM_METHOD, {
+      threadId: running.status.threadId,
+      planTurnId,
+      action,
+    }));
+    const state = relayPlanDecisionState(result?.state);
+    if (!state || typeof result?.claimed !== "boolean") throw new Error("Relay Gateway returned an invalid Plan decision claim.");
+    return { claimed: result.claimed, state };
+  }
+
+  async failPlanDecision(key: string, planTurnId: string): Promise<AgentRelayPlanDecisionState> {
+    const running = this.requireRunningSession(key);
+    if (!running.status.threadId) throw new Error("Plan decision requires an active thread.");
+    if (!this.usesGateway()) return localPlanDecision(running.status.threadId, planTurnId, "failed", "implement");
+    const state = relayPlanDecisionState(await this.request(RELAY_CONTROL_PLAN_DECISION_FAIL_METHOD, {
+      threadId: running.status.threadId,
+      planTurnId,
+    }));
+    if (!state) throw new Error("Relay Gateway returned an invalid failed Plan decision.");
+    return state;
+  }
+
   async stop(key: string): Promise<void> {
     const running = this.sessions.get(key);
     if (!running) {
@@ -644,6 +745,7 @@ export class CodexDriver implements AgentDriver {
     }
     if (!threadId || !this.unbindSession(threadId, key)) return;
     this.clearThreadStallWatches(threadId);
+    this.resolvedWaitingFences.delete(threadId);
     await this.request("thread/unsubscribe", { threadId }).catch((error) => {
       this.logger.warn("codex.thread_unsubscribe_failed", {
         session_key: key,
@@ -697,6 +799,14 @@ export class CodexDriver implements AgentDriver {
         stale_turn_id: turnId,
       });
       this.clearThreadBusyState(running.status.threadId);
+      for (const sessionKeyValue of this.sessionKeysForThread(running.status.threadId)) {
+        await this.onOutput({
+          type: "turn_completed",
+          sessionKey: sessionKeyValue,
+          turnId,
+          status: "interrupted",
+        });
+      }
       return { interrupted: false, turnId, stale: true };
     }
     this.clearThreadBusyState(running.status.threadId);
@@ -704,9 +814,10 @@ export class CodexDriver implements AgentDriver {
   }
 
   async respond(sessionKey: string, requestId: string | number, result: unknown): Promise<void> {
-    const request = this.pendingInteractiveRequests.get(interactiveRequestKey(requestId));
+    const requestsWithId = [...this.pendingInteractiveRequests.values()].filter((candidate) => sameInteractiveRequestId(candidate.requestId, requestId));
+    const request = requestsWithId.find((candidate) => candidate.sessionKeys.has(sessionKey) && !candidate.resolved)
+      ?? requestsWithId.find((candidate) => candidate.sessionKeys.has(sessionKey));
     if (request) {
-      if (!request.sessionKeys.has(sessionKey)) throw new Error("This Codex request does not belong to the current Relay scope.");
       if (request.resolved) throw new Error("This Codex request has already been resolved.");
       request.resolved = true;
       try {
@@ -718,6 +829,7 @@ export class CodexDriver implements AgentDriver {
       await this.finishInteractiveRequest(requestId, request);
       return;
     }
+    if (requestsWithId.length > 0) throw new Error("This Codex request does not belong to the current Relay scope.");
     await this.rpc.respond(requestId, result);
     const running = this.sessions.get(sessionKey);
     if (running) this.clearThreadWaitingState(running.status.threadId);
@@ -734,6 +846,7 @@ export class CodexDriver implements AgentDriver {
       updateActiveTurnFromResult(running, result);
       running.reviewTurnId = getTurnId(result);
       running.status.reviewInProgress = true;
+      this.mirrorThreadStatus(key);
       return {
         message: "Review started.",
         threadId: getString(asRecord(result), "reviewThreadId") ?? running.status.threadId,
@@ -743,6 +856,7 @@ export class CodexDriver implements AgentDriver {
 
     const result = await this.request("thread/compact/start", { threadId: running.status.threadId }, this.relayCommandRequestOptions(key, "compact"));
     updateActiveTurnFromResult(running, result);
+    this.mirrorThreadStatus(key);
     return { message: "Compaction started.", threadId: running.status.threadId, turnId: getTurnId(result) };
   }
 
@@ -757,7 +871,7 @@ export class CodexDriver implements AgentDriver {
   async setThreadGoal(key: string, goal: AgentThreadGoalSetOptions): Promise<AgentThreadGoal> {
     const running = this.requireRunningSession(key);
     const threadId = running.status.threadId!;
-    this.requestedGoalMutation.set(threadId, { action: "updated", ...(goal.objective ? { objective: goal.objective } : {}), expiresAt: Date.now() + 30_000 });
+    this.requestedGoalMutation.set(threadId, { action: "updated", sessionKey: key, ...(goal.objective ? { objective: goal.objective } : {}), expiresAt: Date.now() + 30_000 });
     let result: unknown;
     try {
       result = await this.request("thread/goal/set", {
@@ -779,7 +893,7 @@ export class CodexDriver implements AgentDriver {
   async clearThreadGoal(key: string): Promise<boolean> {
     const running = this.requireRunningSession(key);
     const threadId = running.status.threadId!;
-    this.requestedGoalMutation.set(threadId, { action: "cleared", expiresAt: Date.now() + 30_000 });
+    this.requestedGoalMutation.set(threadId, { action: "cleared", sessionKey: key, expiresAt: Date.now() + 30_000 });
     let result: unknown;
     try {
       result = await this.request("thread/goal/clear", { threadId }, this.relayCommandRequestOptions(key, "goal_clear"));
@@ -818,6 +932,7 @@ export class CodexDriver implements AgentDriver {
     applySessionMetadata(running.status, result);
     this.bindSession(threadId, key);
     if (shouldUnsubscribePrevious && previousThreadId) {
+      this.resolvedWaitingFences.delete(previousThreadId);
       await this.request("thread/unsubscribe", { threadId: previousThreadId }).catch((error) => {
         this.logger.warn("codex.thread_unsubscribe_failed", {
           session_key: key,
@@ -920,17 +1035,21 @@ export class CodexDriver implements AgentDriver {
   async closeSideConversation(key: string, threadId: string): Promise<void> {
     this.requireSideConversation(key, threadId);
     for (const [requestKey, request] of this.pendingInteractiveRequests) {
-      if (request.threadId !== threadId || request.resolved) continue;
-      request.resolved = true;
-      await this.rpc.rejectRequest(request.requestId, -32000, "Side conversation closed.").catch((error) => {
-        this.logger.warn("codex.side_conversation_request_cancel_failed", {
-          session_key: key,
-          thread_id: threadId,
-          request_id: requestKey,
-          error: error instanceof Error ? error : new Error(String(error)),
+      if (request.threadId !== threadId) continue;
+      if (!request.resolved) {
+        request.resolved = true;
+        await this.rpc.rejectRequest(request.requestId, -32000, "Side conversation closed.").catch((error) => {
+          this.logger.warn("codex.side_conversation_request_cancel_failed", {
+            session_key: key,
+            thread_id: threadId,
+            request_id: requestKey,
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
         });
-      });
-      await this.finishInteractiveRequest(request.requestId, request);
+        await this.finishInteractiveRequest(request.requestId, request);
+      }
+      if (request.resolutionRetryTimer) clearTimeout(request.resolutionRetryTimer);
+      this.pendingInteractiveRequests.delete(requestKey);
     }
     await this.request("thread/unsubscribe", { threadId });
     this.sideConversations.delete(threadId);
@@ -1275,6 +1394,10 @@ export class CodexDriver implements AgentDriver {
       await this.handleRelayThreadStateNotification(message.params);
       return;
     }
+    if (message.method === RELAY_CONTROL_PLAN_DECISION_METHOD) {
+      await this.handleRelayPlanDecisionNotification(message.params);
+      return;
+    }
     if (message.method === RELAY_CONTROL_SNAPSHOT_METHOD) {
       await this.handleRelayControlSnapshot(message.params);
       return;
@@ -1287,7 +1410,7 @@ export class CodexDriver implements AgentDriver {
     if (sideConversation && await this.handleSideConversationNotification(sideConversation, message, params)) return;
     if (message.method === "serverRequest/resolved") {
       const requestId = params?.requestId;
-      if (typeof requestId === "string" || typeof requestId === "number") await this.resolveInteractiveRequest(requestId);
+      if (typeof requestId === "string" || typeof requestId === "number") await this.resolveInteractiveRequest(requestId, threadId);
       return;
     }
     const keys = threadId ? this.sessionKeysForThread(threadId) : [];
@@ -1495,15 +1618,16 @@ export class CodexDriver implements AgentDriver {
       const requested = this.requestedGoalMutation.get(threadId!);
       const suppress = requested?.action === "updated" && requested.expiresAt >= Date.now() && (!requested.objective || requested.objective === goal?.objective);
       if (suppress) this.requestedGoalMutation.delete(threadId!);
-      else if (goal) await this.emitActivity(key, { kind: "goal", goal }, params);
+      if (goal) await this.emitGoalActivity(threadId!, goal, suppress ? requested?.sessionKey : undefined, getTurnId(params));
       return;
     }
 
     if (message.method === "thread/goal/cleared") {
       running.status.threadGoal = null;
       const requested = this.requestedGoalMutation.get(threadId!);
-      if (requested?.action === "cleared" && requested.expiresAt >= Date.now()) this.requestedGoalMutation.delete(threadId!);
-      else await this.emitActivity(key, { kind: "goal", goal: null }, params);
+      const suppress = requested?.action === "cleared" && requested.expiresAt >= Date.now();
+      if (suppress) this.requestedGoalMutation.delete(threadId!);
+      await this.emitGoalActivity(threadId!, null, suppress ? requested?.sessionKey : undefined, getTurnId(params));
       return;
     }
 
@@ -1513,6 +1637,7 @@ export class CodexDriver implements AgentDriver {
       this.requestedLifecycle.delete(threadId!);
       this.requestedGoalMutation.delete(threadId!);
       this.clearThreadStallWatches(threadId!);
+      this.resolvedWaitingFences.delete(threadId!);
       this.threadToSessions.delete(threadId!);
       for (const sessionKeyValue of keys) {
         const session = this.sessions.get(sessionKeyValue);
@@ -1528,10 +1653,18 @@ export class CodexDriver implements AgentDriver {
       const threadStatus = asRecord(params?.status);
       running.status.threadStatus = typeof threadStatus?.type === "string" ? threadStatus.type : undefined;
       // Active flags are the app-server's canonical waiting state; relay mirrors
-      // them so normal prompts can be blocked before reaching Codex.
+      // them so normal prompts can be blocked before reaching Codex. A resolved
+      // request fence rejects a late pre-resolution status notification until
+      // the app-server has observed the cleared flag or another request opens.
       const activeFlags = Array.isArray(threadStatus?.activeFlags) ? threadStatus.activeFlags : [];
-      running.status.waitingForApproval = activeFlags.includes("waitingOnApproval");
-      running.status.waitingForUserInput = activeFlags.includes("waitingOnUserInput");
+      const fences = this.resolvedWaitingFences.get(threadId!);
+      const approvalActive = activeFlags.includes("waitingOnApproval");
+      const userInputActive = activeFlags.includes("waitingOnUserInput");
+      if (!approvalActive) fences?.delete("approval");
+      if (!userInputActive) fences?.delete("userInput");
+      if (fences?.size === 0) this.resolvedWaitingFences.delete(threadId!);
+      running.status.waitingForApproval = approvalActive && !fences?.has("approval");
+      running.status.waitingForUserInput = userInputActive && !fences?.has("userInput");
       return;
     }
 
@@ -1696,7 +1829,7 @@ export class CodexDriver implements AgentDriver {
     if (message.method === "serverRequest/resolved") {
       const requestId = params?.requestId;
       if (typeof requestId === "string" || typeof requestId === "number") {
-        await this.resolveInteractiveRequest(requestId);
+        await this.resolveInteractiveRequest(requestId, collector.threadId);
       }
       return true;
     }
@@ -1752,9 +1885,7 @@ export class CodexDriver implements AgentDriver {
     if (!state || !this.acceptRelayControlEnvelope(params, state.threadId)) return;
     const originToken = getString(params, "originToken");
     this.pruneRelayCommandOrigins();
-    const originSessionKey = originToken ? this.relayCommandOrigins.get(originToken)?.sessionKey : undefined;
     for (const key of this.sessionKeysForThread(state.threadId)) {
-      if (key === originSessionKey) continue;
       await this.onOutput({
         type: "relay_command_state",
         sessionKey: key,
@@ -1787,6 +1918,21 @@ export class CodexDriver implements AgentDriver {
     }
   }
 
+  private async handleRelayPlanDecisionNotification(value: unknown): Promise<void> {
+    const params = asRecord(value);
+    const state = relayPlanDecisionState(params);
+    if (!state || !this.acceptRelayControlEnvelope(params, state.threadId)) return;
+    for (const key of this.sessionKeysForThread(state.threadId)) {
+      await this.onOutput({
+        type: "relay_plan_decision_state",
+        sessionKey: key,
+        gatewayEpoch: this.gatewayEpoch!,
+        threadRevision: state.revision,
+        ...state,
+      });
+    }
+  }
+
   private async handleRelayControlSnapshot(value: unknown): Promise<void> {
     const params = asRecord(value);
     const threadId = getString(params, "threadId");
@@ -1795,6 +1941,9 @@ export class CodexDriver implements AgentDriver {
     if (!threadId || !gatewayEpoch || gatewayEpoch !== this.gatewayEpoch || !threadState || threadState.threadId !== threadId) return;
     const commands = Array.isArray(params?.commands)
       ? params.commands.map((command) => relayCommandState(asRecord(command))).filter((command): command is AgentRelayCommandState => Boolean(command))
+      : [];
+    const planDecisions = Array.isArray(params?.planDecisions)
+      ? params.planDecisions.map((decision) => relayPlanDecisionState(decision)).filter((decision): decision is AgentRelayPlanDecisionState => Boolean(decision))
       : [];
     const revision = typeof params?.revision === "number" ? params.revision : threadState.revision;
     if (params?.consistency !== "live") return;
@@ -1816,6 +1965,7 @@ export class CodexDriver implements AgentDriver {
         consistency: "live",
         threadState,
         commands,
+        planDecisions,
       });
     }
     this.ackRelayControl(threadId, revision);
@@ -1886,6 +2036,24 @@ export class CodexDriver implements AgentDriver {
       ...(turnId ? { turnId } : {}),
       ...(itemId ? { itemId } : {}),
     }));
+  }
+
+  private async emitGoalActivity(
+    threadId: string,
+    goal: AgentThreadGoal | null,
+    excludedSessionKey?: string,
+    turnId?: string,
+  ): Promise<void> {
+    for (const key of this.sessionKeysForThread(threadId)) {
+      if (key === excludedSessionKey) continue;
+      await this.onOutput({
+        type: "activity",
+        sessionKey: key,
+        threadId,
+        ...(turnId ? { turnId } : {}),
+        activity: { kind: "goal", goal },
+      });
+    }
   }
 
   private async emitOutputForSessions(
@@ -2149,44 +2317,162 @@ export class CodexDriver implements AgentDriver {
     }
   }
 
-  private registerInteractiveRequest(requestId: string | number, threadId: string, sessionKeys: string[]): void {
-    this.pendingInteractiveRequests.set(interactiveRequestKey(requestId), {
+  private registerInteractiveRequest(
+    requestId: string | number,
+    threadId: string,
+    sessionKeys: string[],
+    requestMethod: string,
+    turnId?: string,
+    requestSignature = requestMethod,
+  ): boolean {
+    const mapKey = interactiveRequestKey(threadId, requestId);
+    const previous = this.pendingInteractiveRequests.get(mapKey);
+    if (previous?.resolved && previous.turnId && turnId && previous.turnId !== turnId) {
+      if (previous.resolutionRetryTimer) clearTimeout(previous.resolutionRetryTimer);
+      this.pendingInteractiveRequests.delete(mapKey);
+    } else if (previous) {
+      const conflict = previous.threadId !== threadId
+        || previous.requestMethod !== requestMethod
+        || previous.requestSignature !== requestSignature;
+      const logFields = {
+        request_id: String(requestId),
+        thread_id: threadId,
+        method: requestMethod,
+        original_thread_id: previous.threadId,
+        original_method: previous.requestMethod,
+      };
+      if (conflict) this.logger.warn("codex.conflicting_duplicate_server_request_ignored", logFields);
+      else this.logger.info("codex.duplicate_server_request_coalesced", logFields);
+      if (conflict || previous.resolved) return false;
+      for (const sessionKeyValue of sessionKeys) previous.sessionKeys.add(sessionKeyValue);
+      return true;
+    }
+    this.resolvedWaitingFences.get(threadId)?.delete(waitingKindForRequest(requestMethod));
+    this.pendingInteractiveRequests.set(mapKey, {
       requestId,
       threadId,
+      requestMethod,
+      requestSignature,
+      ...(turnId ? { turnId } : {}),
       sessionKeys: new Set(sessionKeys),
+      deliveryStarted: new Set(),
+      requestDelivered: new Set(),
       resolved: false,
-      resolutionEmitted: false,
+      resolutionDelivered: new Set(),
+      sideResolutionDelivered: false,
+      resolutionRetryCount: 0,
     });
+    return true;
   }
 
-  private async resolveInteractiveRequest(requestId: string | number): Promise<void> {
-    const request = this.pendingInteractiveRequests.get(interactiveRequestKey(requestId));
+  private claimInteractiveRequestDelivery(requestId: string | number, threadId: string, sessionKeyValue: string): boolean {
+    const request = this.pendingInteractiveRequests.get(interactiveRequestKey(threadId, requestId));
+    if (!request || request.threadId !== threadId || request.resolved || request.deliveryStarted.has(sessionKeyValue)) return false;
+    request.sessionKeys.add(sessionKeyValue);
+    request.deliveryStarted.add(sessionKeyValue);
+    return true;
+  }
+
+  private async resolveInteractiveRequest(requestId: string | number, threadId?: string): Promise<void> {
+    const request = threadId
+      ? this.pendingInteractiveRequests.get(interactiveRequestKey(threadId, requestId))
+      : [...this.pendingInteractiveRequests.values()].find((candidate) => sameInteractiveRequestId(candidate.requestId, requestId) && !candidate.resolved);
     if (!request) return;
     request.resolved = true;
     await this.finishInteractiveRequest(requestId, request);
   }
 
+  private interactiveRequestIsResolved(requestId: string | number, threadId: string): boolean {
+    return this.pendingInteractiveRequests.get(interactiveRequestKey(threadId, requestId))?.resolved ?? false;
+  }
+
+  private async markInteractiveRequestDelivered(requestId: string | number, threadId: string, sessionKeyValue: string): Promise<void> {
+    const request = this.pendingInteractiveRequests.get(interactiveRequestKey(threadId, requestId));
+    if (!request) return;
+    request.requestDelivered.add(sessionKeyValue);
+    if (request.resolved) await this.finishInteractiveRequest(requestId, request);
+  }
+
   private async finishInteractiveRequest(requestId: string | number, request: PendingInteractiveRequest): Promise<void> {
     this.clearThreadWaitingState(request.threadId);
-    if (!request.resolutionEmitted) {
-      request.resolutionEmitted = true;
-      const side = this.sideConversations.get(request.threadId);
-      if (side) {
+    const waitingKind = waitingKindForRequest(request.requestMethod);
+    const fences = this.resolvedWaitingFences.get(request.threadId) ?? new Set<"approval" | "userInput">();
+    fences.add(waitingKind);
+    this.resolvedWaitingFences.set(request.threadId, fences);
+    let retryRequired = false;
+    const side = this.sideConversations.get(request.threadId);
+    if (side && request.requestDelivered.has(side.sessionKey) && !request.sideResolutionDelivered) {
+      try {
         await this.emitSideConversationEvent(side, {
           type: "server_request_resolved",
           sessionKey: side.sessionKey,
           requestId,
+          threadId: request.threadId,
+          ...(request.turnId ? { turnId: request.turnId } : {}),
+          requestMethod: request.requestMethod,
+        });
+        request.sideResolutionDelivered = true;
+      } catch (error) {
+        retryRequired = true;
+        this.logger.warn("codex.server_request_resolution_delivery_failed", {
+          session_key: side.sessionKey,
+          thread_id: request.threadId,
+          request_id: String(requestId),
+          error: error instanceof Error ? error : new Error(String(error)),
         });
       }
-      for (const key of request.sessionKeys) {
-        if (this.sessions.get(key)?.status.threadId === request.threadId) {
-          await this.onOutput({ type: "server_request_resolved", sessionKey: key, requestId });
-        }
+    }
+    for (const key of request.sessionKeys) {
+      if (!request.requestDelivered.has(key)) continue;
+      if (request.resolutionDelivered.has(key)) continue;
+      if (this.sessions.get(key)?.status.threadId !== request.threadId) {
+        request.resolutionDelivered.add(key);
+        continue;
+      }
+      try {
+        await this.onOutput({
+          type: "server_request_resolved",
+          sessionKey: key,
+          requestId,
+          threadId: request.threadId,
+          ...(request.turnId ? { turnId: request.turnId } : {}),
+          requestMethod: request.requestMethod,
+        });
+        request.resolutionDelivered.add(key);
+      } catch (error) {
+        retryRequired = true;
+        this.logger.warn("codex.server_request_resolution_delivery_failed", {
+          session_key: key,
+          thread_id: request.threadId,
+          request_id: String(requestId),
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
       }
     }
-    const mapKey = interactiveRequestKey(requestId);
+    // Request delivery and resolution can overlap across Gateway clients. Clear
+    // again after every per-scope callback so a late renderer cannot restore the
+    // waiting flags after the request has already resolved.
+    this.clearThreadWaitingState(request.threadId);
+    if (retryRequired && request.resolutionRetryCount < 3 && !request.resolutionRetryTimer) {
+      request.resolutionRetryCount += 1;
+      request.resolutionRetryTimer = setTimeout(() => {
+        request.resolutionRetryTimer = undefined;
+        if (this.pendingInteractiveRequests.get(interactiveRequestKey(request.threadId, requestId)) !== request) return;
+        void this.finishInteractiveRequest(requestId, request).catch((error) => {
+          this.logger.warn("codex.server_request_resolution_retry_failed", {
+            thread_id: request.threadId,
+            request_id: String(requestId),
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+        });
+      }, request.resolutionRetryCount * 250);
+      request.resolutionRetryTimer.unref();
+    }
+    const mapKey = interactiveRequestKey(request.threadId, requestId);
     setTimeout(() => {
-      if (this.pendingInteractiveRequests.get(mapKey) === request) this.pendingInteractiveRequests.delete(mapKey);
+      if (this.pendingInteractiveRequests.get(mapKey) !== request) return;
+      if (request.resolutionRetryTimer) clearTimeout(request.resolutionRetryTimer);
+      this.pendingInteractiveRequests.delete(mapKey);
     }, 5 * 60_000).unref();
   }
 
@@ -2219,7 +2505,10 @@ export class CodexDriver implements AgentDriver {
       logger: this.logger,
       onOutput: this.onOutput,
       emitActivity: (key, activity, params) => this.emitActivity(key, activity, params),
-      registerRequest: (requestId, threadId, sessionKeys) => this.registerInteractiveRequest(requestId, threadId, sessionKeys),
+      registerRequest: (requestId, threadId, sessionKeys, method, turnId, signature) => this.registerInteractiveRequest(requestId, threadId, sessionKeys, method, turnId, signature),
+      requestIsResolved: (requestId, threadId) => this.interactiveRequestIsResolved(requestId, threadId),
+      claimRequestDelivery: (requestId, threadId, sessionKeyValue) => this.claimInteractiveRequestDelivery(requestId, threadId, sessionKeyValue),
+      markRequestDelivered: (requestId, threadId, sessionKeyValue) => this.markInteractiveRequestDelivered(requestId, threadId, sessionKeyValue),
     });
   }
 
@@ -2306,6 +2595,7 @@ export class CodexDriver implements AgentDriver {
     this.sessions.clear();
     this.threadToSessions.clear();
     this.pendingInteractiveRequests.clear();
+    this.resolvedWaitingFences.clear();
     this.pendingUserMessageOrigins.clear();
     this.mirroredUserMessageItems.clear();
     this.relayCommandOrigins.clear();

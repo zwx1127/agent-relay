@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { callbackMessage, cleanupRelayFixtures, relayFixture as fixture, sentPrompt, textMessage } from "../support/relay-fixture.ts";
+import { callbackMessage, cleanupRelayFixtures, relayFixture as fixture, sentPrompt, textMessage, waitForStreamFlush } from "../support/relay-fixture.ts";
 
 afterEach(cleanupRelayFixtures);
 
@@ -157,6 +157,57 @@ describe("relay controller Codex prompts", () => {
       requestId: 78,
       result: { answers: { choice: { answers: ["Fast"] } } },
     }]);
+  });
+
+  test("submitting the final Plan answer returns the Activity card to Working", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("/plan design this"));
+
+    await router.handleAgentOutput({
+      type: "activity",
+      sessionKey: "codex:1:demo",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "reasoning-1",
+      activity: { kind: "reasoning", summary: "Comparing implementation options" },
+    });
+    await waitForStreamFlush();
+    const activityMessage = adapter.sent.find((message) => message.text.includes("Codex") && message.text.includes("Working"))!;
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "codex:1:demo",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      requestId: 780,
+      questions: [{
+        id: "choice",
+        header: "Mode",
+        question: "Pick one.",
+        options: [{ label: "Fast", description: "Low detail" }],
+      }],
+    });
+    expect(adapter.edited.filter((message) => message.options.messageId === activityMessage.messageId).at(-1)?.text).toContain("Waiting for input");
+
+    const prompt = adapter.sent.at(-1)!;
+    const fast = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
+    await router.handle(callbackMessage(fast.callback_data, 7, "cb-fast-working", prompt.messageId));
+    const submit = adapter.edited.at(-1)!.options.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Submit")!;
+    await router.handle(callbackMessage(submit.callback_data, 7, "cb-submit-working", prompt.messageId));
+
+    expect(agent.responses).toContainEqual({
+      key: "codex:1:demo",
+      requestId: 780,
+      result: { answers: { choice: { answers: ["Fast"] } } },
+    });
+    expect(agent.getStatus("codex:1:demo")?.waitingForUserInput).toBe(false);
+    const latestActivity = adapter.edited.filter((message) => message.options.messageId === activityMessage.messageId).at(-1)!;
+    expect(latestActivity.text).toContain("Working");
+    expect(latestActivity.text).not.toContain("Waiting for input");
   });
 
   test("plan option question can add a note to the selected answer", async () => {
@@ -514,6 +565,123 @@ describe("relay controller Codex prompts", () => {
     ]);
   });
 
+  test("deduplicates approval, user-input, and MCP cards by logical request", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("run tests"));
+
+    const approval = {
+      type: "approval_request" as const,
+      sessionKey: "codex:1:demo",
+      requestId: "approval-first",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "command-1",
+      method: "item/commandExecution/requestApproval",
+      approvalKind: "command" as const,
+      title: "Approve command?",
+      body: "bun test",
+      params: { command: "bun test" },
+    };
+    const approvalStart = adapter.sent.length;
+    await router.handleAgentOutput(approval);
+    const approvalCard = adapter.sent.at(-1)!;
+    await router.handleAgentOutput({ ...approval, requestId: "approval-copy", body: "changed command", params: { command: "changed command" } });
+    expect(adapter.sent.slice(approvalStart)).toHaveLength(1);
+    expect(approvalCard.text).toContain("bun test");
+    expect(approvalCard.text).not.toContain("changed command");
+    await router.handleAgentOutput({
+      type: "server_request_resolved",
+      sessionKey: approval.sessionKey,
+      requestId: "approval-copy",
+      threadId: approval.threadId,
+    });
+    expect(store.getPendingPrompt("1", approvalCard.messageId!)).toBeUndefined();
+
+    const question = {
+      type: "user_input_request" as const,
+      sessionKey: "codex:1:demo",
+      requestId: "question-first",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "question-1",
+      questions: [{
+        id: "mode",
+        header: "Mode",
+        question: "Pick one.",
+        options: [{ label: "Fast", description: "Quick" }],
+      }],
+    };
+    const questionStart = adapter.sent.length;
+    await router.handleAgentOutput(question);
+    const questionCard = adapter.sent.at(-1)!;
+    await router.handleAgentOutput({ ...question, requestId: "question-copy" });
+    expect(adapter.sent.slice(questionStart)).toHaveLength(1);
+    await router.handleAgentOutput({
+      type: "server_request_resolved",
+      sessionKey: question.sessionKey,
+      requestId: "question-copy",
+      threadId: question.threadId,
+    });
+    expect(store.getPendingPrompt("1", questionCard.messageId!)).toBeUndefined();
+
+    const elicitation = {
+      type: "mcp_elicitation_request" as const,
+      sessionKey: "codex:1:demo",
+      requestId: "mcp-first",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      elicitationId: "elicitation-1",
+      serverName: "example",
+      mode: "url" as const,
+      message: "Complete authentication.",
+      url: "https://example.test/auth",
+    };
+    const mcpStart = adapter.sent.length;
+    await router.handleAgentOutput(elicitation);
+    const mcpCard = adapter.sent.at(-1)!;
+    await router.handleAgentOutput({ ...elicitation, requestId: "mcp-copy" });
+    expect(adapter.sent.slice(mcpStart)).toHaveLength(1);
+    await router.handleAgentOutput({
+      type: "server_request_resolved",
+      sessionKey: elicitation.sessionKey,
+      requestId: "mcp-copy",
+      threadId: elicitation.threadId,
+    });
+    expect(store.getPendingPrompt("1", mcpCard.messageId!)).toBeUndefined();
+  });
+
+  test("allows an MCP request to retry after its first card render fails", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    const event = {
+      type: "mcp_elicitation_request" as const,
+      sessionKey: "codex:1:demo",
+      requestId: "mcp-retry",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      elicitationId: "elicitation-retry",
+      serverName: "example",
+      mode: "url" as const,
+      message: "Complete authentication.",
+      url: "https://example.test/auth",
+    };
+    adapter.failSendMessage = new Error("send failed");
+    await expect(router.handleAgentOutput(event)).rejects.toThrow("send failed");
+
+    adapter.failSendMessage = undefined;
+    const beforeRetry = adapter.sent.length;
+    await router.handleAgentOutput(event);
+    expect(adapter.sent.slice(beforeRetry)).toHaveLength(1);
+    expect(store.getPendingPrompt("1", adapter.sent.at(-1)!.messageId!)).toBeDefined();
+  });
+
   test("typed MCP forms validate fields, support Skip, and submit structured content", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
@@ -590,8 +758,40 @@ describe("relay controller Codex prompts", () => {
     expect(store.getPendingPrompt("1", prompt.messageId!)).toBeUndefined();
     expect(store.getTask(1)?.status).toBe("running");
     expect(adapter.edited.at(-1)?.text).toContain("Codex request resolved.");
-    expect(adapter.edited.at(-1)?.text).toContain("another connected client");
+    expect(adapter.edited.at(-1)?.text).toContain("a connected client");
     expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
+  });
+
+  test("a remotely resolved prompt falls back to a replacement terminal card when edits fail", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "codex:1:demo",
+      requestId: "shared-edit-failure",
+      questions: [{
+        id: "choice",
+        header: "Mode",
+        question: "Pick one.",
+        options: [{ label: "Fast", description: "Low detail" }],
+      }],
+    });
+    const prompt = adapter.sent.at(-1)!;
+    adapter.failEditMessage = new Error("edit unavailable");
+
+    await router.handleAgentOutput({
+      type: "server_request_resolved",
+      sessionKey: "codex:1:demo",
+      requestId: "shared-edit-failure",
+    });
+
+    expect(store.getPendingPrompt("1", prompt.messageId!)).toBeUndefined();
+    expect(adapter.sent.at(-1)?.text).toContain("Codex request resolved.");
+    expect(adapter.sent.at(-1)?.options?.replyMarkup?.inline_keyboard).toEqual([]);
   });
 
   test("URL MCP elicitation supports Complete and returns accept without content", async () => {

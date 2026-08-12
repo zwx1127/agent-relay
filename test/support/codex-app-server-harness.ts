@@ -97,6 +97,9 @@ rl.on("line", (line) => {
       send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
     } else if (inputText === "ask") {
       send({ id: 900, method: "item/tool/requestUserInput", params: { threadId, turnId, itemId: "item-1", questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [{ label: "Fast", description: "Quick" }] }] } });
+    } else if (inputText === "ask duplicate") {
+      send({ id: 904, method: "item/tool/requestUserInput", params: { threadId, turnId, itemId: "duplicate-item", questions: [{ id: "mode", header: "Mode", question: "Pick the first question.", options: [{ label: "Fast", description: "Quick" }] }] } });
+      send({ id: 904, method: "item/tool/requestUserInput", params: { threadId, turnId, itemId: "duplicate-item", questions: [{ id: "mode", header: "Mode", question: "Changed duplicate question.", options: [{ label: "Slow", description: "Changed" }] }] } });
     } else if (inputText === "mcp form") {
       send({ id: 901, method: "mcpServer/elicitation/request", params: { threadId, turnId, serverName: "example", mode: "form", message: "Configure", _meta: null, requestedSchema: { type: "object", properties: { name: { type: "string", minLength: 2, maxLength: 20 }, count: { type: "integer", minimum: 1, maximum: 4 }, choices: { type: "array", items: { type: "string", enum: ["a", "b"] }, minItems: 1, maxItems: 2 } }, required: ["name"] } } });
     } else if (inputText === "unsupported requests") {

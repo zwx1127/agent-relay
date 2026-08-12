@@ -46,13 +46,28 @@ export interface ConnectedClient {
 
 export interface PendingServerRequest {
   key: string;
-  originClientId: string;
-  originBackend: WebSocket;
-  originalId: string | number;
+  logicalKey: string;
+  requestFingerprint: string;
+  requestMethod: string;
   threadId?: string;
+  origins: Map<string, {
+    clientId: string;
+    backend: WebSocket;
+    requestId: string | number;
+  }>;
   resolved: boolean;
   resolvedNotified: boolean;
+  response?: Record<string, unknown>;
+  timeoutTimer?: Timer;
+  cleanupTimer?: Timer;
   participants: Map<string, string | number>;
+  participantInstances: Map<string, string>;
+}
+
+export interface ShareServerRequestResult {
+  kind: "created" | "coalesced" | "duplicate";
+  deliverToOrigin: boolean;
+  conflict: boolean;
 }
 
 async function main(): Promise<void> {
@@ -172,7 +187,10 @@ async function main(): Promise<void> {
     let forwardedRaw = raw;
     if (message) {
       const control = relayControl.handleFrontend(client, message);
-      if (control.handled) return;
+      if (control.handled) {
+        if (message.method === "agent-relay/control/hello") rebindPendingRequestParticipant(client, pendingRequests);
+        return;
+      }
       const forwarded = control.message ?? message;
       forwardedRaw = forwarded === message ? raw : JSON.stringify(forwarded);
       updateClientFromRequest(client.data, forwarded);
@@ -204,13 +222,23 @@ async function main(): Promise<void> {
         if (frontendConnected) client.socket.send(raw);
         return;
       }
-      if (handleServerRequestResolved(client.data, message, clients, pendingRequests)) return;
+      if (handleServerRequestResolved(client.data, message, clients, pendingRequests, relayedRequestIds)) return;
+      if (isServerRequest(message) && isShareableServerRequest(message.method)) {
+        const shared = shareServerRequest(client, message, backend, clients, pendingRequests, relayedRequestIds);
+        if (shared.conflict) {
+          log(config.logPath, "gateway conflicting duplicate server request suppressed", {
+            clientId: client.data.id,
+            requestId: message.id,
+            method: message.method,
+            threadId: messageThreadId(message),
+          });
+        }
+        if (frontendConnected && shared.deliverToOrigin) client.socket.send(raw);
+        return;
+      }
       const liveEvent = liveEvents.sequence(client.data.id, message);
       if (liveEvent) deliverLiveEvent(liveEvent, raw, client, clients);
       else if (frontendConnected) client.socket.send(raw);
-      if (isServerRequest(message) && isShareableServerRequest(message.method)) {
-        shareServerRequest(client, message, backend, clients, pendingRequests, relayedRequestIds);
-      }
       if (isRpcResponse(message)) {
         const responseThreadId = messageThreadId(message);
         if (responseThreadId) {
@@ -276,11 +304,14 @@ async function main(): Promise<void> {
           socket.data.backend?.close();
           relayControl.clientBackendClosed(socket.data.id);
         }
-        for (const [key, pending] of pendingRequests) {
-          if (pending.originClientId !== socket.data.id) continue;
+        for (const pending of pendingRequests.values()) {
+          for (const [originKey, origin] of pending.origins) {
+            if (origin.clientId === socket.data.id) pending.origins.delete(originKey);
+          }
+          if (pending.origins.size > 0 || pending.resolved) continue;
           pending.resolved = true;
           notifyServerRequestResolved(pending, clients);
-          removePendingRequest(key, pendingRequests, relayedRequestIds);
+          removePendingRequest(pending.key, pendingRequests, relayedRequestIds);
         }
         log(config.logPath, "gateway client disconnected", { clientId: socket.data.id });
       },
@@ -365,40 +396,123 @@ export function shareServerRequest(
   clients: Map<string, ConnectedClient>,
   pendingRequests: Map<string, PendingServerRequest>,
   relayedRequestIds: Map<string, string>,
-): void {
+): ShareServerRequestResult {
   const threadId = messageThreadId(message);
-  const key = requestKey(origin.data.id, message.id);
+  const originKey = requestKey(origin.data.id, message.id);
+  const logicalKey = serverRequestLogicalKey(message);
+  const requestFingerprint = canonicalJson({ method: message.method, params: message.params ?? null });
+  const exact = [...pendingRequests.values()].find((candidate) => candidate.origins.has(originKey));
+  if (exact) {
+    if (exact.logicalKey === logicalKey) {
+      if (exact.resolved) answerLateServerRequest(exact, originBackend, message.id);
+      return {
+        kind: "duplicate",
+        deliverToOrigin: false,
+        conflict: exact.requestFingerprint !== requestFingerprint,
+      };
+    }
+    if (!exact.resolved) return { kind: "duplicate", deliverToOrigin: false, conflict: true };
+    removePendingRequest(exact.key, pendingRequests, relayedRequestIds);
+  }
+  const existing = [...pendingRequests.values()].find((candidate) => candidate.logicalKey === logicalKey);
+  if (existing) {
+    existing.origins.set(originKey, { clientId: origin.data.id, backend: originBackend, requestId: message.id });
+    if (existing.resolved) answerLateServerRequest(existing, originBackend, message.id);
+    const alreadyVisible = existing.participants.has(origin.data.id);
+    if (!alreadyVisible && !existing.resolved) {
+      existing.participants.set(origin.data.id, message.id);
+      if (origin.data.relayInstanceId) existing.participantInstances.set(origin.data.id, origin.data.relayInstanceId);
+    }
+    if (!existing.resolved) shareServerRequestWithMissingPeers(existing, message, origin.data.id, clients, relayedRequestIds);
+    return {
+      kind: "coalesced",
+      deliverToOrigin: !alreadyVisible && !existing.resolved,
+      conflict: existing.requestFingerprint !== requestFingerprint,
+    };
+  }
+  const key = originKey;
   const pending: PendingServerRequest = {
     key,
-    originClientId: origin.data.id,
-    originBackend,
-    originalId: message.id,
+    logicalKey,
+    requestFingerprint,
+    requestMethod: message.method,
     threadId,
+    origins: new Map([[originKey, { clientId: origin.data.id, backend: originBackend, requestId: message.id }]]),
     resolved: false,
     resolvedNotified: false,
     participants: new Map([[origin.data.id, message.id]]),
+    participantInstances: new Map(origin.data.relayInstanceId ? [[origin.data.id, origin.data.relayInstanceId]] : []),
   };
   pendingRequests.set(key, pending);
-  setTimeout(() => {
+  pending.timeoutTimer = setTimeout(() => {
     const active = pendingRequests.get(key);
     if (!active || active.resolved) return;
     active.resolved = true;
     notifyServerRequestResolved(active, clients);
-    setTimeout(() => removePendingRequest(key, pendingRequests, relayedRequestIds), 5 * 60_000).unref();
-  }, 5 * 60_000).unref();
+    schedulePendingRequestRemoval(active, pendingRequests, relayedRequestIds);
+  }, 5 * 60_000);
+  pending.timeoutTimer.unref();
+  shareServerRequestWithMissingPeers(pending, message, origin.data.id, clients, relayedRequestIds);
+  return { kind: "created", deliverToOrigin: true, conflict: false };
+}
+
+function shareServerRequestWithMissingPeers(
+  pending: PendingServerRequest,
+  message: Record<string, unknown> & { id: string | number; method: string },
+  originClientId: string,
+  clients: Map<string, ConnectedClient>,
+  relayedRequestIds: Map<string, string>,
+): void {
   for (const peer of clients.values()) {
-    if (peer.data.id === origin.data.id || (threadId && !peer.data.threads.has(threadId))) continue;
+    if (peer.data.id === originClientId || pending.participants.has(peer.data.id) || (pending.threadId && !peer.data.threads.has(pending.threadId))) continue;
     const relayId = `agent-relay:${randomUUID()}`;
     pending.participants.set(peer.data.id, relayId);
-    relayedRequestIds.set(relayId, key);
+    if (peer.data.relayInstanceId) pending.participantInstances.set(peer.data.id, peer.data.relayInstanceId);
+    relayedRequestIds.set(relayId, pending.key);
     peer.socket.send(JSON.stringify({ ...message, id: relayId }));
+  }
+}
+
+function answerLateServerRequest(pending: PendingServerRequest, backend: WebSocket, requestId: string | number): void {
+  if (backend.readyState !== WebSocket.OPEN) return;
+  backend.send(JSON.stringify(pending.response
+    ? { ...pending.response, id: requestId }
+    : { id: requestId, error: { code: -32000, message: "Request already resolved." } }));
+}
+
+export function rebindPendingRequestParticipant(
+  client: ConnectedClient,
+  pendingRequests: Map<string, PendingServerRequest>,
+): void {
+  const instanceId = client.data.relayInstanceId;
+  if (!instanceId) return;
+  for (const pending of pendingRequests.values()) {
+    const previousClientId = [...pending.participantInstances.entries()].find(([, value]) => value === instanceId)?.[0];
+    if (!previousClientId) continue;
+    const visibleRequestId = pending.participants.get(previousClientId);
+    if (visibleRequestId === undefined) continue;
+    if (previousClientId !== client.data.id) {
+      pending.participants.delete(previousClientId);
+      pending.participantInstances.delete(previousClientId);
+      pending.participants.set(client.data.id, visibleRequestId);
+      pending.participantInstances.set(client.data.id, instanceId);
+    }
+    if (pending.resolved) {
+      client.socket.send(JSON.stringify({
+        method: "serverRequest/resolved",
+        params: {
+          ...(pending.threadId ? { threadId: pending.threadId } : {}),
+          requestId: visibleRequestId,
+        },
+      }));
+    }
   }
 }
 
 export function routeServerRequestResponse(
   client: GatewayClientData,
   message: Record<string, unknown> & { id: string | number },
-  raw: string,
+  _raw: string,
   clients: Map<string, ConnectedClient>,
   pendingRequests: Map<string, PendingServerRequest>,
   relayedRequestIds: Map<string, string>,
@@ -406,14 +520,19 @@ export function routeServerRequestResponse(
   const id = String(message.id);
   const relayedKey = relayedRequestIds.get(id);
   const ownKey = requestKey(client.id, message.id);
-  const pending = relayedKey ? pendingRequests.get(relayedKey) : pendingRequests.get(ownKey);
+  const pending = relayedKey
+    ? pendingRequests.get(relayedKey)
+    : [...pendingRequests.values()].find((candidate) => candidate.origins.has(ownKey));
   if (!pending) return false;
-  if (!pending.resolved && pending.originBackend.readyState === WebSocket.OPEN) {
-    const response = relayedKey ? { ...message, id: pending.originalId } : JSON.parse(raw) as Record<string, unknown>;
-    pending.originBackend.send(JSON.stringify(response));
+  if (!pending.resolved) {
+    const { id: _id, ...response } = message;
+    pending.response = response;
+    for (const origin of pending.origins.values()) {
+      if (origin.backend.readyState === WebSocket.OPEN) origin.backend.send(JSON.stringify({ ...response, id: origin.requestId }));
+    }
     pending.resolved = true;
     notifyServerRequestResolved(pending, clients);
-    setTimeout(() => removePendingRequest(pending.key, pendingRequests, relayedRequestIds), 5 * 60_000).unref();
+    schedulePendingRequestRemoval(pending, pendingRequests, relayedRequestIds);
   }
   return true;
 }
@@ -423,19 +542,23 @@ export function handleServerRequestResolved(
   message: Record<string, unknown>,
   clients: Map<string, ConnectedClient>,
   pendingRequests: Map<string, PendingServerRequest>,
+  relayedRequestIds: Map<string, string> = new Map(),
 ): boolean {
   if (message.method !== "serverRequest/resolved") return false;
   const params = asRecord(message.params);
   const requestId = params?.requestId;
   if (typeof requestId !== "string" && typeof requestId !== "number") return false;
-  const direct = pendingRequests.get(requestKey(client.id, requestId));
+  const directKey = requestKey(client.id, requestId);
+  const direct = [...pendingRequests.values()].find((candidate) => candidate.origins.has(directKey));
   const threadId = typeof params?.threadId === "string" ? params.threadId : undefined;
   const pending = direct ?? [...pendingRequests.values()].find((candidate) => (
-    candidate.originalId === requestId && (!threadId || candidate.threadId === threadId)
+    [...candidate.origins.values()].some((origin) => origin.requestId === requestId)
+      && (!threadId || candidate.threadId === threadId)
   ));
   if (!pending) return false;
   pending.resolved = true;
   notifyServerRequestResolved(pending, clients);
+  schedulePendingRequestRemoval(pending, pendingRequests, relayedRequestIds);
   return true;
 }
 
@@ -465,10 +588,41 @@ function removePendingRequest(
 ): void {
   const pending = pendingRequests.get(key);
   if (!pending) return;
+  if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
+  if (pending.cleanupTimer) clearTimeout(pending.cleanupTimer);
   pendingRequests.delete(key);
   for (const requestId of pending.participants.values()) {
     if (typeof requestId === "string" && requestId.startsWith("agent-relay:")) relayedRequestIds.delete(requestId);
   }
+}
+
+function schedulePendingRequestRemoval(
+  pending: PendingServerRequest,
+  pendingRequests: Map<string, PendingServerRequest>,
+  relayedRequestIds: Map<string, string>,
+): void {
+  if (pending.cleanupTimer) return;
+  pending.cleanupTimer = setTimeout(() => removePendingRequest(pending.key, pendingRequests, relayedRequestIds), 5 * 60_000);
+  pending.cleanupTimer.unref();
+}
+
+function serverRequestLogicalKey(message: Record<string, unknown> & { method: string }): string {
+  const params = asRecord(message.params);
+  const threadId = messageThreadId(message) ?? "";
+  const turnId = typeof params?.turnId === "string" ? params.turnId : "";
+  const stableId = typeof params?.itemId === "string"
+    ? `item:${params.itemId}`
+    : typeof params?.elicitationId === "string"
+      ? `elicitation:${params.elicitationId}`
+      : `payload:${canonicalJson(params ?? null)}`;
+  return `${threadId}\0${turnId}\0${message.method}\0${stableId}`;
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "undefined";
+  if (Array.isArray(value)) return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 }
 
 export function isShareableServerRequest(method: string): boolean {

@@ -4,6 +4,7 @@ import {
   handleServerRequestResolved,
   isShareableServerRequest,
   routeServerRequestResponse,
+  rebindPendingRequestParticipant,
   shareServerRequest,
   updateClientFromBackend,
   updateClientFromRequest,
@@ -49,6 +50,64 @@ describe("experimental relay work Gateway approval arbitration", () => {
     expect(JSON.parse(peerMessages[1]!)).toEqual({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: shared.id } });
   });
 
+  test("coalesces the same logical approval from multiple app-server connections", () => {
+    const desktopBackendMessages: string[] = [];
+    const relayBackendMessages: string[] = [];
+    const desktopMessages: string[] = [];
+    const relayMessages: string[] = [];
+    const desktopBackend = { readyState: WebSocket.OPEN, send: (raw: string) => desktopBackendMessages.push(raw) } as unknown as WebSocket;
+    const relayBackend = { readyState: WebSocket.OPEN, send: (raw: string) => relayBackendMessages.push(raw) } as unknown as WebSocket;
+    const desktop = {
+      data: { id: "desktop", connectedAt: 1, backend: desktopBackend, queued: [], threads: new Set(["thread-1"]), deliveredSeq: new Map() },
+      socket: { send: (raw: string) => desktopMessages.push(raw) },
+    } as unknown as ConnectedClient;
+    const relay = {
+      data: { id: "relay", connectedAt: 2, backend: relayBackend, queued: [], threads: new Set(["thread-1"]), deliveredSeq: new Map() },
+      socket: { send: (raw: string) => relayMessages.push(raw) },
+    } as unknown as ConnectedClient;
+    const clients = new Map([[desktop.data.id, desktop], [relay.data.id, relay]]);
+    const pending = new Map<string, PendingServerRequest>();
+    const relayed = new Map<string, string>();
+    const first = {
+      id: 7,
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "command-1", command: "bun test" },
+    };
+
+    expect(shareServerRequest(desktop, first, desktopBackend, clients, pending, relayed)).toEqual({
+      kind: "created",
+      deliverToOrigin: true,
+      conflict: false,
+    });
+    const relayRequest = JSON.parse(relayMessages[0]!) as { id: string; params: { command: string } };
+    expect(relayRequest.params.command).toBe("bun test");
+
+    expect(shareServerRequest(relay, {
+      ...first,
+      id: 19,
+      params: { ...first.params, command: "changed command" },
+    }, relayBackend, clients, pending, relayed)).toEqual({
+      kind: "coalesced",
+      deliverToOrigin: false,
+      conflict: true,
+    });
+    expect(relayMessages).toHaveLength(1);
+
+    expect(routeServerRequestResponse(relay.data, { id: relayRequest.id, result: { decision: "accept" } }, "", clients, pending, relayed)).toBe(true);
+    expect(JSON.parse(desktopBackendMessages[0]!)).toEqual({ id: 7, result: { decision: "accept" } });
+    expect(JSON.parse(relayBackendMessages[0]!)).toEqual({ id: 19, result: { decision: "accept" } });
+    expect(JSON.parse(desktopMessages[0]!)).toEqual({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: 7 } });
+    expect(JSON.parse(relayMessages[1]!)).toEqual({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: relayRequest.id } });
+
+    expect(shareServerRequest(relay, { ...first, id: 19 }, relayBackend, clients, pending, relayed)).toEqual({
+      kind: "duplicate",
+      deliverToOrigin: false,
+      conflict: false,
+    });
+    expect(JSON.parse(relayBackendMessages[1]!)).toEqual({ id: 19, result: { decision: "accept" } });
+    expect(relayMessages).toHaveLength(2);
+  });
+
   test("shares only approval and user-input server request methods", () => {
     expect(isShareableServerRequest("item/fileChange/requestApproval")).toBe(true);
     expect(isShareableServerRequest("item/tool/requestUserInput")).toBe(true);
@@ -80,6 +139,40 @@ describe("experimental relay work Gateway approval arbitration", () => {
     }, clients, pending)).toBe(true);
     expect(JSON.parse(originMessages[0]!)).toEqual({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: 8 } });
     expect(JSON.parse(peerMessages[1]!)).toEqual({ method: "serverRequest/resolved", params: { threadId: "thread-1", requestId: peerRequestId } });
+  });
+
+  test("replays a resolved request to the same Relay instance after reconnect", () => {
+    const backendMessages: string[] = [];
+    const backend = { readyState: WebSocket.OPEN, send: (raw: string) => backendMessages.push(raw) } as unknown as WebSocket;
+    const origin = {
+      data: { id: "desktop", connectedAt: 1, backend, queued: [], threads: new Set(["thread-1"]), deliveredSeq: new Map() },
+      socket: { send: () => undefined },
+    } as unknown as ConnectedClient;
+    const oldMessages: string[] = [];
+    const oldRelay = {
+      data: { id: "relay-old", connectedAt: 2, relayInstanceId: "relay-instance", queued: [], threads: new Set(["thread-1"]), deliveredSeq: new Map() },
+      socket: { send: (raw: string) => oldMessages.push(raw) },
+    } as unknown as ConnectedClient;
+    const clients = new Map([[origin.data.id, origin], [oldRelay.data.id, oldRelay]]);
+    const pending = new Map<string, PendingServerRequest>();
+    const relayed = new Map<string, string>();
+    shareServerRequest(origin, { id: 9, method: "item/tool/requestUserInput", params: { threadId: "thread-1" } }, backend, clients, pending, relayed);
+    const visibleRequestId = (JSON.parse(oldMessages[0]!) as { id: string }).id;
+    clients.delete(oldRelay.data.id);
+    routeServerRequestResponse(origin.data, { id: 9, result: { answers: {} } }, JSON.stringify({ id: 9, result: { answers: {} } }), clients, pending, relayed);
+
+    const newMessages: string[] = [];
+    const newRelay = {
+      data: { id: "relay-new", connectedAt: 3, relayInstanceId: "relay-instance", queued: [], threads: new Set(["thread-1"]), deliveredSeq: new Map() },
+      socket: { send: (raw: string) => newMessages.push(raw) },
+    } as unknown as ConnectedClient;
+    clients.set(newRelay.data.id, newRelay);
+    rebindPendingRequestParticipant(newRelay, pending);
+
+    expect(JSON.parse(newMessages[0]!)).toEqual({
+      method: "serverRequest/resolved",
+      params: { threadId: "thread-1", requestId: visibleRequestId },
+    });
   });
 
   test("fans out each sequenced thread event once to currently connected clients", () => {

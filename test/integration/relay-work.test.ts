@@ -497,6 +497,271 @@ describe("experimental relay work behavior", () => {
     expect(store.latestTranscriptEvent("1", "demo", "agent")).toBeUndefined();
   });
 
+  test("synchronizes Plan implementation state and removes buttons in every shared scope", async () => {
+    const fixture = experimentalFixture();
+    const { router, store, adapter } = fixture;
+    const { firstKey, secondKey } = await attachSharedScopes(fixture);
+    store.setCollaborationMode(firstKey, "plan");
+    store.setCollaborationMode(secondKey, "plan");
+
+    for (const key of [firstKey, secondKey]) {
+      await router.handleAgentOutput({ type: "turn_completed", sessionKey: key, turnId: "plan-turn", status: "completed" });
+    }
+    const readyCards = adapter.sent.filter((message) => message.text.includes("Plan ready."));
+    expect(readyCards.map((message) => message.conversationId).sort()).toEqual(["1", "2"]);
+    expect(readyCards.every((message) => message.options?.replyMarkup?.inline_keyboard.flat().some((button) => button.text === "Implement"))).toBe(true);
+
+    for (const key of [firstKey, secondKey]) {
+      await router.handleAgentOutput({
+        type: "relay_plan_decision_state",
+        sessionKey: key,
+        gatewayEpoch: "epoch-1",
+        threadRevision: 2,
+        threadId: "shared-thread",
+        planTurnId: "plan-turn",
+        phase: "implementing",
+        revision: 2,
+        createdAt: 10,
+        updatedAt: 20,
+      });
+    }
+
+    for (const readyCard of readyCards) {
+      const update = adapter.edited.filter((message) => message.conversationId === readyCard.conversationId && message.options.messageId === readyCard.messageId).at(-1)!;
+      expect(update.text).toContain("Implementing plan.");
+      expect(update.options.replyMarkup?.inline_keyboard).toEqual([]);
+      expect(store.getPendingPrompt(readyCard.conversationId, readyCard.messageId!)).toBeUndefined();
+    }
+
+    for (const key of [firstKey, secondKey]) {
+      await router.handleAgentOutput({
+        type: "relay_plan_decision_state",
+        sessionKey: key,
+        gatewayEpoch: "epoch-1",
+        threadRevision: 3,
+        threadId: "shared-thread",
+        planTurnId: "plan-turn",
+        phase: "implementation_started",
+        revision: 3,
+        createdAt: 10,
+        updatedAt: 30,
+      });
+    }
+    for (const readyCard of readyCards) {
+      const update = adapter.edited.filter((message) => message.conversationId === readyCard.conversationId && message.options.messageId === readyCard.messageId).at(-1)!;
+      expect(update.text).toContain("Plan implementation started.");
+      expect(update.options.replyMarkup?.inline_keyboard).toEqual([]);
+    }
+  });
+
+  test("expires old Plan controls when a new Gateway epoch has no matching decision", async () => {
+    const fixture = experimentalFixture();
+    const { router, store, adapter } = fixture;
+    const { firstKey } = await attachSharedScopes(fixture);
+    store.setCollaborationMode(firstKey, "plan");
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: firstKey, turnId: "old-plan", status: "completed" });
+    const ready = adapter.sent.find((message) => message.conversationId === "1" && message.text.includes("Plan ready."))!;
+
+    await router.handleAgentOutput({
+      type: "relay_control_snapshot",
+      sessionKey: firstKey,
+      threadId: "shared-thread",
+      gatewayEpoch: "new-epoch",
+      revision: 10,
+      consistency: "live",
+      threadState: {
+        threadId: "shared-thread",
+        collaborationMode: "plan",
+        collaborationModeApplied: true,
+        revision: 10,
+        updatedAt: 100,
+      },
+      commands: [],
+      planDecisions: [],
+    });
+
+    const expired = adapter.edited.filter((message) => message.options.messageId === ready.messageId).at(-1)!;
+    expect(expired.text).toContain("Plan action expired.");
+    expect(expired.options.replyMarkup?.inline_keyboard).toEqual([]);
+    expect(store.getPendingPrompt("1", ready.messageId!)).toBeUndefined();
+  });
+
+  test("synchronizes Goal controls across idle shared scopes", async () => {
+    const fixture = experimentalFixture();
+    const { router, store, adapter } = fixture;
+    const { firstKey, secondKey } = await attachSharedScopes(fixture);
+    const activeGoal = {
+      threadId: "shared-thread",
+      objective: "ship synchronized cards",
+      status: "active" as const,
+      tokenBudget: null,
+      tokensUsed: 10,
+      timeUsedSeconds: 5,
+      createdAt: 10,
+      updatedAt: 10,
+    };
+    for (const key of [firstKey, secondKey]) {
+      await router.handleAgentOutput({
+        type: "activity",
+        sessionKey: key,
+        threadId: "shared-thread",
+        activity: { kind: "goal", goal: activeGoal },
+      });
+    }
+    const activeCards = adapter.sent.filter((message) => message.text.includes("ship synchronized cards"));
+    expect(activeCards.map((message) => message.conversationId).sort()).toEqual(["1", "2"]);
+    expect(activeCards.every((message) => message.options?.replyMarkup?.inline_keyboard.flat().some((button) => button.text === "Pause"))).toBe(true);
+
+    for (const key of [firstKey, secondKey]) {
+      await router.handleAgentOutput({
+        type: "activity",
+        sessionKey: key,
+        threadId: "shared-thread",
+        activity: { kind: "goal", goal: { ...activeGoal, status: "paused", updatedAt: 20 } },
+      });
+    }
+    for (const activeCard of activeCards) {
+      const retired = adapter.edited.filter((message) => message.conversationId === activeCard.conversationId && message.options.messageId === activeCard.messageId).at(-1)!;
+      expect(retired.options.replyMarkup?.inline_keyboard).toEqual([]);
+      expect(store.getPendingPrompt(activeCard.conversationId, activeCard.messageId!)).toBeUndefined();
+      const latest = adapter.sent.filter((message) => message.conversationId === activeCard.conversationId && message.text.includes("ship synchronized cards")).at(-1)!;
+      expect(latest.options?.replyMarkup?.inline_keyboard.flat().some((button) => button.text === "Resume")).toBe(true);
+    }
+  });
+
+  test("synchronizes a shared Goal into every active Activity card", async () => {
+    const fixture = experimentalFixture();
+    const { router, adapter, agent } = fixture;
+    const { firstKey, secondKey } = await attachSharedScopes(fixture);
+    for (const key of [firstKey, secondKey]) {
+      agent.getStatus(key)!.activeTurnId = "active-turn";
+      await router.handleAgentOutput({
+        type: "activity",
+        sessionKey: key,
+        threadId: "shared-thread",
+        turnId: "active-turn",
+        itemId: "work",
+        activity: { kind: "item", category: "other", label: "Working", status: "inProgress" },
+      });
+    }
+    await waitForStreamFlush();
+    const activityCards = adapter.sent.filter((message) => message.text.includes("Codex") && message.text.includes("Working"));
+    const goal = {
+      threadId: "shared-thread",
+      objective: "keep active cards synchronized",
+      status: "active" as const,
+      tokenBudget: null,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      createdAt: 30,
+      updatedAt: 30,
+    };
+    for (const key of [firstKey, secondKey]) {
+      await router.handleAgentOutput({
+        type: "activity",
+        sessionKey: key,
+        threadId: "shared-thread",
+        turnId: "active-turn",
+        activity: { kind: "goal", goal },
+      });
+    }
+
+    for (const activityCard of activityCards) {
+      const update = adapter.edited.filter((message) => message.conversationId === activityCard.conversationId && message.options.messageId === activityCard.messageId).at(-1)!;
+      expect(update.text).toContain("keep active cards synchronized");
+      const buttons = update.options.replyMarkup?.inline_keyboard.flat().map((button) => button.text) ?? [];
+      expect(buttons).toContain("Interrupt");
+      expect(buttons).toContain("Edit");
+      expect(buttons).toContain("Clear");
+    }
+  });
+
+  test("synchronizes Review state and invalidates conflicting local confirmations", async () => {
+    const fixture = experimentalFixture();
+    const { router, store, adapter } = fixture;
+    const { firstKey, secondKey } = await attachSharedScopes(fixture);
+    await router.handle(textMessage("/compact"));
+    const confirmation = adapter.sent.at(-1)!;
+    expect(confirmation.options?.replyMarkup?.inline_keyboard.flat().some((button) => button.text === "Compact")).toBe(true);
+
+    const emitPhase = async (phase: "accepted" | "running" | "completed", revision: number) => {
+      for (const key of [firstKey, secondKey]) {
+        await router.handleAgentOutput({
+          type: "relay_command_state",
+          sessionKey: key,
+          gatewayEpoch: "epoch-review",
+          threadRevision: revision,
+          commandId: "review-shared",
+          threadId: "shared-thread",
+          kind: "review",
+          phase,
+          source: "relay",
+          revision,
+          createdAt: 10,
+          updatedAt: 10 + revision,
+        });
+      }
+    };
+    await emitPhase("accepted", 1);
+    const expiredConfirmation = adapter.edited.find((message) => message.options.messageId === confirmation.messageId)!;
+    expect(expiredConfirmation.text).toContain("Command confirmation expired.");
+    expect(expiredConfirmation.options.replyMarkup?.inline_keyboard).toEqual([]);
+    expect(store.getPendingPrompt("1", confirmation.messageId!)).toBeUndefined();
+
+    const commandCards = adapter.sent.filter((message) => message.text.includes("Relay command") && message.text.includes("/review"));
+    expect(commandCards.map((message) => message.conversationId).sort()).toEqual(["1", "2"]);
+    await emitPhase("running", 2);
+    await emitPhase("completed", 3);
+    for (const card of commandCards) {
+      const update = adapter.edited.filter((message) => message.conversationId === card.conversationId && message.options.messageId === card.messageId).at(-1)!;
+      expect(update.text).toContain("Status: Completed");
+    }
+  });
+
+  test("retires shared terminal buttons when a stop is accepted and refreshes them on completion", async () => {
+    const fixture = experimentalFixture();
+    const { router, store, adapter, agent } = fixture;
+    const { firstKey, secondKey } = await attachSharedScopes(fixture);
+    agent.backgroundTerminals = [{ itemId: "terminal-item", processId: "terminal-process", commandDisplay: "bun dev" }];
+    await router.handle(textMessage("/ps"));
+    await router.handle(textMessage("/ps", 7, undefined, "2"));
+    const terminalCards = adapter.sent.filter((message) => message.text.includes("bun dev"));
+
+    const emitPhase = async (phase: "accepted" | "completed", revision: number) => {
+      for (const key of [firstKey, secondKey]) {
+        await router.handleAgentOutput({
+          type: "relay_command_state",
+          sessionKey: key,
+          gatewayEpoch: "epoch-terminal",
+          threadRevision: revision,
+          commandId: "terminal-stop-shared",
+          threadId: "shared-thread",
+          kind: "terminal_stop",
+          phase,
+          source: "relay",
+          revision,
+          createdAt: 10,
+          updatedAt: 10 + revision,
+        });
+      }
+    };
+    await emitPhase("accepted", 1);
+    for (const card of terminalCards) {
+      const retired = adapter.edited.filter((message) => message.conversationId === card.conversationId && message.options.messageId === card.messageId).at(-1)!;
+      expect(retired.text).toContain("operation in progress");
+      expect(retired.options.replyMarkup?.inline_keyboard).toEqual([]);
+      expect(store.getPendingPrompt(card.conversationId, card.messageId!)).toBeUndefined();
+    }
+
+    agent.backgroundTerminals = [];
+    await emitPhase("completed", 2);
+    for (const card of terminalCards) {
+      const refreshed = adapter.edited.filter((message) => message.conversationId === card.conversationId && message.options.messageId === card.messageId).at(-1)!;
+      expect(refreshed.text).toContain("No background terminals running.");
+      expect(refreshed.options.replyMarkup?.inline_keyboard).toEqual([]);
+    }
+  });
+
   test("renders an in-memory Relay control snapshot as one summary card", async () => {
     const { router, store, adapter, agent, path } = experimentalFixture();
     const key = sessionKey("1", "demo");
@@ -536,6 +801,50 @@ describe("experimental relay work behavior", () => {
     expect(adapter.sent.at(-1)?.text).toContain("Shared Relay state");
     expect(adapter.sent.at(-1)?.text).toContain("/review: Completed");
     expect(adapter.sent).toHaveLength(sentAfterFirstSnapshot);
+  });
+
+  test("expires an active shared command card when the Gateway epoch changes", async () => {
+    const fixture = experimentalFixture();
+    const { firstKey } = await attachSharedScopes(fixture);
+    const firstSnapshot: AgentRelayControlSnapshotEvent = {
+      type: "relay_control_snapshot",
+      sessionKey: firstKey,
+      threadId: "shared-thread",
+      gatewayEpoch: "epoch-old",
+      revision: 1,
+      consistency: "live",
+      threadState: {
+        threadId: "shared-thread",
+        collaborationMode: "default",
+        collaborationModeApplied: true,
+        revision: 1,
+        updatedAt: 10,
+      },
+      commands: [{
+        commandId: "review-running",
+        threadId: "shared-thread",
+        kind: "review",
+        phase: "running",
+        source: "relay",
+        revision: 1,
+        createdAt: 10,
+        updatedAt: 10,
+      }],
+    };
+    await fixture.router.handleAgentOutput(firstSnapshot);
+    const commandCard = fixture.adapter.sent.find((message) => message.text.includes("Status: Running"))!;
+
+    await fixture.router.handleAgentOutput({
+      ...firstSnapshot,
+      gatewayEpoch: "epoch-new",
+      revision: 0,
+      threadState: { ...firstSnapshot.threadState, revision: 0, updatedAt: 20 },
+      commands: [],
+    });
+
+    const expired = fixture.adapter.edited.filter((message) => message.options.messageId === commandCard.messageId).at(-1)!;
+    expect(expired.text).toContain("Relay command state expired.");
+    expect(expired.options.replyMarkup?.inline_keyboard).toEqual([]);
   });
 
   test("removes the legacy thread commands even when Relay Work is enabled", async () => {

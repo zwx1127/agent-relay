@@ -1266,6 +1266,26 @@ describe("relay controller thread commands", () => {
     expect(agent.backgroundTerminals).toEqual([]);
   });
 
+  test("a newer /ps card visually and logically expires the previous terminal controls", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    agent.backgroundTerminals = [{ itemId: "item-1", processId: "process-1", commandDisplay: "bun dev" }];
+
+    await router.handle(textMessage("/ps"));
+    const first = adapter.sent.at(-1)!;
+    await router.handle(textMessage("/ps"));
+    const second = adapter.sent.at(-1)!;
+
+    const retired = adapter.edited.find((message) => message.options.messageId === first.messageId)!;
+    expect(retired.text).toContain("Background terminals list expired.");
+    expect(retired.options.replyMarkup?.inline_keyboard).toEqual([]);
+    expect(store.getPendingPrompt("1", first.messageId!)).toBeUndefined();
+    expect(store.getPendingPrompt("1", second.messageId!)).toBeDefined();
+  });
+
   test("/plan enters Plan mode and implementing a plan returns to default mode", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
@@ -1448,7 +1468,7 @@ describe("relay controller thread commands", () => {
     expect(store.getPendingPrompt("1", planMessage.messageId!)).toBeUndefined();
   });
 
-  test("plan continue callback deletes the plan ready prompt without sending text", async () => {
+  test("plan continue callback retires the plan ready controls without submitting work", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -1466,12 +1486,12 @@ describe("relay controller thread commands", () => {
     expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
     expect(agent.sent).toHaveLength(sentCount);
     expect(store.getPendingPrompt("1", planMessage.messageId!)).toBeUndefined();
-    expect(adapter.deleted).toEqual([{ conversationId: "1", messageId: planMessage.messageId! }]);
-    expect(adapter.edited.map((message) => message.text)).not.toContain("Continuing in Plan mode.");
+    expect(adapter.edited.at(-1)?.text).toContain("Continuing in Plan mode.");
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
     expect(adapter.edited.map((message) => message.text)).not.toContain("Plan ready.");
   });
 
-  test("plan continue callback clears buttons without continuing text when delete fails", async () => {
+  test("plan continue callback keeps an explicit terminal state when delete is unavailable", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -1490,9 +1510,8 @@ describe("relay controller thread commands", () => {
     expect(store.getCollaborationMode("codex:1:demo")).toBe("plan");
     expect(agent.sent).toHaveLength(sentCount);
     expect(store.getPendingPrompt("1", planMessage.messageId!)).toBeUndefined();
-    expect(adapter.edited.at(-1)?.text).toBe("");
+    expect(adapter.edited.at(-1)?.text).toContain("Continuing in Plan mode.");
     expect(adapter.edited.at(-1)?.options.replyMarkup).toEqual({ inline_keyboard: [] });
-    expect(adapter.edited.at(-1)?.text).not.toContain("Continuing in Plan mode.");
     expect(adapter.edited.at(-1)?.text).not.toContain("Plan ready.");
   });
 
@@ -1512,6 +1531,29 @@ describe("relay controller thread commands", () => {
 
     await router.handle(textMessage("/plan"));
     await router.handle(callbackMessage(implementButton!.callback_data, 7, "cb-plan-after-exit", planMessage.messageId));
+
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
+    expect(agent.sent).toHaveLength(sentCount);
+    expect(store.getPendingPrompt("1", planMessage.messageId!)).toBeUndefined();
+    expect(adapter.edited.at(-1)?.text).toContain("Plan action expired.");
+  });
+
+  test("plan continue callback expires after empty /plan returns to Default mode", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handle(textMessage("/plan design this"));
+    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
+    agent.getStatus("codex:1:demo")!.activeTurnId = undefined;
+    const planMessage = adapter.sent.at(-1)!;
+    const continueButton = planMessage.options?.replyMarkup?.inline_keyboard.flat().find((button) => button.text === "Continue");
+    const sentCount = agent.sent.length;
+
+    await router.handle(textMessage("/plan"));
+    await router.handle(callbackMessage(continueButton!.callback_data, 7, "cb-plan-continue-after-exit", planMessage.messageId));
 
     expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
     expect(agent.sent).toHaveLength(sentCount);

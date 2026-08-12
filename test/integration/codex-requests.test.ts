@@ -75,6 +75,7 @@ describe("CodexDriver request ordering", () => {
       type: "user_input_request",
       sessionKey: "codex:1:demo",
       requestId: 900,
+      threadId: "thread-1",
       turnId: "turn-1",
       itemId: "item-1",
       questions: [{

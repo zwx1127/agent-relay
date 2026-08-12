@@ -26,7 +26,7 @@ import type {
   AgentSideConversationSendResult,
   AgentSideConversationSession,
 } from "./side-conversation.ts";
-import type { AgentRelayThreadStateUpdate } from "./control.ts";
+import type { AgentRelayPlanDecisionClaimResult, AgentRelayPlanDecisionState, AgentRelayThreadStateUpdate } from "./control.ts";
 import type { AgentCollaborationMode } from "./input.ts";
 
 export interface AgentDriver {
@@ -61,6 +61,9 @@ export interface AgentDriver {
   listSkills?(workspacePath: string, options?: AgentSkillListOptions): Promise<AgentSkillSummary[]>;
   searchFiles?(workspacePath: string, query: string, options?: AgentFileSearchOptions): Promise<AgentFileSearchResult[]>;
   syncThreadCollaborationMode?(sessionKey: string, currentMode: AgentCollaborationMode, update: AgentRelayThreadStateUpdate): Promise<AgentCollaborationMode>;
+  registerPlanDecision?(sessionKey: string, planTurnId: string): Promise<AgentRelayPlanDecisionState>;
+  claimPlanDecision?(sessionKey: string, planTurnId: string, action: "implement" | "continue"): Promise<AgentRelayPlanDecisionClaimResult>;
+  failPlanDecision?(sessionKey: string, planTurnId: string): Promise<AgentRelayPlanDecisionState>;
 }
 
 export interface AgentDriverCapabilities {

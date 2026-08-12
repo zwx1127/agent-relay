@@ -1,6 +1,6 @@
 import type { AgentTaskInput } from "./input.ts";
 import type { AgentThreadGoal } from "./thread.ts";
-import type { AgentRelayCommandState, AgentRelayThreadState } from "./control.ts";
+import type { AgentRelayCommandState, AgentRelayPlanDecisionState, AgentRelayThreadState } from "./control.ts";
 
 export type AgentOutputHandler = (event: AgentOutputEvent) => void | Promise<void>;
 export type AgentExitHandler = (event: AgentExitEvent) => void | Promise<void>;
@@ -18,6 +18,7 @@ export type AgentOutputEvent =
   | AgentServerRequestResolvedEvent
   | AgentUserMessageEvent
   | AgentRelayCommandStateEvent
+  | AgentRelayPlanDecisionStateEvent
   | AgentRelayThreadStateEvent
   | AgentRelayControlSnapshotEvent
   | AgentThreadLifecycleEvent;
@@ -36,6 +37,13 @@ export interface AgentRelayThreadStateEvent extends AgentRelayThreadState {
   threadRevision: number;
 }
 
+export interface AgentRelayPlanDecisionStateEvent extends AgentRelayPlanDecisionState {
+  type: "relay_plan_decision_state";
+  sessionKey: string;
+  gatewayEpoch: string;
+  threadRevision: number;
+}
+
 export interface AgentRelayControlSnapshotEvent {
   type: "relay_control_snapshot";
   sessionKey: string;
@@ -45,6 +53,7 @@ export interface AgentRelayControlSnapshotEvent {
   consistency: "live";
   threadState: AgentRelayThreadState;
   commands: AgentRelayCommandState[];
+  planDecisions?: AgentRelayPlanDecisionState[];
 }
 
 export interface AgentUserMessageEvent {
@@ -61,6 +70,9 @@ export interface AgentServerRequestResolvedEvent {
   type: "server_request_resolved";
   sessionKey: string;
   requestId: string | number;
+  threadId?: string;
+  turnId?: string;
+  requestMethod?: string;
 }
 
 /**
@@ -194,6 +206,7 @@ export interface AgentUserInputRequestEvent {
   type: "user_input_request";
   sessionKey: string;
   requestId: string | number;
+  threadId?: string;
   questions: AgentUserInputQuestion[];
   turnId?: string;
   itemId?: string;
@@ -210,6 +223,7 @@ export interface AgentApprovalRequestEvent {
   type: "approval_request";
   sessionKey: string;
   requestId: string | number;
+  threadId?: string;
   /** Raw provider method name, retained so adapters can support new approval methods before a type is added. */
   method: string;
   approvalKind: AgentApprovalKind;
@@ -224,6 +238,7 @@ export interface AgentMcpElicitationRequestEvent {
   type: "mcp_elicitation_request";
   sessionKey: string;
   requestId: string | number;
+  threadId?: string;
   serverName: string;
   mode: "form" | "url";
   message: string;

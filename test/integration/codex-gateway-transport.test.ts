@@ -56,7 +56,7 @@ describe("experimental Codex Gateway transport", () => {
           const params = message.params as Record<string, unknown> | undefined;
           const send = (result: unknown) => socket.send(JSON.stringify({ id, result }));
           if (method === "initialize") send({ userAgent: "codex-cli 0.145.0" });
-          else if (method === "agent-relay/control/hello") send({ version: 3, gatewayEpoch: "test-gateway" });
+          else if (method === "agent-relay/control/hello") send({ version: 4, gatewayEpoch: "test-gateway" });
           else if (method === "agent-relay/control/resync") {
             socket.send(JSON.stringify({
               method: "agent-relay/control/snapshot",
@@ -163,7 +163,8 @@ describe("experimental Codex Gateway transport", () => {
       approval: "on-request",
       developerInstructions: "relay developer instructions",
       baseInstructions: "relay base instructions",
-    }, (event) => {
+    }, async (event) => {
+      if (event.type === "user_input_request") await Bun.sleep(20);
       outputs.push(event as unknown as Record<string, unknown>);
     }, () => undefined);
 
@@ -204,8 +205,9 @@ describe("experimental Codex Gateway transport", () => {
       }));
       expect(outputs).not.toContainEqual(expect.objectContaining({ type: "user_message", input: expect.objectContaining({ text: "steer from IM" }) }));
       expect(outputs).toContainEqual(expect.objectContaining({ type: "user_input_request", requestId: "shared-question" }));
-      expect(outputs).toContainEqual({ type: "server_request_resolved", sessionKey: status.sessionKey, requestId: "shared-question" });
+      expect(outputs).toContainEqual(expect.objectContaining({ type: "server_request_resolved", sessionKey: status.sessionKey, requestId: "shared-question" }));
       expect(driver.getStatus(status.sessionKey)?.activeTurnId).toBe("active-turn");
+      expect(driver.getStatus(status.sessionKey)?.waitingForUserInput).toBe(false);
     } finally {
       server.stop(true);
     }
@@ -237,7 +239,7 @@ describe("experimental Codex Gateway transport", () => {
           const params = message.params as Record<string, unknown> | undefined;
           const send = (result: unknown) => socket.send(JSON.stringify({ id, result }));
           if (method === "initialize") send({ userAgent: "codex-cli 0.145.0" });
-          else if (method === "agent-relay/control/hello") send({ version: 3, gatewayEpoch: "test-gateway" });
+          else if (method === "agent-relay/control/hello") send({ version: 4, gatewayEpoch: "test-gateway" });
           else if (method === "agent-relay/control/resync") {
             socket.send(JSON.stringify({
               method: "agent-relay/control/snapshot",

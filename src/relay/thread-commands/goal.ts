@@ -1,7 +1,7 @@
 import type { ConversationId, MessageId } from "../../domain/ids.ts";
 import type { Logger } from "../../domain/logger.ts";
 import { parseChatScopeKey } from "../../domain/scope.ts";
-import { sessionKey } from "../../domain/session.ts";
+import { parseSessionKey, sessionKey } from "../../domain/session.ts";
 import type { AgentDriver, AgentSessionStatus, AgentThreadGoal, AgentThreadGoalStatus } from "../../ports/agent.ts";
 import type { EditMessageTextOptions, ImAdapter, SendMessageOptions } from "../../ports/im.ts";
 import type { RenderedTelegramText } from "../../presentation/telegram/text.ts";
@@ -36,6 +36,23 @@ export interface GoalCommandDeps {
 
 export class GoalCommandService {
   constructor(private readonly deps: GoalCommandDeps) {}
+
+  clearSession(sessionKeyValue: string): void {
+    this.deps.clearGoalReplyTarget(sessionKeyValue);
+  }
+
+  async syncExternal(sessionKeyValue: string, goal: AgentThreadGoal | null): Promise<void> {
+    const parsed = parseSessionKey(sessionKeyValue);
+    const status = this.deps.agent.getStatus(sessionKeyValue);
+    if (!parsed || !status?.running) return;
+    status.threadGoal = goal;
+    if (status.activeTurnId) {
+      await this.deps.refreshActivityContext(sessionKeyValue);
+      return;
+    }
+    await this.deps.retireControlCard(sessionKeyValue);
+    await this.sendGoalCard(parsed.scopeKey, sessionKeyValue, status, goal, formatGoalMessage(goal));
+  }
 
   async run(conversationId: ConversationId, args: string, userMessageId?: MessageId): Promise<void> {
     const { status, key } = await this.deps.commandSession(conversationId);
