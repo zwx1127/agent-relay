@@ -114,6 +114,50 @@ describe("CodexDriver server requests and recovery", () => {
     await driver.release(second.sessionKey);
   });
 
+  test("does not block an IM answer on its queued resolution presentation", async () => {
+    const fake = fakeCodexBin();
+    let releaseResolution!: () => void;
+    const resolutionBlocked = new Promise<void>((resolve) => { releaseResolution = resolve; });
+    let resolutionStarted!: () => void;
+    const started = new Promise<void>((resolve) => { resolutionStarted = resolve; });
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      async (event) => {
+        events.push(event);
+        if (event.type !== "server_request_resolved") return;
+        resolutionStarted();
+        await resolutionBlocked;
+      },
+      () => undefined,
+    );
+
+    const status = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd(), threadId: "thread-1" });
+    await driver.send(status.sessionKey, "ask");
+    await sleep(100);
+
+    const responding = driver.respond(status.sessionKey, 900, { answers: { mode: { answers: ["Fast"] } } });
+    try {
+      const returned = await Promise.race([
+        responding.then(() => true),
+        sleep(100).then(() => false),
+      ]);
+      expect(returned).toBe(true);
+      await started;
+      expect(driver.getStatus(status.sessionKey)?.waitingForUserInput).toBe(false);
+    } finally {
+      releaseResolution();
+    }
+    await responding;
+    await sleep(10);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "server_request_resolved",
+      sessionKey: status.sessionKey,
+      requestId: 900,
+    }));
+    await driver.release(status.sessionKey);
+  });
+
   test("terminal turn retires an unresolved interactive request for every IM scope", async () => {
     const fake = fakeCodexBin();
     const events: AgentOutputEvent[] = [];

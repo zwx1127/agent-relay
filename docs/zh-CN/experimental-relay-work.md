@@ -63,6 +63,7 @@ package 级入口为 `bun run gateway <command>`。不保留 `gateway-install`�
 
 - `local` 模式把普通 Codex 命令原样交给真实 CLI。
 - `gateway` 模式自动把交互式 TUI 和桌面 app-server 连接到 Gateway。用户只需正常运行 `codex`、`codex resume` 或 `codex fork`。
+- 对 Gateway TUI 入口，启动器会把命令调用目录作为工作根目录传给 Codex；显式 `-C`/`--cd` 优先。该行为只影响今后的新调用，已经记录在 Gateway 启动目录下的历史 thread 不会被重新归类。
 - 启动器安装期间，用户提供的 `--remote` 和远端认证选项始终被拒绝。启动器内部可以使用 Codex WebSocket 传输，但这不是暴露给用户的连接模式。
 - `gateway` 模式会拒绝无法加入共享 app-server、会创建独立 agent 或 server 的命令，包括 `exec`/`e`、`review`、`mcp-server`、`remote-control`、`exec-server` 和 app-server `daemon`/`proxy`。帮助和管理命令仍会透传。停止 Gateway 后，新进程回到 local 模式，这些命令恢复正常。
 

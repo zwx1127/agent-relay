@@ -64,7 +64,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const rewritten = rewriteCodexRemoteArgs(args, gateway.url);
+  const rewritten = rewriteCodexRemoteArgs(args, gateway.url, process.cwd());
   await runRealCodex(config.realCodexBin, rewritten);
 }
 
@@ -73,16 +73,32 @@ export function isCodexAppServerProxyInvocation(args: string[]): boolean {
   return command?.name === "app-server" && !appServerSubcommand(args, command.index);
 }
 
-export function rewriteCodexRemoteArgs(args: string[], gatewayUrl: string): string[] {
+export function rewriteCodexRemoteArgs(args: string[], gatewayUrl: string, invocationCwd: string): string[] {
   assertNoUserRemoteOption(args);
   const rewritten = [...args];
   const command = topLevelCommand(args);
+  const cwdArgs = hasExplicitCwdOption(args) ? [] : ["-C", invocationCwd];
   if (command && CODEX_REMOTE_TUI_COMMANDS.has(command.name)) {
-    rewritten.splice(command.index + 1, 0, "--remote", gatewayUrl);
+    rewritten.splice(command.index + 1, 0, "--remote", gatewayUrl, ...cwdArgs);
   } else {
-    rewritten.unshift("--remote", gatewayUrl);
+    rewritten.unshift("--remote", gatewayUrl, ...cwdArgs);
   }
   return rewritten;
+}
+
+function hasExplicitCwdOption(args: string[]): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--") break;
+    if (
+      arg === "-C"
+      || arg === "--cd"
+      || arg.startsWith("--cd=")
+      || (arg.startsWith("-C") && arg.length > 2)
+    ) return true;
+    if (ROOT_OPTIONS_WITH_VALUE.has(arg)) index += 1;
+  }
+  return false;
 }
 
 export function assertNoUserRemoteOption(args: string[]): void {

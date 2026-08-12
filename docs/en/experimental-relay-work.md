@@ -63,6 +63,7 @@ The launcher reads durable mode on every new invocation:
 
 - In `local` mode it delegates normal Codex commands to the real CLI unchanged.
 - In `gateway` mode interactive TUI entrypoints and the Desktop app-server connection use Gateway automatically. Users run `codex`, `codex resume`, and `codex fork` normally.
+- For Gateway TUI entrypoints, the launcher forwards the directory where the command was invoked as the working root. An explicit `-C`/`--cd` takes precedence. This applies to new invocations only; threads previously recorded under the Gateway startup directory are not reclassified.
 - User-supplied `--remote` and remote-auth options are rejected while the launcher is installed. The launcher may use Codex's WebSocket transport internally; it is not a public connection mode in relay work.
 - In `gateway` mode, commands that would create an independent agent or server are rejected: `exec`/`e`, `review`, `mcp-server`, `remote-control`, `exec-server`, and app-server `daemon`/`proxy`. Help and non-agent management commands still pass through. Stopping Gateway returns new processes to local mode, where these commands work normally.
 

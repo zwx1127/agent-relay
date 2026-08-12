@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CodexDriver } from "../../src/providers/agents/codex/driver.ts";
 import { writeRelayWorkControl } from "../../src/gateway/control.ts";
-import { cleanupCodexHarness, createCodexTempDir, fakeCodexBin } from "../support/codex-app-server-harness.ts";
+import { RELAY_GATEWAY_PROTOCOL_VERSION } from "../../src/gateway/state.ts";
+import { cleanupCodexHarness, createCodexTempDir, fakeCodexBin, fakeCodexCommandPath, writeNodeCommand } from "../support/codex-app-server-harness.ts";
 
 afterEach(cleanupCodexHarness);
 
@@ -35,6 +36,53 @@ describe("experimental Codex Gateway transport", () => {
     const unavailable = run([]);
     expect(unavailable.status).not.toBe(0);
     expect(unavailable.stderr).toContain("unexpected exit");
+  });
+
+  test("launcher forwards its invocation directory to Gateway TUI entrypoints", () => {
+    const root = createCodexTempDir("agent-relay-launcher-cwd-");
+    const invocationCwd = join(root, "project with spaces");
+    const explicitCwd = join(root, "explicit project");
+    const controlPath = join(root, "control.json");
+    const gatewayStatePath = join(root, "gateway-state.json");
+    const configPath = join(root, "launcher.json");
+    const argsPath = join(root, "captured-args.json");
+    const realCodexBin = fakeCodexCommandPath(root);
+    const gatewayUrl = "ws://127.0.0.1:18765";
+    mkdirSync(invocationCwd, { recursive: true });
+    mkdirSync(explicitCwd, { recursive: true });
+    writeNodeCommand(realCodexBin, `#!/usr/bin/env node
+const fs = require("fs");
+fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }));
+`);
+    writeFileSync(configPath, JSON.stringify({ experimental: true, controlStatePath: controlPath, realCodexBin }));
+    writeFileSync(gatewayStatePath, JSON.stringify({
+      experimental: true,
+      protocolVersion: RELAY_GATEWAY_PROTOCOL_VERSION,
+      pid: process.pid,
+      appServerPid: process.pid,
+      url: gatewayUrl,
+      startedAt: Date.now(),
+    }));
+    writeRelayWorkControl("gateway", gatewayStatePath, controlPath);
+    const run = (args: string[]) => spawnSync(process.execPath, [resolve("src/gateway/codex-launcher.ts"), ...args], {
+      cwd: invocationCwd,
+      encoding: "utf8",
+      env: { ...process.env, AGENT_RELAY_WORK_LAUNCHER_CONFIG: configPath },
+    });
+
+    const automatic = run([]);
+    expect(automatic.status).toBe(0);
+    expect(JSON.parse(readFileSync(argsPath, "utf8"))).toEqual({
+      args: ["--remote", gatewayUrl, "-C", invocationCwd],
+      cwd: invocationCwd,
+    });
+
+    const explicit = run(["--cd", explicitCwd]);
+    expect(explicit.status).toBe(0);
+    expect(JSON.parse(readFileSync(argsPath, "utf8"))).toEqual({
+      args: ["--remote", gatewayUrl, "--cd", explicitCwd],
+      cwd: invocationCwd,
+    });
   });
 
   test("restores current active-turn state and forwards only notifications received while connected", async () => {

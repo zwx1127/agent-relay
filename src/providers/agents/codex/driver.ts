@@ -828,7 +828,19 @@ export class CodexDriver implements AgentDriver {
         request.resolved = false;
         throw error;
       }
-      await this.finishInteractiveRequest(requestId, request);
+      // A Relay IM callback runs inside its per-conversation queue. Resolution
+      // delivery re-enters that same queue, so awaiting presentation here would
+      // make the callback wait on itself forever. The provider response is
+      // already committed; clear waiting state synchronously and let IM scopes
+      // converge after the callback releases the queue.
+      void this.finishInteractiveRequest(requestId, request).catch((error) => {
+        this.logger.warn("codex.server_request_resolution_finish_failed", {
+          session_key: sessionKey,
+          thread_id: request.threadId,
+          request_id: String(requestId),
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      });
       return;
     }
     if (requestsWithId.length > 0) throw new Error("This Codex request does not belong to the current Relay scope.");
