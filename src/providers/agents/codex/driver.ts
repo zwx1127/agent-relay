@@ -609,10 +609,12 @@ export class CodexDriver implements AgentDriver {
         source,
       });
     }
-    if (matchesActive) {
+    const terminalIsCurrent = !hasDifferentActive && (matchesActive || matchesLatest || hadNoLatest);
+    if (terminalIsCurrent) {
       running.status.activeTurnId = undefined;
-      running.status.waitingForApproval = false;
-      running.status.waitingForUserInput = false;
+      this.clearThreadWaitingState(threadId);
+      this.resolvedWaitingFences.delete(threadId);
+      await this.finishTerminalInteractiveRequests(threadId, completed.turnId);
     }
     if (snapshot && !hasDifferentActive && (matchesActive || matchesLatest || hadNoLatest)) {
       running.status.latestTurn = snapshot;
@@ -2474,6 +2476,17 @@ export class CodexDriver implements AgentDriver {
       if (request.resolutionRetryTimer) clearTimeout(request.resolutionRetryTimer);
       this.pendingInteractiveRequests.delete(mapKey);
     }, 5 * 60_000).unref();
+  }
+
+  private async finishTerminalInteractiveRequests(threadId: string, turnId: string | undefined): Promise<void> {
+    for (const [mapKey, request] of [...this.pendingInteractiveRequests]) {
+      if (request.threadId !== threadId) continue;
+      if (turnId && request.turnId && request.turnId !== turnId) continue;
+      request.resolved = true;
+      await this.finishInteractiveRequest(request.requestId, request);
+      if (request.resolutionRetryTimer) clearTimeout(request.resolutionRetryTimer);
+      this.pendingInteractiveRequests.delete(mapKey);
+    }
   }
 
   private queueGlobalNotice(notice: PendingGlobalNotice): void {

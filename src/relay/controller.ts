@@ -266,6 +266,7 @@ export class RelayController {
       cancelActiveTasks: (sessionKeyValue) => this.cancelActiveTasks(sessionKeyValue),
       failActiveTasks: (sessionKeyValue) => this.failActiveTasks(sessionKeyValue),
       currentThreadId: (sessionKeyValue) => deps.agent.getStatus(sessionKeyValue)?.threadId ?? deps.store.getSession(sessionKeyValue)?.thread_id ?? undefined,
+      currentActiveTurnId: (sessionKeyValue) => deps.agent.getStatus(sessionKeyValue)?.activeTurnId,
       resetSessionPresentation: (sessionKeyValue, options) => this.resetSessionPresentation(sessionKeyValue, options),
     });
     this.capabilityService = new RelayCapabilityService({

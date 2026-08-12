@@ -114,6 +114,39 @@ describe("CodexDriver server requests and recovery", () => {
     await driver.release(second.sessionKey);
   });
 
+  test("terminal turn retires an unresolved interactive request for every IM scope", async () => {
+    const fake = fakeCodexBin();
+    const events: AgentOutputEvent[] = [];
+    const driver = new CodexDriver(
+      { codexBin: fake, sandbox: "workspace-write", approval: "on-request" },
+      (event) => { events.push(event); },
+      () => undefined,
+    );
+
+    const first = await driver.start({ conversationId: 1, workspaceName: "demo", workspacePath: process.cwd(), threadId: "thread-1" });
+    const second = await driver.start({ conversationId: 2, workspaceName: "demo", workspacePath: process.cwd(), threadId: "thread-1" });
+    await driver.send(first.sessionKey, "ask then complete");
+    await sleep(150);
+
+    expect(events.filter((event) => event.type === "user_input_request").map((event) => event.sessionKey)).toEqual([
+      first.sessionKey,
+      second.sessionKey,
+    ]);
+    expect(events.filter((event) => event.type === "server_request_resolved").map((event) => event.sessionKey)).toEqual([
+      first.sessionKey,
+      second.sessionKey,
+    ]);
+    expect(events.filter((event) => event.type === "turn_completed").map((event) => event.sessionKey)).toEqual([
+      first.sessionKey,
+      second.sessionKey,
+    ]);
+    expect(driver.getStatus(first.sessionKey)?.activeTurnId).toBeUndefined();
+    expect(driver.getStatus(first.sessionKey)?.waitingForUserInput).toBe(false);
+    expect(driver.getStatus(second.sessionKey)?.waitingForUserInput).toBe(false);
+    await driver.release(first.sessionKey);
+    await driver.release(second.sessionKey);
+  });
+
   test("delivers a concurrently duplicated server request once per shared Relay scope", async () => {
     const fake = fakeCodexBin();
     const events: AgentOutputEvent[] = [];

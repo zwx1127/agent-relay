@@ -97,6 +97,9 @@ rl.on("line", (line) => {
       send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
     } else if (inputText === "ask") {
       send({ id: 900, method: "item/tool/requestUserInput", params: { threadId, turnId, itemId: "item-1", questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [{ label: "Fast", description: "Quick" }] }] } });
+    } else if (inputText === "ask then complete") {
+      send({ id: 905, method: "item/tool/requestUserInput", params: { threadId, turnId, itemId: "terminal-item", questions: [{ id: "mode", header: "Mode", question: "Pick one.", options: [{ label: "Fast", description: "Quick" }] }] } });
+      setTimeout(() => send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } }), 20);
     } else if (inputText === "ask duplicate") {
       send({ id: 904, method: "item/tool/requestUserInput", params: { threadId, turnId, itemId: "duplicate-item", questions: [{ id: "mode", header: "Mode", question: "Pick the first question.", options: [{ label: "Fast", description: "Quick" }] }] } });
       send({ id: 904, method: "item/tool/requestUserInput", params: { threadId, turnId, itemId: "duplicate-item", questions: [{ id: "mode", header: "Mode", question: "Changed duplicate question.", options: [{ label: "Slow", description: "Changed" }] }] } });

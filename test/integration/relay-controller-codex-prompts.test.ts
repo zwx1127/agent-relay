@@ -210,6 +210,71 @@ describe("relay controller Codex prompts", () => {
     expect(latestActivity.text).not.toContain("Waiting for input");
   });
 
+  test("completed Plan turn cannot be stuck or reopened by stale IM waiting state", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    await router.handle(textMessage("/plan design this"));
+
+    const request = {
+      type: "user_input_request" as const,
+      sessionKey: "codex:1:demo",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      requestId: 781,
+      questions: [{
+        id: "choice",
+        header: "Mode",
+        question: "Pick one.",
+        options: [{ label: "Fast", description: "Low detail" }],
+      }],
+    };
+    await router.handleAgentOutput({
+      type: "activity",
+      sessionKey: request.sessionKey,
+      threadId: request.threadId,
+      turnId: request.turnId,
+      itemId: "reasoning-terminal",
+      activity: { kind: "reasoning", summary: "Preparing the plan" },
+    });
+    await waitForStreamFlush();
+    const activityMessage = adapter.sent.find((message) => message.text.includes("Codex") && message.text.includes("Working"))!;
+    await router.handleAgentOutput(request);
+
+    const prompt = adapter.sent.at(-1)!;
+    const fast = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
+    await router.handle(callbackMessage(fast.callback_data, 7, "cb-fast-terminal", prompt.messageId));
+    const submit = adapter.edited.at(-1)!.options.replyMarkup!.inline_keyboard.flat().find((button) => button.text === "Submit")!;
+    await router.handle(callbackMessage(submit.callback_data, 7, "cb-submit-terminal", prompt.messageId));
+
+    const status = agent.getStatus(request.sessionKey)!;
+    status.activeTurnId = undefined;
+    status.latestTurn = { id: request.turnId, status: "completed", activities: [] };
+    await router.handleAgentOutput({
+      type: "turn_completed",
+      sessionKey: request.sessionKey,
+      turnId: request.turnId,
+      status: "completed",
+    });
+
+    const completedCard = adapter.edited.filter((message) => message.options.messageId === activityMessage.messageId).at(-1)!;
+    expect(completedCard.text).toContain("Completed");
+    expect(store.getTask(1)?.status).toBe("done");
+    expect(store.latestPendingPrompt("1", ["codex_user_input"])).toBeUndefined();
+
+    const sentBeforeLateRequest = adapter.sent.length;
+    await router.handleAgentOutput({ ...request, requestId: 782 });
+    expect(adapter.sent).toHaveLength(sentBeforeLateRequest);
+    expect(adapter.edited.filter((message) => message.options.messageId === activityMessage.messageId).at(-1)?.text).toContain("Completed");
+
+    status.waitingForUserInput = true;
+    await router.handle(textMessage("continue working"));
+    expect(agent.sent.at(-1)).toEqual(expect.objectContaining({ key: request.sessionKey, text: "continue working" }));
+    expect(adapter.sent.at(-1)?.text).not.toContain("Codex is waiting for your answer.");
+  });
+
   test("plan option question can add a note to the selected answer", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");

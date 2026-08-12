@@ -322,6 +322,11 @@ export class TaskCoordinator {
   }
 
   async sendWaitingPromptNotice(conversationId: ConversationId, status: AgentSessionStatus): Promise<boolean> {
+    // Waiting flags are a Relay projection of an app-server request. A terminal
+    // turn may arrive before the matching resolution notification, so a stale
+    // flag must never prevent the next IM message from starting a new turn.
+    // Preserve the brief startup case where waiting arrives before the turn id.
+    if (!status.activeTurnId && status.latestTurn && status.latestTurn.status !== "inProgress") return false;
     if (status.waitingForUserInput) {
       await this.deps.sendRendered(conversationId, messageWithTitle("Codex is waiting for your answer.", "Open the latest question card or reply to it. Direct messages are not submitted as answers; use Interrupt on the latest activity card if the question expired."));
       return true;

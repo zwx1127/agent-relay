@@ -42,6 +42,7 @@ export interface RelayAgentEventRouterDeps {
     handleApprovalRequest(event: AgentApprovalRequestEvent): Promise<boolean>;
     handleMcpElicitationRequest(event: AgentMcpElicitationRequestEvent): Promise<boolean>;
     handleRequestResolved(event: AgentServerRequestResolvedEvent): Promise<void>;
+    clearForSession(sessionKey: string): void;
   };
   finalizeOutput(sessionKey: string): Promise<void>;
   sendPlanReadyPrompt(sessionKey: string, turnId?: string): Promise<void>;
@@ -59,6 +60,7 @@ export interface RelayAgentEventRouterDeps {
   cancelActiveTasks(sessionKey: string): Promise<void>;
   failActiveTasks(sessionKey: string): Promise<void>;
   currentThreadId(sessionKey: string): string | undefined;
+  currentActiveTurnId(sessionKey: string): string | undefined;
   resetSessionPresentation(sessionKey: string, options?: { deletePages?: boolean }): Promise<void>;
 }
 
@@ -73,21 +75,25 @@ export class RelayAgentEventRouter {
   private readonly sharedCommandCards = new Map<string, SharedCommandCardState>();
   private readonly sharedCommandRevisions = new Map<string, number>();
   private readonly relaySnapshotRevisions = new Map<string, { gatewayEpoch: string; revision: number }>();
+  private readonly terminalTurns = new Map<string, number>();
 
   constructor(private readonly deps: RelayAgentEventRouterDeps) {}
 
   async handle(event: AgentOutputEvent): Promise<boolean> {
     switch (event.type) {
       case "activity":
+        if (this.isTerminalTurn(event.sessionKey, event.turnId)) return true;
         await this.deps.activity.handle(event);
         if (event.activity.kind === "goal") await this.deps.handleSharedGoalState(event.sessionKey, event.activity.goal);
         return true;
       case "turn_stalled":
+        if (this.isTerminalTurn(event.sessionKey, event.turnId)) return true;
         if (this.deps.currentThreadId(event.sessionKey) === event.threadId) {
           await this.deps.activity.setPhase(event.sessionKey, "stalled", event.detail);
         }
         return true;
       case "turn_progressed":
+        if (this.isTerminalTurn(event.sessionKey, event.turnId)) return true;
         if (this.deps.currentThreadId(event.sessionKey) === event.threadId) {
           await this.deps.activity.setPhase(event.sessionKey, "working");
         }
@@ -116,12 +122,15 @@ export class RelayAgentEventRouter {
         await this.handleTurnCompleted(event);
         return true;
       case "user_input_request":
+        if (this.isTerminalTurn(event.sessionKey, event.turnId)) return true;
         await this.blockForPrompt(event, "waitingForInput", () => this.deps.prompts.handleUserInputRequest(event));
         return true;
       case "approval_request":
+        if (this.isTerminalTurn(event.sessionKey, event.turnId)) return true;
         await this.blockForPrompt(event, "waitingForApproval", () => this.deps.prompts.handleApprovalRequest(event));
         return true;
       case "mcp_elicitation_request":
+        if (this.isTerminalTurn(event.sessionKey, event.turnId)) return true;
         await this.blockForPrompt(event, "waitingForInput", () => this.deps.prompts.handleMcpElicitationRequest(event));
         return true;
       case "server_request_resolved":
@@ -307,6 +316,7 @@ export class RelayAgentEventRouter {
 
   private async handleRequestResolved(event: AgentServerRequestResolvedEvent): Promise<void> {
     await this.deps.prompts.handleRequestResolved(event);
+    if (this.isTerminalTurn(event.sessionKey, event.turnId)) return;
     if (event.threadId && this.deps.currentThreadId(event.sessionKey) !== event.threadId) return;
     await this.deps.activity.setPhase(event.sessionKey, "working");
     await this.deps.markActiveTask(event.sessionKey, "running", event.turnId);
@@ -314,15 +324,19 @@ export class RelayAgentEventRouter {
 
   private async handleTurnCompleted(event: AgentTurnCompletedEvent): Promise<void> {
     const turnStatus = event.status ?? "completed";
+    this.rememberTerminalTurn(event.sessionKey, event.turnId);
+    const activeTurnId = this.deps.currentActiveTurnId(event.sessionKey);
+    const terminalIsCurrent = !event.turnId || !activeTurnId || activeTurnId === event.turnId;
     this.deps.logger.info("router.turn_completed", {
       session_key: event.sessionKey,
       turn_id: event.turnId,
       status: turnStatus,
       duration_ms: event.durationMs,
     });
+    if (terminalIsCurrent) this.deps.prompts.clearForSession(event.sessionKey);
     await this.deps.activity.finalize(event.sessionKey, event.turnId, turnStatus, event.error?.message, event.durationMs);
     await this.deps.finalizeOutput(event.sessionKey);
-    if (turnStatus === "completed") await this.deps.sendPlanReadyPrompt(event.sessionKey, event.turnId);
+    if (terminalIsCurrent && turnStatus === "completed") await this.deps.sendPlanReadyPrompt(event.sessionKey, event.turnId);
     if (turnStatus === "failed") {
       const parsed = parseSessionKey(event.sessionKey);
       if (parsed) {
@@ -336,6 +350,22 @@ export class RelayAgentEventRouter {
       event.turnId,
       turnStatus === "completed" ? "done" : turnStatus === "interrupted" ? "interrupted" : "failed",
     );
+  }
+
+  private isTerminalTurn(sessionKey: string, turnId: string | undefined): boolean {
+    return Boolean(turnId && this.terminalTurns.has(`${sessionKey}\0${turnId}`));
+  }
+
+  private rememberTerminalTurn(sessionKey: string, turnId: string | undefined): void {
+    if (!turnId) return;
+    const key = `${sessionKey}\0${turnId}`;
+    this.terminalTurns.delete(key);
+    this.terminalTurns.set(key, Date.now());
+    while (this.terminalTurns.size > 2_000) {
+      const oldest = this.terminalTurns.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.terminalTurns.delete(oldest);
+    }
   }
 
   private async blockForPrompt(
