@@ -32,9 +32,13 @@ export interface ActivitySessionContext {
   collaborationMode: AgentCollaborationMode;
   goal: AgentThreadGoal | null | undefined;
   activeTurnId?: string;
+  turnSourceLabel?: string;
+  turnStartedAt?: number;
+  interruptSourceLabel?: string;
+  interruptAt?: number;
 }
 
-export type ActivityPhase = "idle" | "working" | "stalled" | "waitingForInput" | "waitingForApproval" | "done" | "interrupted" | "failed";
+export type ActivityPhase = "idle" | "working" | "stalled" | "waitingForInput" | "waitingForApproval" | "interrupting" | "done" | "interrupted" | "failed";
 
 interface ActivityItemState {
   key: string;
@@ -64,6 +68,9 @@ interface ActivityState {
   dirtySince?: number;
   revision: number;
   mode: AgentCollaborationMode;
+  sourceLabel?: string;
+  interruptSourceLabel?: string;
+  interruptAt?: number;
   goalTurn: boolean;
   goal: AgentThreadGoal | null | undefined;
   reasoning?: ReasoningState;
@@ -272,14 +279,15 @@ export class ActivityStreamer {
     await this.finish(state);
   }
 
-  async finalize(sessionKey: string, turnId: string | undefined, status: AgentTurnStatus, error?: string, durationMs?: number): Promise<void> {
+  async finalize(sessionKey: string, turnId: string | undefined, status: AgentTurnStatus, error?: string, durationMs?: number): Promise<boolean> {
     const state = this.states.get(sessionKey);
-    if (!state || (turnId && turnId !== state.turnId)) return;
+    if (!state || (turnId && turnId !== state.turnId)) return false;
     state.phase = status === "completed" ? "done" : status === "interrupted" ? "interrupted" : "failed";
     state.error = error;
     state.durationMs = durationMs;
     this.markDirty(state);
     await this.finish(state);
+    return true;
   }
 
   async terminate(
@@ -297,7 +305,7 @@ export class ActivityStreamer {
     await this.finish(state);
   }
 
-  async setPhase(sessionKey: string, phase: "working" | "stalled" | "waitingForInput" | "waitingForApproval", detail?: string): Promise<void> {
+  async setPhase(sessionKey: string, phase: "working" | "stalled" | "waitingForInput" | "waitingForApproval" | "interrupting", detail?: string): Promise<void> {
     const state = this.states.get(sessionKey);
     if (!state) return;
     const context = this.deps.getSessionContext(sessionKey);
@@ -314,9 +322,7 @@ export class ActivityStreamer {
     if (!state) return;
     const context = this.deps.getSessionContext(sessionKey);
     if (state.threadId && context.threadId && state.threadId !== context.threadId) return;
-    state.mode = context.collaborationMode;
-    state.threadName = context.threadName ?? state.threadName;
-    if (context.goal !== undefined) state.goal = context.goal;
+    syncActivityContext(state, context);
     this.markDirty(state);
     await this.schedule(state, true);
   }
@@ -373,10 +379,13 @@ export class ActivityStreamer {
         ...(threadId ? { threadId } : {}),
         ...(context.threadName ? { threadName: context.threadName } : {}),
         turnId,
-        startedAt: now,
+        startedAt: context.turnStartedAt ?? now,
         lastFlushAt: now,
         revision: 0,
         mode: context.collaborationMode,
+        ...(context.turnSourceLabel ? { sourceLabel: context.turnSourceLabel } : {}),
+        ...(context.interruptSourceLabel ? { interruptSourceLabel: context.interruptSourceLabel } : {}),
+        ...(context.interruptAt !== undefined ? { interruptAt: context.interruptAt } : {}),
         goalTurn: replyTarget.goalTurn,
         goal: context.goal,
         items: [],
@@ -545,9 +554,7 @@ export class ActivityStreamer {
     state.timer = undefined;
     const context = this.deps.getSessionContext(state.sessionKey);
     if (state.threadId && context.threadId && state.threadId !== context.threadId) return;
-    state.mode = context.collaborationMode;
-    state.threadName = context.threadName ?? state.threadName;
-    if (context.goal !== undefined) state.goal = context.goal;
+    syncActivityContext(state, context);
     const renderedRevision = state.revision;
     const rendered = renderActivity(state);
     const actions = this.controlsFor(state, context);
@@ -741,6 +748,10 @@ function buildActivity(state: ActivityState, options: ActivityRenderOptions): Re
     { text: contextLine(state) },
     { text: goalLine(state.goal) },
   ];
+  if (state.sourceLabel) lines.push({ text: `Source ${truncateDisplay(normalizeText(state.sourceLabel), ACTIVITY_ROW_COLUMNS - 8)} · ${formatRelayTime(state.startedAt)}` });
+  if ((state.phase === "interrupting" || state.phase === "interrupted") && state.interruptSourceLabel) {
+    lines.push({ text: `Interrupt ${truncateDisplay(normalizeText(state.interruptSourceLabel), ACTIVITY_ROW_COLUMNS - 11)} · ${formatRelayTime(state.interruptAt)}` });
+  }
   if (state.phaseDetail) lines.push({ text: truncateDisplay(normalizeText(state.phaseDetail), ACTIVITY_ROW_COLUMNS) });
   if (state.error) lines.push({ text: `Error · ${truncateDisplay(normalizeText(state.error), ACTIVITY_ROW_COLUMNS * options.errorRows - 8)}` });
 
@@ -800,6 +811,7 @@ function header(state: ActivityState): string {
     stalled: ["!", "Stalled"],
     waitingForInput: ["●", "Waiting for input"],
     waitingForApproval: ["●", "Waiting for approval"],
+    interrupting: ["■", "Interrupting"],
     done: ["✓", "Completed"],
     interrupted: ["■", "Interrupted"],
     failed: ["×", "Failed"],
@@ -818,6 +830,19 @@ function contextLine(state: ActivityState): string {
   const suffix = ` · Mode ${mode} · ${duration}`;
   const labelBudget = Math.max(4, ACTIVITY_ROW_COLUMNS - displayWidth("Chat ") - displayWidth(suffix));
   return `Chat ${truncateDisplay(threadLabel(state), labelBudget)}${suffix}`;
+}
+
+function syncActivityContext(state: ActivityState, context: ActivitySessionContext): void {
+  state.threadName = context.threadName ?? state.threadName;
+  if (context.goal !== undefined) state.goal = context.goal;
+  if (context.turnSourceLabel) state.sourceLabel = context.turnSourceLabel;
+  if (context.turnStartedAt !== undefined) state.startedAt = context.turnStartedAt;
+  if (context.interruptSourceLabel) state.interruptSourceLabel = context.interruptSourceLabel;
+  if (context.interruptAt !== undefined) state.interruptAt = context.interruptAt;
+}
+
+function formatRelayTime(value: number | undefined): string {
+  return value === undefined ? "time unknown" : new Date(value).toISOString().replace(/\.000Z$/u, "Z");
 }
 
 function threadLabel(state: ActivityState): string {

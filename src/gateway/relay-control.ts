@@ -1,13 +1,18 @@
 import { randomUUID } from "node:crypto";
 import type {
+  AgentRelayActiveTurnState,
   AgentCollaborationMode,
   AgentRelayCommandKind,
   AgentRelayCommandMetadata,
   AgentRelayCommandPhase,
   AgentRelayCommandState,
+  AgentRelayLatestTurnState,
   AgentRelayPlanDecisionPhase,
   AgentRelayPlanDecisionState,
+  AgentRelayStateSource,
   AgentRelayThreadState,
+  AgentRelayThreadStatus,
+  AgentRelayWaitingOn,
 } from "../ports/agent.ts";
 import {
   RELAY_CONTROL_COMMAND_METHOD,
@@ -46,6 +51,8 @@ const ACTIVE_LIMIT_PER_THREAD = 100;
 const TERMINAL_LIMIT_PER_THREAD = 100;
 const SNAPSHOT_TERMINAL_LIMIT = 20;
 const PLAN_IMPLEMENT_START_TIMEOUT_MS = 30_000;
+const MODE_RESERVATION_TTL_MS = 10_000;
+const PENDING_TURN_TTL_MS = 30_000;
 
 export interface RelayControlClientData {
   id: string;
@@ -78,10 +85,34 @@ interface InternalPlanDecision extends AgentRelayPlanDecisionState {
 interface PendingModeUpdate {
   threadId: string;
   mode: "default" | "plan";
+  source: AgentRelayStateSource;
+  requestedAt: number;
+  method: "thread/settings/update" | "turn/start";
 }
 
-interface PendingModeStart extends PendingModeUpdate {
+interface PendingModeReservation {
+  threadId: string;
+  mode: "default" | "plan";
+  clientId: string;
   createdAt: number;
+}
+
+interface PendingTurnStart {
+  threadId: string;
+  mode: "default" | "plan";
+  source: AgentRelayStateSource;
+  requestedAt: number;
+}
+
+interface PendingThreadSnapshot {
+  threadId?: string;
+}
+
+interface PendingInterrupt {
+  threadId: string;
+  turnId?: string;
+  source: AgentRelayStateSource;
+  requestedAt: number;
 }
 
 interface RecentNotification {
@@ -102,7 +133,14 @@ export class GatewayRelayControl {
   private readonly pendingByRequest = new Map<string, string>();
   private readonly commandByTurn = new Map<string, string>();
   private readonly pendingModesByRequest = new Map<string, PendingModeUpdate>();
-  private readonly pendingModeStartsByThread = new Map<string, PendingModeStart>();
+  private readonly pendingModesByThread = new Map<string, PendingModeUpdate>();
+  private readonly modeReservationsByThread = new Map<string, PendingModeReservation>();
+  private readonly pendingTurnStartsByRequest = new Map<string, PendingTurnStart>();
+  private readonly pendingTurnStartsByThread = new Map<string, PendingTurnStart>();
+  private readonly pendingSnapshotsByRequest = new Map<string, PendingThreadSnapshot>();
+  private readonly pendingInterruptsByRequest = new Map<string, PendingInterrupt>();
+  private readonly pendingInterruptsByThread = new Map<string, PendingInterrupt>();
+  private readonly turnSources = new Map<string, Pick<AgentRelayActiveTurnState, "source" | "collaborationMode" | "startedAt">>();
   private readonly threadStates = new Map<string, AgentRelayThreadState>();
   private readonly planDecisions = new Map<string, InternalPlanDecision>();
   private readonly planDecisionKeysByThread = new Map<string, string[]>();
@@ -144,13 +182,77 @@ export class GatewayRelayControl {
     const params = asRecord(message.params);
     if (!method) return { handled: false, message };
 
-    const explicitMode = explicitCollaborationMode(params);
-    if (explicitMode && isRequest(message)) {
-      this.pendingModesByRequest.set(requestKey(client.data.id, message.id), { threadId: explicitMode.threadId, mode: explicitMode.mode });
-      if (method === "turn/start") this.pendingModeStartsByThread.set(explicitMode.threadId, { ...explicitMode, createdAt: Date.now() });
-      this.setThreadMode(explicitMode.threadId, explicitMode.mode, false);
+    const requestThreadId = getString(params, "threadId");
+    if (method === "turn/start" && isRequest(message) && requestThreadId
+      && (this.modeReservation(requestThreadId) || this.pendingModesByThread.has(requestThreadId))) {
+      this.sendError(client, message.id, -32000, "A collaboration mode update is already in progress.");
+      return { handled: true };
     }
-    if (method === "turn/start" && isRequest(message)) this.bindPlanImplementationRequest(client, message, params);
+
+    const explicitMode = explicitCollaborationMode(params);
+    if (explicitMode && isRequest(message) && (method === "thread/settings/update" || method === "turn/start")) {
+      const current = this.threadState(explicitMode.threadId);
+      if (current.threadStatus !== "idle" || this.pendingTurnStart(explicitMode.threadId)) {
+        this.sendModeBusyError(client, message.id, current.threadStatus === "idle" ? "active" : current.threadStatus);
+        return { handled: true };
+      }
+      const reservation = this.modeReservation(explicitMode.threadId);
+      const inFlightMode = this.pendingModesByThread.get(explicitMode.threadId);
+      if (method === "thread/settings/update" && inFlightMode) {
+        this.sendError(client, message.id, -32000, "Another collaboration mode update is already in progress.");
+        return { handled: true };
+      }
+      if (method === "thread/settings/update" && reservation
+        && (reservation.clientId !== client.data.id || reservation.mode !== explicitMode.mode)) {
+        this.sendError(client, message.id, -32000, "Another collaboration mode update is already in progress.");
+        return { handled: true };
+      }
+      if (method === "thread/settings/update") this.modeReservationsByThread.delete(explicitMode.threadId);
+      const pendingMode: PendingModeUpdate = {
+        ...explicitMode,
+        source: stateSource(client.data.name),
+        requestedAt: Date.now(),
+        method,
+      };
+      const key = requestKey(client.data.id, message.id);
+      this.pendingModesByRequest.set(key, pendingMode);
+      this.pendingModesByThread.set(explicitMode.threadId, pendingMode);
+    }
+    if (method === "turn/start" && isRequest(message)) {
+      const threadId = getString(params, "threadId");
+      if (threadId) {
+        const pendingStart: PendingTurnStart = {
+          threadId,
+          mode: explicitMode?.mode ?? this.threadState(threadId).collaborationMode,
+          source: stateSource(client.data.name),
+          requestedAt: Date.now(),
+        };
+        const key = requestKey(client.data.id, message.id);
+        this.pendingTurnStartsByRequest.set(key, pendingStart);
+        this.pendingTurnStartsByThread.set(threadId, pendingStart);
+      }
+      this.bindPlanImplementationRequest(client, message, params);
+    }
+    if (method === "turn/interrupt" && isRequest(message)) {
+      const threadId = getString(params, "threadId");
+      if (threadId) {
+        const pendingInterrupt: PendingInterrupt = {
+          threadId,
+          ...(getString(params, "turnId") ? { turnId: getString(params, "turnId") } : {}),
+          source: stateSource(client.data.name),
+          requestedAt: Date.now(),
+        };
+        const key = requestKey(client.data.id, message.id);
+        this.pendingInterruptsByRequest.set(key, pendingInterrupt);
+        this.pendingInterruptsByThread.set(threadId, pendingInterrupt);
+        this.requestTurnInterrupt(pendingInterrupt);
+      }
+    }
+    if (isRequest(message) && (method === "thread/start" || method === "thread/resume" || method === "thread/fork" || method === "thread/read")) {
+      this.pendingSnapshotsByRequest.set(requestKey(client.data.id, message.id), {
+        ...(getString(params, "threadId") ? { threadId: getString(params, "threadId") } : {}),
+      });
+    }
 
     const kind = commandKind(method, params);
     if (!kind || !isRequest(message)) {
@@ -195,11 +297,40 @@ export class GatewayRelayControl {
   handleBackend(client: RelayControlClient, message: Record<string, unknown>): void {
     if (isResponse(message)) {
       const key = requestKey(client.data.id, message.id);
+      const pendingSnapshot = this.pendingSnapshotsByRequest.get(key);
+      if (pendingSnapshot) {
+        this.pendingSnapshotsByRequest.delete(key);
+        if (message.error === undefined) this.hydrateThreadSnapshot(pendingSnapshot.threadId, message.result);
+      }
       const pendingMode = this.pendingModesByRequest.get(key);
       if (pendingMode) {
         this.pendingModesByRequest.delete(key);
-        if (message.error === undefined) this.setThreadMode(pendingMode.threadId, pendingMode.mode, true);
-        this.pendingModeStartsByThread.delete(pendingMode.threadId);
+        if (this.pendingModesByThread.get(pendingMode.threadId) === pendingMode) this.pendingModesByThread.delete(pendingMode.threadId);
+        if (message.error === undefined) {
+          this.setThreadMode(pendingMode.threadId, pendingMode.mode, true, pendingMode.source, pendingMode.requestedAt);
+        }
+      }
+      const pendingStart = this.pendingTurnStartsByRequest.get(key);
+      if (pendingStart) {
+        this.pendingTurnStartsByRequest.delete(key);
+        if (message.error !== undefined) {
+          if (this.pendingTurnStartsByThread.get(pendingStart.threadId) === pendingStart) {
+            this.pendingTurnStartsByThread.delete(pendingStart.threadId);
+          }
+        } else {
+          const turnId = resultTurnId(asRecord(message.result));
+          if (turnId) this.startTurn(pendingStart, turnId, asRecord(asRecord(message.result)?.turn));
+        }
+      }
+      const pendingInterrupt = this.pendingInterruptsByRequest.get(key);
+      if (pendingInterrupt) {
+        this.pendingInterruptsByRequest.delete(key);
+        if (message.error !== undefined) {
+          if (this.pendingInterruptsByThread.get(pendingInterrupt.threadId) === pendingInterrupt) {
+            this.pendingInterruptsByThread.delete(pendingInterrupt.threadId);
+          }
+          this.clearTurnInterrupt(pendingInterrupt);
+        }
       }
       const implementationDecisionKey = this.planImplementationByRequest.get(key);
       if (implementationDecisionKey) {
@@ -252,15 +383,34 @@ export class GatewayRelayControl {
     if (!threadId) return;
     if (message.method === "thread/settings/updated") {
       const mode = getString(asRecord(asRecord(params?.threadSettings)?.collaborationMode), "mode");
-      if (mode === "default" || mode === "plan") this.setThreadMode(threadId, mode, true);
+      if (mode === "default" || mode === "plan") {
+        const pendingMode = this.pendingModesByThread.get(threadId);
+        this.setThreadMode(
+          threadId,
+          mode,
+          true,
+          pendingMode?.mode === mode ? pendingMode.source : stateSourceForId(sourceId, this.clients()),
+          pendingMode?.mode === mode ? pendingMode.requestedAt : Date.now(),
+        );
+      }
+    }
+    if (message.method === "thread/status/changed") {
+      this.setThreadRuntimeStatus(threadId, asRecord(params?.status));
     }
     if (message.method === "turn/started") {
-      const pendingMode = this.pendingModeStartsByThread.get(threadId);
-      if (pendingMode && pendingMode.createdAt >= Date.now() - 30_000) {
-        this.pendingModeStartsByThread.delete(threadId);
-        this.setThreadMode(threadId, pendingMode.mode, true);
-      }
+      const pendingStart = this.pendingTurnStartsByThread.get(threadId);
       const turnId = resultTurnId(params);
+      if (turnId) {
+        const start = pendingStart && pendingStart.requestedAt >= Date.now() - PENDING_TURN_TTL_MS
+          ? pendingStart
+          : {
+              threadId,
+              mode: this.threadState(threadId).collaborationMode,
+              source: stateSourceForId(sourceId, this.clients()),
+              requestedAt: turnTimestamp(asRecord(params?.turn), "startedAt") ?? Date.now(),
+            };
+        this.startTurn(start, turnId, asRecord(params?.turn));
+      }
       const command = this.latestActiveCommand(threadId, "review") ?? this.latestActiveCommand(threadId, "compact");
       if (command && turnId && !command.turnId) {
         command.turnId = turnId;
@@ -284,10 +434,12 @@ export class GatewayRelayControl {
     }
     if (message.method === "turn/completed") {
       const turnId = resultTurnId(params);
+      this.completeTurn(threadId, asRecord(params?.turn));
       const command = turnId ? this.commands.get(this.commandByTurn.get(turnKey(threadId, turnId)) ?? "") : undefined;
-      if (!command) return;
-      const status = getString(asRecord(params?.turn), "status");
-      this.transition(command, status === "completed" ? "completed" : status === "interrupted" ? "interrupted" : "failed");
+      if (command) {
+        const status = getString(asRecord(params?.turn), "status");
+        this.transition(command, status === "completed" ? "completed" : status === "interrupted" ? "interrupted" : "failed");
+      }
       return;
     }
     if (message.method === "thread/compacted") {
@@ -303,7 +455,15 @@ export class GatewayRelayControl {
     if (message.method === "thread/deleted") {
       this.threadStates.delete(threadId);
       this.deletePlanDecisions(threadId);
+      this.pendingModesByThread.delete(threadId);
+      this.modeReservationsByThread.delete(threadId);
+      this.pendingTurnStartsByThread.delete(threadId);
+      this.pendingInterruptsByThread.delete(threadId);
     }
+  }
+
+  handleObserverSnapshot(threadId: string, value: unknown): void {
+    this.hydrateThreadSnapshot(threadId, value);
   }
 
   sendSnapshot(client: RelayControlClient, threadId: string): void {
@@ -334,13 +494,34 @@ export class GatewayRelayControl {
     // Keep their in-memory state so the observer can finish them after Relay disconnects.
     const prefix = `${clientId}:`;
     return [...this.pendingByRequest.keys()].some((key) => key.startsWith(prefix))
-      || [...this.pendingModesByRequest.keys()].some((key) => key.startsWith(prefix));
+      || [...this.pendingModesByRequest.keys()].some((key) => key.startsWith(prefix))
+      || [...this.pendingTurnStartsByRequest.keys()].some((key) => key.startsWith(prefix))
+      || [...this.pendingSnapshotsByRequest.keys()].some((key) => key.startsWith(prefix))
+      || [...this.pendingInterruptsByRequest.keys()].some((key) => key.startsWith(prefix));
   }
 
   clientBackendClosed(clientId: string): void {
     const prefix = `${clientId}:`;
     for (const key of this.pendingByRequest.keys()) if (key.startsWith(prefix)) this.pendingByRequest.delete(key);
-    for (const key of this.pendingModesByRequest.keys()) if (key.startsWith(prefix)) this.pendingModesByRequest.delete(key);
+    for (const [key, pending] of this.pendingModesByRequest) {
+      if (!key.startsWith(prefix)) continue;
+      this.pendingModesByRequest.delete(key);
+      if (this.pendingModesByThread.get(pending.threadId) === pending) this.pendingModesByThread.delete(pending.threadId);
+    }
+    for (const [key, pending] of this.pendingTurnStartsByRequest) {
+      if (!key.startsWith(prefix)) continue;
+      this.pendingTurnStartsByRequest.delete(key);
+      if (this.pendingTurnStartsByThread.get(pending.threadId) === pending) this.pendingTurnStartsByThread.delete(pending.threadId);
+    }
+    for (const key of this.pendingSnapshotsByRequest.keys()) if (key.startsWith(prefix)) this.pendingSnapshotsByRequest.delete(key);
+    for (const [key, pending] of this.pendingInterruptsByRequest) {
+      if (!key.startsWith(prefix)) continue;
+      this.pendingInterruptsByRequest.delete(key);
+      if (this.pendingInterruptsByThread.get(pending.threadId) === pending) this.pendingInterruptsByThread.delete(pending.threadId);
+    }
+    for (const [threadId, reservation] of this.modeReservationsByThread) {
+      if (reservation.clientId === clientId) this.modeReservationsByThread.delete(threadId);
+    }
   }
 
   private handleHello(client: RelayControlClient, message: Record<string, unknown>): void {
@@ -383,8 +564,23 @@ export class GatewayRelayControl {
       this.sendError(client, message.id, -32602, "Relay thread-state set requires a supported mode.");
       return;
     }
-    const state = this.setThreadMode(threadId, mode, false);
-    client.socket.send(JSON.stringify({ id: message.id, result: state }));
+    if (current.threadStatus !== "idle" || this.pendingTurnStart(threadId)) {
+      this.sendModeBusyError(client, message.id, current.threadStatus === "idle" ? "active" : current.threadStatus);
+      return;
+    }
+    const reservation = this.modeReservation(threadId);
+    if (this.pendingModesByThread.has(threadId)) {
+      this.sendError(client, message.id, -32000, "Another collaboration mode update is already in progress.");
+      return;
+    }
+    if (reservation && (reservation.clientId !== client.data.id || reservation.mode !== mode)) {
+      this.sendError(client, message.id, -32000, "Another collaboration mode update is already in progress.");
+      return;
+    }
+    if (mode !== current.collaborationMode || !current.collaborationModeApplied) {
+      this.modeReservationsByThread.set(threadId, { threadId, mode, clientId: client.data.id, createdAt: Date.now() });
+    }
+    client.socket.send(JSON.stringify({ id: message.id, result: { collaborationMode: mode } }));
   }
 
   private handlePlanDecisionRequest(client: RelayControlClient, message: Record<string, unknown>): void {
@@ -465,7 +661,13 @@ export class GatewayRelayControl {
     }
   }
 
-  private setThreadMode(threadId: string, mode: AgentRelayThreadState["collaborationMode"], applied: boolean): AgentRelayThreadState {
+  private setThreadMode(
+    threadId: string,
+    mode: AgentRelayThreadState["collaborationMode"],
+    applied: boolean,
+    source?: AgentRelayStateSource,
+    changedAt = Date.now(),
+  ): AgentRelayThreadState {
     const previous = this.threadState(threadId);
     if (mode === "default") {
       for (const decision of this.planDecisionsForThread(threadId)) {
@@ -473,28 +675,242 @@ export class GatewayRelayControl {
       }
     }
     if (previous.collaborationMode === mode && previous.collaborationModeApplied === applied) return previous;
-    const state: AgentRelayThreadState = {
-      threadId,
+    return this.updateThreadState(threadId, {
       collaborationMode: mode,
       collaborationModeApplied: applied,
-      revision: this.nextRevision(threadId),
+      ...(applied && source ? { collaborationModeSource: source, collaborationModeUpdatedAt: changedAt } : {}),
+    }, changedAt);
+  }
+
+  private threadState(threadId: string): AgentRelayThreadState {
+    const existing = this.threadStates.get(threadId);
+    if (existing) return existing;
+    const state: AgentRelayThreadState = {
+      threadId,
+      // A fresh Gateway/app-server epoch follows native Codex restart semantics:
+      // Plan is not resumed and the next turn starts in Default mode.
+      collaborationMode: "default",
+      collaborationModeApplied: true,
+      threadStatus: "notLoaded",
+      waitingOn: null,
+      revision: this.threadRevisions.get(threadId) ?? 0,
       updatedAt: Date.now(),
+    };
+    this.threadStates.set(threadId, state);
+    return state;
+  }
+
+  private updateThreadState(
+    threadId: string,
+    update: Partial<Omit<AgentRelayThreadState, "threadId" | "revision" | "updatedAt">>,
+    updatedAt = Date.now(),
+  ): AgentRelayThreadState {
+    const previous = this.threadState(threadId);
+    const candidate = { ...previous, ...update };
+    if (sameThreadProjection(previous, candidate)) return previous;
+    const state: AgentRelayThreadState = {
+      ...candidate,
+      threadId,
+      revision: this.nextRevision(threadId),
+      updatedAt,
     };
     this.threadStates.set(threadId, state);
     this.broadcastThreadState(state);
     return state;
   }
 
-  private threadState(threadId: string): AgentRelayThreadState {
-    return this.threadStates.get(threadId) ?? {
-      threadId,
-      // A fresh Gateway/app-server epoch follows native Codex restart semantics:
-      // Plan is not resumed and the next turn starts in Default mode.
-      collaborationMode: "default",
-      collaborationModeApplied: true,
-      revision: this.threadRevisions.get(threadId) ?? 0,
-      updatedAt: Date.now(),
+  private setThreadRuntimeStatus(threadId: string, value: Record<string, unknown> | undefined): AgentRelayThreadState {
+    const status = nativeThreadStatus(value);
+    if (!status) return this.threadState(threadId);
+    const waitingOn = nativeWaitingOn(value);
+    return this.updateThreadState(threadId, {
+      threadStatus: status,
+      waitingOn,
+      ...(status === "active" ? {} : { activeTurn: undefined }),
+    });
+  }
+
+  private startTurn(start: PendingTurnStart, turnId: string, turn: Record<string, unknown> | undefined): void {
+    const pending = this.pendingTurnStartsByThread.get(start.threadId);
+    if (pending === start) this.pendingTurnStartsByThread.delete(start.threadId);
+    const current = this.threadState(start.threadId);
+    const previousActive = current.activeTurn;
+    const sameActive = previousActive?.turnId === turnId ? previousActive : undefined;
+    const source = preferredSource(sameActive?.source, start.source);
+    const startedAt = sameActive?.startedAt ?? turnTimestamp(turn, "startedAt") ?? start.requestedAt;
+    this.setThreadMode(start.threadId, start.mode, true, start.source, start.requestedAt);
+    const activeTurn: AgentRelayActiveTurnState = {
+      turnId,
+      collaborationMode: start.mode,
+      source,
+      startedAt,
+      ...(sameActive?.interruptRequest ? { interruptRequest: sameActive.interruptRequest } : {}),
     };
+    this.turnSources.set(turnKey(start.threadId, turnId), {
+      source,
+      collaborationMode: start.mode,
+      startedAt,
+    });
+    this.updateThreadState(start.threadId, {
+      threadStatus: "active",
+      waitingOn: sameActive ? current.waitingOn : null,
+      activeTurn,
+    }, startedAt);
+  }
+
+  private requestTurnInterrupt(interrupt: PendingInterrupt): void {
+    const state = this.threadState(interrupt.threadId);
+    if (!state.activeTurn || (interrupt.turnId && state.activeTurn.turnId !== interrupt.turnId)) return;
+    this.updateThreadState(interrupt.threadId, {
+      activeTurn: {
+        ...state.activeTurn,
+        interruptRequest: { source: interrupt.source, requestedAt: interrupt.requestedAt },
+      },
+    }, interrupt.requestedAt);
+  }
+
+  private clearTurnInterrupt(interrupt: PendingInterrupt): void {
+    const state = this.threadState(interrupt.threadId);
+    if (!state.activeTurn?.interruptRequest
+      || state.activeTurn.interruptRequest.requestedAt !== interrupt.requestedAt) return;
+    const { interruptRequest: _interruptRequest, ...activeTurn } = state.activeTurn;
+    this.updateThreadState(interrupt.threadId, { activeTurn });
+  }
+
+  private completeTurn(threadId: string, turn: Record<string, unknown> | undefined): void {
+    const turnId = getString(turn, "id");
+    const status = terminalTurnStatus(getString(turn, "status"));
+    if (!turnId || !status) return;
+    const state = this.threadState(threadId);
+    const sourceState = this.turnSources.get(turnKey(threadId, turnId));
+    const matchingActive = state.activeTurn?.turnId === turnId ? state.activeTurn : undefined;
+    const previousTerminal = state.latestTurn?.turnId === turnId ? state.latestTurn : undefined;
+    const pendingInterrupt = this.pendingInterruptsByThread.get(threadId);
+    const matchingInterrupt = pendingInterrupt && (!pendingInterrupt.turnId || pendingInterrupt.turnId === turnId)
+      ? pendingInterrupt
+      : undefined;
+    const finishedAt = turnTimestamp(turn, "completedAt") ?? Date.now();
+    const error = turnError(turn) ?? previousTerminal?.error;
+    const latestTurn: AgentRelayLatestTurnState = {
+      turnId,
+      status,
+      source: sourceState?.source ?? matchingActive?.source ?? previousTerminal?.source ?? unknownSource(),
+      ...(sourceState?.startedAt !== undefined || matchingActive?.startedAt !== undefined
+        ? { startedAt: sourceState?.startedAt ?? matchingActive?.startedAt }
+        : {}),
+      finishedAt,
+      ...(status === "interrupted" && (matchingInterrupt?.source || matchingActive?.interruptRequest?.source || previousTerminal?.interruptedBy)
+        ? { interruptedBy: matchingInterrupt?.source ?? matchingActive?.interruptRequest?.source ?? previousTerminal!.interruptedBy! }
+        : {}),
+      ...(error ? { error } : {}),
+    };
+    const hasDifferentActive = Boolean(state.activeTurn && state.activeTurn.turnId !== turnId);
+    const shouldReplaceLatest = !hasDifferentActive
+      && (!state.latestTurn || state.latestTurn.turnId === turnId || finishedAt >= state.latestTurn.finishedAt);
+    this.updateThreadState(threadId, {
+      ...(matchingActive ? { activeTurn: undefined, threadStatus: "idle" as const, waitingOn: null } : {}),
+      ...(shouldReplaceLatest ? { latestTurn } : {}),
+    }, finishedAt);
+    this.turnSources.delete(turnKey(threadId, turnId));
+    if (matchingInterrupt && this.pendingInterruptsByThread.get(threadId) === matchingInterrupt) {
+      this.pendingInterruptsByThread.delete(threadId);
+    }
+  }
+
+  private hydrateThreadSnapshot(fallbackThreadId: string | undefined, value: unknown): void {
+    const result = asRecord(value);
+    const thread = asRecord(result?.thread);
+    const threadId = getString(thread, "id") ?? fallbackThreadId;
+    if (!threadId) return;
+    const previous = this.threadState(threadId);
+    const statusRecord = asRecord(thread?.status);
+    const threadStatus = nativeThreadStatus(statusRecord) ?? previous.threadStatus;
+    const initialTurns = Array.isArray(asRecord(result?.initialTurnsPage)?.data)
+      ? asRecord(result?.initialTurnsPage)!.data as unknown[]
+      : [];
+    const embeddedTurns = Array.isArray(thread?.turns) ? thread.turns : [];
+    const latest = asRecord(initialTurns[0] ?? embeddedTurns.at(-1));
+    const latestTurnId = getString(latest, "id");
+    const latestStatus = getString(latest, "status");
+    let activeTurn = threadStatus === "active" ? previous.activeTurn : undefined;
+    let latestTurn = latest ? previous.latestTurn : undefined;
+    if (latestTurnId && latestStatus === "inProgress") {
+      const existingSource = previous.activeTurn?.turnId === latestTurnId
+        ? previous.activeTurn.source
+        : this.turnSources.get(turnKey(threadId, latestTurnId))?.source ?? unknownSource();
+      activeTurn = {
+        turnId: latestTurnId,
+        collaborationMode: previous.activeTurn?.turnId === latestTurnId
+          ? previous.activeTurn.collaborationMode
+          : previous.collaborationMode,
+        source: existingSource,
+        startedAt: turnTimestamp(latest, "startedAt") ?? previous.activeTurn?.startedAt ?? Date.now(),
+        ...(previous.activeTurn?.turnId === latestTurnId && previous.activeTurn.interruptRequest
+          ? { interruptRequest: previous.activeTurn.interruptRequest }
+          : {}),
+      };
+      this.turnSources.set(turnKey(threadId, latestTurnId), {
+        source: activeTurn.source,
+        collaborationMode: activeTurn.collaborationMode,
+        startedAt: activeTurn.startedAt,
+      });
+    } else {
+      const terminalStatus = terminalTurnStatus(latestStatus);
+      if (latestTurnId && terminalStatus) {
+        const previousActive = previous.activeTurn?.turnId === latestTurnId ? previous.activeTurn : undefined;
+        const rememberedSource = this.turnSources.get(turnKey(threadId, latestTurnId));
+        latestTurn = {
+          turnId: latestTurnId,
+          status: terminalStatus,
+          source: previous.latestTurn?.turnId === latestTurnId
+            ? previous.latestTurn.source
+            : previousActive?.source ?? rememberedSource?.source ?? unknownSource(),
+          ...(turnTimestamp(latest, "startedAt") !== undefined || previousActive?.startedAt !== undefined || rememberedSource?.startedAt !== undefined
+            ? { startedAt: turnTimestamp(latest, "startedAt") ?? previousActive?.startedAt ?? rememberedSource?.startedAt }
+            : {}),
+          finishedAt: turnTimestamp(latest, "completedAt") ?? previous.latestTurn?.finishedAt ?? Date.now(),
+          ...(previous.latestTurn?.turnId === latestTurnId && previous.latestTurn.interruptedBy
+            ? { interruptedBy: previous.latestTurn.interruptedBy }
+            : terminalStatus === "interrupted" && previousActive?.interruptRequest
+              ? { interruptedBy: previousActive.interruptRequest.source }
+            : {}),
+          ...(turnError(latest) ? { error: turnError(latest) } : {}),
+        };
+      }
+    }
+    this.updateThreadState(threadId, {
+      threadStatus,
+      waitingOn: nativeWaitingOn(statusRecord),
+      activeTurn,
+      latestTurn,
+    });
+  }
+
+  private modeReservation(threadId: string): PendingModeReservation | undefined {
+    const reservation = this.modeReservationsByThread.get(threadId);
+    if (!reservation) return undefined;
+    if (reservation.createdAt >= Date.now() - MODE_RESERVATION_TTL_MS) return reservation;
+    this.modeReservationsByThread.delete(threadId);
+    return undefined;
+  }
+
+  private pendingTurnStart(threadId: string): PendingTurnStart | undefined {
+    const pending = this.pendingTurnStartsByThread.get(threadId);
+    if (!pending) return undefined;
+    if (pending.requestedAt >= Date.now() - PENDING_TURN_TTL_MS) return pending;
+    this.pendingTurnStartsByThread.delete(threadId);
+    return undefined;
+  }
+
+  private sendModeBusyError(client: RelayControlClient, id: string | number, status: AgentRelayThreadStatus): void {
+    this.sendError(
+      client,
+      id,
+      -32000,
+      status === "active"
+        ? "'/plan' is disabled while a task is in progress."
+        : "Collaboration mode can only be changed while the thread is idle.",
+    );
   }
 
   private createCommand(input: Pick<InternalCommand, "commandId" | "threadId" | "kind" | "source" | "originClientId" | "originToken">): InternalCommand {
@@ -808,7 +1224,79 @@ function publicPlanDecision(decision: InternalPlanDecision): AgentRelayPlanDecis
   };
 }
 
-function explicitCollaborationMode(params: Record<string, unknown> | undefined): PendingModeUpdate | undefined {
+function sameThreadProjection(left: AgentRelayThreadState, right: AgentRelayThreadState): boolean {
+  const { revision: _leftRevision, updatedAt: _leftUpdatedAt, ...leftProjection } = left;
+  const { revision: _rightRevision, updatedAt: _rightUpdatedAt, ...rightProjection } = right;
+  return JSON.stringify(leftProjection) === JSON.stringify(rightProjection);
+}
+
+function stateSource(name: string | undefined): AgentRelayStateSource {
+  const normalized = name?.trim().toLocaleLowerCase() ?? "";
+  if (normalized === "agent-relay") return { kind: "relay", label: "Agent Relay" };
+  if (normalized.includes("observer")) return { kind: "system", label: "Gateway observer" };
+  if (normalized.includes("desktop")) return { kind: "codexDesktop", label: "Codex Desktop" };
+  if (normalized.includes("codex") || normalized.includes("cli") || normalized.includes("tui")) {
+    return { kind: "codexCli", label: "Codex CLI" };
+  }
+  if (name?.trim()) return { kind: "unknown", label: name.trim().slice(0, 80) };
+  return unknownSource();
+}
+
+function stateSourceForId(sourceId: string, clients: Iterable<RelayControlClient>): AgentRelayStateSource {
+  if (sourceId === "gateway-observer") return { kind: "system", label: "Gateway observer" };
+  for (const client of clients) {
+    if (client.data.id === sourceId) return stateSource(client.data.name);
+  }
+  return unknownSource();
+}
+
+function unknownSource(): AgentRelayStateSource {
+  return { kind: "unknown", label: "Unknown client" };
+}
+
+function preferredSource(
+  current: AgentRelayStateSource | undefined,
+  candidate: AgentRelayStateSource,
+): AgentRelayStateSource {
+  if (!current) return candidate;
+  const rank = (source: AgentRelayStateSource): number => source.kind === "system" ? 0 : source.kind === "unknown" ? 1 : 2;
+  return rank(candidate) > rank(current) ? candidate : current;
+}
+
+function nativeThreadStatus(value: Record<string, unknown> | undefined): AgentRelayThreadStatus | undefined {
+  const status = getString(value, "type");
+  return status === "notLoaded" || status === "idle" || status === "active" || status === "systemError"
+    ? status
+    : undefined;
+}
+
+function nativeWaitingOn(value: Record<string, unknown> | undefined): AgentRelayWaitingOn {
+  if (nativeThreadStatus(value) !== "active") return null;
+  const flags = Array.isArray(value?.activeFlags) ? value.activeFlags : [];
+  if (flags.includes("waitingOnApproval")) return "approval";
+  if (flags.includes("waitingOnUserInput")) return "userInput";
+  return null;
+}
+
+function terminalTurnStatus(value: string | undefined): AgentRelayLatestTurnState["status"] | undefined {
+  return value === "completed" || value === "failed" || value === "interrupted" ? value : undefined;
+}
+
+function turnTimestamp(turn: Record<string, unknown> | undefined, key: "startedAt" | "completedAt"): number | undefined {
+  const value = turn?.[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return value >= 1_000_000_000_000 ? value : value * 1_000;
+}
+
+function turnError(turn: Record<string, unknown> | undefined): string | undefined {
+  const error = asRecord(turn?.error);
+  const message = getString(error, "message");
+  return message?.trim() ? message.trim().slice(0, 1_000) : undefined;
+}
+
+function explicitCollaborationMode(
+  params: Record<string, unknown> | undefined,
+): Pick<PendingModeUpdate, "threadId" | "mode"> | undefined {
   const threadId = getString(params, "threadId");
   const mode = getString(asRecord(params?.collaborationMode), "mode");
   return threadId && (mode === "default" || mode === "plan") ? { threadId, mode } : undefined;

@@ -32,8 +32,9 @@ export interface RelayAgentEventRouterDeps {
   store: Pick<RelayStore, "markSessionStopped" | "clearSessionThreadId" | "appendTranscript" | "setCollaborationMode" | "requestCollaborationMode">;
   activity: {
     handle(event: AgentActivityEvent): Promise<void>;
-    finalize(sessionKey: string, turnId: string | undefined, status: string, error?: string, durationMs?: number): Promise<void>;
-    setPhase(sessionKey: string, phase: "working" | "stalled" | "waitingForInput" | "waitingForApproval", detail?: string): Promise<void>;
+    finalize(sessionKey: string, turnId: string | undefined, status: string, error?: string, durationMs?: number): Promise<boolean>;
+    setPhase(sessionKey: string, phase: "working" | "stalled" | "waitingForInput" | "waitingForApproval" | "interrupting", detail?: string): Promise<void>;
+    refreshContext(sessionKey: string): Promise<void>;
     terminate(sessionKey: string, phase: "interrupted" | "failed", detail?: string): Promise<void>;
   };
   media: { sendAgentImageOutput(event: AgentImageOutputEvent): Promise<void> };
@@ -75,6 +76,7 @@ export class RelayAgentEventRouter {
   private readonly sharedCommandCards = new Map<string, SharedCommandCardState>();
   private readonly sharedCommandRevisions = new Map<string, number>();
   private readonly relaySnapshotRevisions = new Map<string, { gatewayEpoch: string; revision: number }>();
+  private readonly relayThreadStates = new Map<string, AgentRelayThreadState>();
   private readonly terminalTurns = new Map<string, number>();
 
   constructor(private readonly deps: RelayAgentEventRouterDeps) {}
@@ -165,7 +167,35 @@ export class RelayAgentEventRouter {
 
   private async handleRelayThreadState(event: AgentRelayThreadStateEvent): Promise<void> {
     if (this.deps.currentThreadId(event.sessionKey) !== event.threadId) return;
+    const stored = this.relayThreadStates.get(event.sessionKey);
+    const previous = stored?.threadId === event.threadId ? stored : undefined;
+    this.relayThreadStates.set(event.sessionKey, event);
     this.applyRelayThreadState(event.sessionKey, event);
+    await this.deps.activity.refreshContext(event.sessionKey);
+    if (event.activeTurn?.interruptRequest
+      && event.activeTurn.interruptRequest.requestedAt !== previous?.activeTurn?.interruptRequest?.requestedAt) {
+      await this.deps.activity.setPhase(
+        event.sessionKey,
+        "interrupting",
+        `Requested by ${event.activeTurn.interruptRequest.source.label} at ${formatRelayStateTime(event.activeTurn.interruptRequest.requestedAt)}`,
+      );
+    } else if (event.waitingOn === "approval") {
+      await this.deps.activity.setPhase(event.sessionKey, "waitingForApproval");
+    } else if (event.waitingOn === "userInput") {
+      await this.deps.activity.setPhase(event.sessionKey, "waitingForInput");
+    } else if (event.threadStatus === "active") {
+      await this.deps.activity.setPhase(event.sessionKey, "working");
+    }
+    if (!previous
+      || previous.collaborationMode === event.collaborationMode
+      || !event.collaborationModeApplied
+      || event.initiatedByClient) return;
+    const parsed = parseSessionKey(event.sessionKey);
+    if (!parsed) return;
+    await this.deps.sendRendered(parsed.scopeKey, messageWithTitle(
+      "Shared chat mode changed.",
+      `Mode: ${event.collaborationMode === "plan" ? "Plan" : "Default"}\nSource: ${event.collaborationModeSource?.label ?? "Unknown client"}\nTime: ${formatRelayStateTime(event.collaborationModeUpdatedAt ?? event.updatedAt)}`,
+    ));
   }
 
   private async handleRelayControlSnapshot(event: AgentRelayControlSnapshotEvent): Promise<void> {
@@ -176,7 +206,9 @@ export class RelayAgentEventRouter {
     if (previous?.gatewayEpoch === event.gatewayEpoch && previous.revision >= event.revision) return;
     if (previous && previous.gatewayEpoch !== event.gatewayEpoch) await this.clearSharedCommandState(event.sessionKey, parsed.scopeKey);
     this.relaySnapshotRevisions.set(event.sessionKey, { gatewayEpoch: event.gatewayEpoch, revision: event.revision });
+    this.relayThreadStates.set(event.sessionKey, event.threadState);
     this.applyRelayThreadState(event.sessionKey, event.threadState);
+    await this.deps.activity.refreshContext(event.sessionKey);
     await this.deps.handlePlanDecisionSnapshot(event.sessionKey, event.gatewayEpoch, event.planDecisions);
     for (const command of event.commands) {
       const key = `${event.sessionKey}\0${command.commandId}`;
@@ -197,7 +229,7 @@ export class RelayAgentEventRouter {
       await this.flushSharedCommandCard(key, parsed.scopeKey, state);
       if (isRelayCommandTerminal(command.phase)) this.sharedCommandCards.delete(key);
     }
-    if (event.commands.length === 0 && event.threadState.collaborationMode === "default") return;
+    if (event.commands.length === 0) return;
     const lines = [
       `Mode: ${event.threadState.collaborationMode === "plan" ? "Plan" : "Default"}${event.threadState.collaborationModeApplied ? "" : " (pending)"}`,
       ...event.commands.map((command) => `${relayCommandLabel(command.kind)}: ${relayCommandPhaseLabel(command.phase)}`),
@@ -334,7 +366,7 @@ export class RelayAgentEventRouter {
       duration_ms: event.durationMs,
     });
     if (terminalIsCurrent) this.deps.prompts.clearForSession(event.sessionKey);
-    await this.deps.activity.finalize(event.sessionKey, event.turnId, turnStatus, event.error?.message, event.durationMs);
+    const presented = await this.deps.activity.finalize(event.sessionKey, event.turnId, turnStatus, event.error?.message, event.durationMs);
     await this.deps.finalizeOutput(event.sessionKey);
     if (terminalIsCurrent && turnStatus === "completed") await this.deps.sendPlanReadyPrompt(event.sessionKey, event.turnId);
     if (turnStatus === "failed") {
@@ -343,6 +375,21 @@ export class RelayAgentEventRouter {
         const detail = event.error?.message ?? "Codex turn failed.";
         this.deps.appendSystem(parsed.scopeKey, `Error: ${detail}\n`);
         await this.deps.sendRendered(parsed.scopeKey, messageWithTitle("Codex turn failed.", detail));
+      }
+    }
+    if (!presented && turnStatus === "interrupted") {
+      const state = this.relayThreadStates.get(event.sessionKey);
+      const latest = state?.latestTurn;
+      const terminal = latest?.turnId === event.turnId ? latest : undefined;
+      const source = terminal?.interruptedBy ?? terminal?.source;
+      if (terminal && source?.kind !== "relay") {
+        const parsed = parseSessionKey(event.sessionKey);
+        if (parsed) {
+          await this.deps.sendRendered(parsed.scopeKey, messageWithTitle(
+            "Codex turn interrupted.",
+            `Source: ${source?.label ?? "Unknown client"}\nTime: ${formatRelayStateTime(terminal?.finishedAt ?? Date.now())}`,
+          ));
+        }
       }
     }
     await this.deps.completeTask(
@@ -394,6 +441,7 @@ export class RelayAgentEventRouter {
     }
     await this.deps.activity.terminate(event.sessionKey, "interrupted", `Chat ${event.action}.`);
     await this.deps.resetSessionPresentation(event.sessionKey, { deletePages: true });
+    this.relayThreadStates.delete(event.sessionKey);
     this.deps.store.markSessionStopped(event.sessionKey);
     if (event.action === "archived" || event.action === "deleted") {
       this.deps.store.clearSessionThreadId(event.sessionKey);
@@ -437,6 +485,10 @@ function relayCommandPhaseLabel(phase: AgentRelayCommandState["phase"]): string 
     case "failed": return "Failed";
     case "interrupted": return "Interrupted";
   }
+}
+
+function formatRelayStateTime(value: number): string {
+  return new Date(value).toISOString().replace(/\.000Z$/u, "Z");
 }
 
 function isRelayCommandTerminal(phase: AgentRelayCommandState["phase"]): boolean {

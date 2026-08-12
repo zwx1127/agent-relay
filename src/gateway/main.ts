@@ -179,6 +179,7 @@ async function main(): Promise<void> {
     backendUrl,
     (message) => relayControl.handleObserver(message),
     (error) => log(config.logPath, "gateway observer error", { error: error.message }),
+    (threadId, value) => relayControl.handleObserverSnapshot(threadId, value),
   );
   await observer.start();
 

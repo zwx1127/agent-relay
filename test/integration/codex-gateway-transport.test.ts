@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { CodexDriver } from "../../src/providers/agents/codex/driver.ts";
 import { writeRelayWorkControl } from "../../src/gateway/control.ts";
 import { RELAY_GATEWAY_PROTOCOL_VERSION } from "../../src/gateway/state.ts";
+import { RELAY_CONTROL_PROTOCOL_VERSION } from "../../src/ports/agent/control.ts";
 import { cleanupCodexHarness, createCodexTempDir, fakeCodexBin, fakeCodexCommandPath, writeNodeCommand } from "../support/codex-app-server-harness.ts";
 
 afterEach(cleanupCodexHarness);
@@ -114,7 +115,7 @@ fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({ args: process.arg
             }));
           }
           else if (method === "initialize") send({ userAgent: "codex-cli 0.145.0" });
-          else if (method === "agent-relay/control/hello") send({ version: 4, gatewayEpoch: "test-gateway" });
+          else if (method === "agent-relay/control/hello") send({ version: RELAY_CONTROL_PROTOCOL_VERSION, gatewayEpoch: "test-gateway" });
           else if (method === "agent-relay/control/resync") {
             socket.send(JSON.stringify({
               method: "agent-relay/control/snapshot",
@@ -123,19 +124,22 @@ fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({ args: process.arg
                 threadId: params?.threadId,
                 revision: 0,
                 consistency: "live",
-                threadState: { threadId: params?.threadId, collaborationMode: "default", collaborationModeApplied: true, revision: 0, updatedAt: Date.now() },
+                threadState: {
+                  threadId: params?.threadId,
+                  collaborationMode: "default",
+                  collaborationModeApplied: true,
+                  threadStatus: "active",
+                  waitingOn: null,
+                  activeTurn: { turnId: "active-turn", collaborationMode: "default", source: { kind: "unknown", label: "Unknown client" }, startedAt: 1_000 },
+                  revision: 0,
+                  updatedAt: Date.now(),
+                },
                 commands: [],
               },
             }));
             send({ gatewayEpoch: "test-gateway", revision: 0 });
           }
-          else if (method === "agent-relay/control/threadState/update") send({
-            threadId: params?.threadId,
-            collaborationMode: params?.mode ?? "plan",
-            collaborationModeApplied: false,
-            revision: 1,
-            updatedAt: Date.now(),
-          });
+          else if (method === "agent-relay/control/threadState/update") send({ collaborationMode: params?.mode ?? "plan" });
           else if (method === "model/list") send({ data: [{ id: "gpt-test", model: "gpt-test", isDefault: true }] });
           else if (method === "collaborationMode/list") send({ data: [{ mode: "default" }, { mode: "plan" }] });
           else if (method === "thread/resume") send({
@@ -308,7 +312,7 @@ fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({ args: process.arg
           const params = message.params as Record<string, unknown> | undefined;
           const send = (result: unknown) => socket.send(JSON.stringify({ id, result }));
           if (method === "initialize") send({ userAgent: "codex-cli 0.145.0" });
-          else if (method === "agent-relay/control/hello") send({ version: 4, gatewayEpoch: "test-gateway" });
+          else if (method === "agent-relay/control/hello") send({ version: RELAY_CONTROL_PROTOCOL_VERSION, gatewayEpoch: "test-gateway" });
           else if (method === "agent-relay/control/resync") {
             socket.send(JSON.stringify({
               method: "agent-relay/control/snapshot",
@@ -317,19 +321,41 @@ fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({ args: process.arg
                 threadId: params?.threadId,
                 revision: 0,
                 consistency: "live",
-                threadState: { threadId: params?.threadId, collaborationMode: "default", collaborationModeApplied: true, revision: 0, updatedAt: Date.now() },
+                threadState: {
+                  threadId: params?.threadId,
+                  collaborationMode: "default",
+                  collaborationModeApplied: true,
+                  threadStatus: "idle",
+                  waitingOn: null,
+                  revision: 0,
+                  updatedAt: Date.now(),
+                },
                 commands: [],
               },
             }));
             send({ gatewayEpoch: "test-gateway", revision: 0 });
           }
-          else if (method === "agent-relay/control/threadState/update") send({
-            threadId: params?.threadId,
-            collaborationMode: params?.mode ?? "plan",
-            collaborationModeApplied: false,
-            revision: 1,
-            updatedAt: Date.now(),
-          });
+          else if (method === "agent-relay/control/threadState/update") send({ collaborationMode: params?.mode ?? "plan" });
+          else if (method === "thread/settings/update") {
+            send({});
+            const mode = ((params?.collaborationMode as Record<string, unknown> | undefined)?.mode ?? "default") as string;
+            socket.send(JSON.stringify({
+              method: "agent-relay/control/threadState",
+              params: {
+                gatewayEpoch: "test-gateway",
+                threadRevision: 1,
+                threadId: params?.threadId,
+                collaborationMode: mode,
+                collaborationModeApplied: true,
+                collaborationModeSource: { kind: "relay", label: "Agent Relay" },
+                collaborationModeUpdatedAt: Date.now(),
+                threadStatus: "idle",
+                waitingOn: null,
+                revision: 1,
+                updatedAt: Date.now(),
+              },
+            }));
+          }
           else if (method === "model/list") send({ data: [{ id: "gpt-test", model: "gpt-test", isDefault: true }] });
           else if (method === "collaborationMode/list") send({ data: [{ mode: "default" }, { mode: "plan" }] });
           else if (method === "thread/resume") send({ thread: { id: params?.threadId, status: { type: "idle" } }, initialTurnsPage: { data: [], nextCursor: null } });
@@ -452,6 +478,14 @@ fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({ args: process.arg
         operation: "set",
         mode: "plan",
       });
+      expect(received.find((message) => message.method === "thread/settings/update")?.params).toMatchObject({
+        threadId: "shared-thread",
+        collaborationMode: {
+          mode: "plan",
+          settings: { model: "gpt-test", developer_instructions: null },
+        },
+      });
+      expect(driver.getStatus(first.sessionKey)).toMatchObject({ collaborationMode: "plan", collaborationModeApplied: true });
 
       const fresh = await driver.start({ conversationId: "3", scopeKey: "3", workspaceName: "demo", workspacePath: "C:/work/fresh" });
       const threadStart = received.find((message) => message.method === "thread/start");

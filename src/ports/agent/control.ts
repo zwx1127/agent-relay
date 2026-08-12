@@ -1,6 +1,6 @@
 import type { AgentCollaborationMode } from "./input.ts";
 
-export const RELAY_CONTROL_PROTOCOL_VERSION = 4;
+export const RELAY_CONTROL_PROTOCOL_VERSION = 5;
 export const RELAY_CONTROL_HELLO_METHOD = "agent-relay/control/hello";
 export const RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD = "agent-relay/control/threadState/update";
 export const RELAY_CONTROL_COMMAND_METHOD = "agent-relay/control/command";
@@ -63,16 +63,55 @@ export interface AgentRelayPlanDecisionClaimResult {
   state: AgentRelayPlanDecisionState;
 }
 
+export type AgentRelayStateSourceKind = "relay" | "codexCli" | "codexDesktop" | "system" | "unknown";
+
+export interface AgentRelayStateSource {
+  kind: AgentRelayStateSourceKind;
+  label: string;
+}
+
+export type AgentRelayThreadStatus = "notLoaded" | "idle" | "active" | "systemError";
+export type AgentRelayWaitingOn = "approval" | "userInput" | null;
+
+export interface AgentRelayInterruptRequest {
+  source: AgentRelayStateSource;
+  requestedAt: number;
+}
+
+export interface AgentRelayActiveTurnState {
+  turnId: string;
+  collaborationMode: AgentCollaborationMode;
+  source: AgentRelayStateSource;
+  startedAt: number;
+  interruptRequest?: AgentRelayInterruptRequest;
+}
+
+export interface AgentRelayLatestTurnState {
+  turnId: string;
+  status: "completed" | "failed" | "interrupted";
+  source: AgentRelayStateSource;
+  startedAt?: number;
+  finishedAt: number;
+  interruptedBy?: AgentRelayStateSource;
+  error?: string;
+}
+
 export interface AgentRelayThreadState {
   threadId: string;
   collaborationMode: AgentCollaborationMode;
   collaborationModeApplied: boolean;
+  collaborationModeSource?: AgentRelayStateSource;
+  collaborationModeUpdatedAt?: number;
+  threadStatus: AgentRelayThreadStatus;
+  waitingOn: AgentRelayWaitingOn;
+  activeTurn?: AgentRelayActiveTurnState;
+  latestTurn?: AgentRelayLatestTurnState;
   revision: number;
   updatedAt: number;
 }
 
 export interface AgentRelayCommandMetadata {
-  version: 4;
+  version: 5;
   commandId: string;
   kind: AgentRelayCommandKind;
   originToken: string;

@@ -132,14 +132,79 @@ function relayThreadState(value: unknown): AgentRelayThreadState | undefined {
   const record = asRecord(value);
   const threadId = getString(record, "threadId");
   const mode = getString(record, "collaborationMode");
+  const threadStatus = getString(record, "threadStatus");
+  const waitingOn = record?.waitingOn;
   if (!threadId || (mode !== "default" && mode !== "plan") || typeof record?.collaborationModeApplied !== "boolean") return undefined;
+  if (threadStatus !== "notLoaded" && threadStatus !== "idle" && threadStatus !== "active" && threadStatus !== "systemError") return undefined;
+  if (waitingOn !== null && waitingOn !== "approval" && waitingOn !== "userInput") return undefined;
   if (typeof record.revision !== "number" || typeof record.updatedAt !== "number") return undefined;
+  const collaborationModeSource = record.collaborationModeSource === undefined
+    ? undefined
+    : relayStateSource(record.collaborationModeSource);
+  const activeTurn = record.activeTurn === undefined ? undefined : relayActiveTurnState(record.activeTurn);
+  const latestTurn = record.latestTurn === undefined ? undefined : relayLatestTurnState(record.latestTurn);
+  if (record.collaborationModeSource !== undefined && !collaborationModeSource) return undefined;
+  if (record.activeTurn !== undefined && !activeTurn) return undefined;
+  if (record.latestTurn !== undefined && !latestTurn) return undefined;
   return {
     threadId,
     collaborationMode: mode,
     collaborationModeApplied: record.collaborationModeApplied,
+    ...(collaborationModeSource ? { collaborationModeSource } : {}),
+    ...(typeof record.collaborationModeUpdatedAt === "number" ? { collaborationModeUpdatedAt: record.collaborationModeUpdatedAt } : {}),
+    threadStatus,
+    waitingOn,
+    ...(activeTurn ? { activeTurn } : {}),
+    ...(latestTurn ? { latestTurn } : {}),
     revision: record.revision,
     updatedAt: record.updatedAt,
+  };
+}
+
+function relayStateSource(value: unknown): AgentRelayThreadState["collaborationModeSource"] | undefined {
+  const record = asRecord(value);
+  const kind = getString(record, "kind");
+  const label = getString(record, "label");
+  if (!label || (kind !== "relay" && kind !== "codexCli" && kind !== "codexDesktop" && kind !== "system" && kind !== "unknown")) {
+    return undefined;
+  }
+  return { kind, label };
+}
+
+function relayActiveTurnState(value: unknown): AgentRelayThreadState["activeTurn"] | undefined {
+  const record = asRecord(value);
+  const turnId = getString(record, "turnId");
+  const mode = getString(record, "collaborationMode");
+  const source = relayStateSource(record?.source);
+  if (!turnId || (mode !== "default" && mode !== "plan") || !source || typeof record?.startedAt !== "number") return undefined;
+  const interruptRecord = asRecord(record.interruptRequest);
+  const interruptSource = interruptRecord ? relayStateSource(interruptRecord.source) : undefined;
+  if (interruptRecord && (!interruptSource || typeof interruptRecord.requestedAt !== "number")) return undefined;
+  return {
+    turnId,
+    collaborationMode: mode,
+    source,
+    startedAt: record.startedAt,
+    ...(interruptRecord && interruptSource ? { interruptRequest: { source: interruptSource, requestedAt: interruptRecord.requestedAt as number } } : {}),
+  };
+}
+
+function relayLatestTurnState(value: unknown): AgentRelayThreadState["latestTurn"] | undefined {
+  const record = asRecord(value);
+  const turnId = getString(record, "turnId");
+  const status = getString(record, "status");
+  const source = relayStateSource(record?.source);
+  const interruptedBy = record?.interruptedBy === undefined ? undefined : relayStateSource(record.interruptedBy);
+  if (!turnId || (status !== "completed" && status !== "failed" && status !== "interrupted") || !source) return undefined;
+  if (typeof record?.finishedAt !== "number" || (record.interruptedBy !== undefined && !interruptedBy)) return undefined;
+  return {
+    turnId,
+    status,
+    source,
+    ...(typeof record.startedAt === "number" ? { startedAt: record.startedAt } : {}),
+    finishedAt: record.finishedAt,
+    ...(interruptedBy ? { interruptedBy } : {}),
+    ...(getString(record, "error") ? { error: getString(record, "error") } : {}),
   };
 }
 
@@ -217,6 +282,12 @@ interface PendingRelayCommandOrigin {
   createdAt: number;
 }
 
+interface PendingModeChangeOrigin {
+  sessionKey: string;
+  mode: AgentCollaborationMode;
+  createdAt: number;
+}
+
 const USER_MESSAGE_TRACKING_TTL_MS = 10 * 60_000;
 const USER_MESSAGE_TRACKING_LIMIT = 2_048;
 const FAILED_COMMAND_STALL_MS = 5 * 60_000;
@@ -263,6 +334,7 @@ export class CodexDriver implements AgentDriver {
   private readonly pendingUserMessageOrigins = new Map<string, PendingUserMessageOrigin>();
   private readonly mirroredUserMessageItems = new Map<string, number>();
   private readonly relayCommandOrigins = new Map<string, PendingRelayCommandOrigin>();
+  private readonly requestedModeChanges = new Map<string, PendingModeChangeOrigin>();
   private readonly relayControlRevisions = new Map<string, { gatewayEpoch: string; revision: number }>();
   private readonly relayResyncRequested = new Set<string>();
   // Sends for the same relay session must be ordered so steering input cannot
@@ -437,8 +509,18 @@ export class CodexDriver implements AgentDriver {
     this.logger.debug("codex.input_text", { session_key: key, message_text: text });
     let result: unknown;
     let collaborationModeApplied = method === "turn/start" && Boolean(collaborationMode);
+    const trackModeOrigin = (): void => {
+      if (gateway && collaborationMode && options?.collaborationMode) {
+        this.requestedModeChanges.set(running.status.threadId!, {
+          sessionKey: key,
+          mode: options.collaborationMode,
+          createdAt: Date.now(),
+        });
+      }
+    };
     try {
       try {
+        if (method === "turn/start") trackModeOrigin();
         result = await this.request(method, params);
       } catch (error) {
         if (method !== "turn/steer" || !isNoActiveTurnToSteerError(error)) throw error;
@@ -454,11 +536,16 @@ export class CodexDriver implements AgentDriver {
         if (running.status.activeTurnId) this.clearTurnStallWatch(running.status.threadId, running.status.activeTurnId);
         running.status.activeTurnId = undefined;
         this.mirrorThreadStatus(key);
+        trackModeOrigin();
         result = await this.request("turn/start", { threadId: running.status.threadId, input, ...(collaborationMode ? { collaborationMode } : {}), ...originParams });
         collaborationModeApplied = Boolean(collaborationMode);
       }
     } catch (error) {
       if (clientUserMessageId) this.pendingUserMessageOrigins.delete(clientUserMessageId);
+      const pendingMode = this.requestedModeChanges.get(running.status.threadId);
+      if (pendingMode?.sessionKey === key && pendingMode.mode === options?.collaborationMode) {
+        this.requestedModeChanges.delete(running.status.threadId);
+      }
       throw error;
     }
     updateActiveTurnFromResult(running, result);
@@ -661,8 +748,21 @@ export class CodexDriver implements AgentDriver {
     }));
     const mode = getString(result, "collaborationMode");
     if (mode !== "plan" && mode !== "default") throw new Error("Relay Gateway returned an invalid collaboration mode.");
+    if (mode === running.status.collaborationMode && running.status.collaborationModeApplied) return mode;
+    this.requestedModeChanges.set(running.status.threadId!, { sessionKey: key, mode, createdAt: Date.now() });
+    try {
+      await this.request("thread/settings/update", {
+        threadId: running.status.threadId,
+        collaborationMode: collaborationModePayload(running.status, mode, this.defaultModel),
+      });
+    } catch (error) {
+      const pending = this.requestedModeChanges.get(running.status.threadId!);
+      if (pending?.sessionKey === key && pending.mode === mode) this.requestedModeChanges.delete(running.status.threadId!);
+      throw error;
+    }
     running.status.collaborationMode = mode;
-    running.status.collaborationModeApplied = result?.collaborationModeApplied === true;
+    running.status.collaborationModeApplied = true;
+    this.mirrorThreadStatus(key);
     return mode;
   }
 
@@ -747,6 +847,7 @@ export class CodexDriver implements AgentDriver {
     for (const [clientId, origin] of this.pendingUserMessageOrigins) {
       if (origin.sessionKey === key) this.pendingUserMessageOrigins.delete(clientId);
     }
+    if (threadId && this.requestedModeChanges.get(threadId)?.sessionKey === key) this.requestedModeChanges.delete(threadId);
     if (!threadId || !this.unbindSession(threadId, key)) return;
     this.clearThreadStallWatches(threadId);
     this.resolvedWaitingFences.delete(threadId);
@@ -1942,21 +2043,25 @@ export class CodexDriver implements AgentDriver {
     const params = asRecord(value);
     const state = relayThreadState(params);
     if (!state || !this.acceptRelayControlEnvelope(params, state.threadId)) return;
+    const requested = this.requestedModeChanges.get(state.threadId);
+    const requestedModeApplied = Boolean(requested
+      && state.collaborationModeApplied
+      && state.collaborationMode === requested.mode
+      && state.collaborationModeSource?.kind === "relay"
+      && (state.collaborationModeUpdatedAt ?? 0) >= requested.createdAt);
     for (const key of this.sessionKeysForThread(state.threadId)) {
       const running = this.sessions.get(key);
-      if (running) {
-        running.status.collaborationMode = state.collaborationMode;
-        running.status.collaborationModeApplied = state.collaborationModeApplied;
-        running.status.relayStateConsistency = "live";
-      }
+      if (running) this.applyRelayThreadProjection(running.status, state);
       await this.onOutput({
         type: "relay_thread_state",
         sessionKey: key,
         gatewayEpoch: this.gatewayEpoch!,
         threadRevision: state.revision,
+        ...(requestedModeApplied && requested?.sessionKey === key ? { initiatedByClient: true } : {}),
         ...state,
       });
     }
+    if (requestedModeApplied) this.requestedModeChanges.delete(state.threadId);
   }
 
   private async handleRelayPlanDecisionNotification(value: unknown): Promise<void> {
@@ -1992,11 +2097,7 @@ export class CodexDriver implements AgentDriver {
     this.relayResyncRequested.delete(threadId);
     for (const key of this.sessionKeysForThread(threadId)) {
       const running = this.sessions.get(key);
-      if (running) {
-        running.status.collaborationMode = threadState.collaborationMode;
-        running.status.collaborationModeApplied = threadState.collaborationModeApplied;
-        running.status.relayStateConsistency = "live";
-      }
+      if (running) this.applyRelayThreadProjection(running.status, threadState);
       await this.onOutput({
         type: "relay_control_snapshot",
         sessionKey: key,
@@ -2010,6 +2111,38 @@ export class CodexDriver implements AgentDriver {
       });
     }
     this.ackRelayControl(threadId, revision);
+  }
+
+  private applyRelayThreadProjection(status: AgentSessionStatus, state: AgentRelayThreadState): void {
+    status.collaborationMode = state.collaborationMode;
+    status.collaborationModeApplied = state.collaborationModeApplied;
+    status.relayStateConsistency = "live";
+    status.relayThreadState = state;
+    status.threadStatus = state.threadStatus;
+    status.waitingForApproval = state.waitingOn === "approval";
+    status.waitingForUserInput = state.waitingOn === "userInput";
+    if (state.activeTurn) {
+      status.activeTurnId = state.activeTurn.turnId;
+      status.latestTurn = {
+        id: state.activeTurn.turnId,
+        status: "inProgress",
+        activities: status.latestTurn?.id === state.activeTurn.turnId ? status.latestTurn.activities : [],
+        startedAt: state.activeTurn.startedAt,
+      };
+      return;
+    }
+    if (state.threadStatus !== "active") status.activeTurnId = undefined;
+    if (state.latestTurn) {
+      status.latestTurn = {
+        id: state.latestTurn.turnId,
+        status: state.latestTurn.status,
+        activities: status.latestTurn?.id === state.latestTurn.turnId ? status.latestTurn.activities : [],
+        ...(state.latestTurn.startedAt !== undefined ? { startedAt: state.latestTurn.startedAt } : {}),
+        completedAt: state.latestTurn.finishedAt,
+        ...(state.latestTurn.startedAt !== undefined ? { durationMs: Math.max(0, state.latestTurn.finishedAt - state.latestTurn.startedAt) } : {}),
+        ...(state.latestTurn.error ? { error: { message: state.latestTurn.error } } : {}),
+      };
+    }
   }
 
   private acceptRelayControlEnvelope(params: Record<string, unknown> | undefined, threadId: string): boolean {
@@ -2666,6 +2799,7 @@ export class CodexDriver implements AgentDriver {
     this.pendingUserMessageOrigins.clear();
     this.mirroredUserMessageItems.clear();
     this.relayCommandOrigins.clear();
+    this.requestedModeChanges.clear();
     this.relayControlRevisions.clear();
     this.relayResyncRequested.clear();
     this.sideConversations.clear();
@@ -2710,6 +2844,7 @@ export class CodexDriver implements AgentDriver {
     this.ready = undefined;
     this.gatewayEpoch = undefined;
     this.relayCommandOrigins.clear();
+    this.requestedModeChanges.clear();
     this.relayControlRevisions.clear();
     this.relayResyncRequested.clear();
   }

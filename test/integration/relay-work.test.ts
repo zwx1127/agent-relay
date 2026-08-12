@@ -473,8 +473,8 @@ describe("experimental relay work behavior", () => {
     expect(adapter.sent.at(-1)?.options?.replyToMessageId).toBe(secondAnswer?.messageId);
   });
 
-  test("applies shared Relay thread mode without changing the transcript", async () => {
-    const { router, store, agent, path } = experimentalFixture();
+  test("renders external shared mode changes without echoing the initiating IM scope or changing the transcript", async () => {
+    const { router, store, adapter, agent, path } = experimentalFixture();
     const key = sessionKey("1", "demo");
     const status = await agent.start({ conversationId: "1", scopeKey: "1", workspaceName: "demo", workspacePath: path, threadId: "shared-thread" });
     store.markSessionStarted(key, "1", "demo", 1, status.threadId, "1");
@@ -485,16 +485,111 @@ describe("experimental relay work behavior", () => {
       gatewayEpoch: "epoch-1",
       threadRevision: 1,
       threadId: "shared-thread",
-      collaborationMode: "plan",
-      collaborationModeApplied: false,
+      collaborationMode: "default",
+      collaborationModeApplied: true,
+      threadStatus: "idle",
+      waitingOn: null,
       revision: 1,
       updatedAt: 10,
     });
+    await router.handleAgentOutput({
+      type: "relay_thread_state",
+      sessionKey: key,
+      gatewayEpoch: "epoch-1",
+      threadRevision: 2,
+      threadId: "shared-thread",
+      collaborationMode: "plan",
+      collaborationModeApplied: true,
+      collaborationModeSource: { kind: "codexCli", label: "Codex CLI" },
+      collaborationModeUpdatedAt: 20,
+      threadStatus: "idle",
+      waitingOn: null,
+      revision: 2,
+      updatedAt: 20,
+    });
     expect(store.getCollaborationMode(key)).toBe("plan");
-    expect(store.getPendingCollaborationMode(key)).toBe("plan");
+    expect(store.getPendingCollaborationMode(key)).toBeUndefined();
+    expect(adapter.sent.at(-1)?.text).toContain("Shared chat mode changed.");
+    expect(adapter.sent.at(-1)?.text).toContain("Mode: Plan");
+    expect(adapter.sent.at(-1)?.text).toContain("Source: Codex CLI");
+
+    const sentBeforeOwnChange = adapter.sent.length;
+    await router.handleAgentOutput({
+      type: "relay_thread_state",
+      sessionKey: key,
+      gatewayEpoch: "epoch-1",
+      threadRevision: 3,
+      initiatedByClient: true,
+      threadId: "shared-thread",
+      collaborationMode: "default",
+      collaborationModeApplied: true,
+      collaborationModeSource: { kind: "relay", label: "Agent Relay" },
+      collaborationModeUpdatedAt: 30,
+      threadStatus: "idle",
+      waitingOn: null,
+      revision: 3,
+      updatedAt: 30,
+    });
+    expect(adapter.sent).toHaveLength(sentBeforeOwnChange);
 
     expect(store.latestTranscriptEvent("1", "demo", "user")).toBeUndefined();
     expect(store.latestTranscriptEvent("1", "demo", "agent")).toBeUndefined();
+  });
+
+  test("renders an external interrupt fallback when no activity card exists", async () => {
+    const { router, store, adapter, agent, path } = experimentalFixture();
+    const key = sessionKey("1", "demo");
+    const status = await agent.start({ conversationId: "1", scopeKey: "1", workspaceName: "demo", workspacePath: path, threadId: "shared-thread" });
+    store.markSessionStarted(key, "1", "demo", 1, status.threadId, "1");
+
+    await router.handleAgentOutput({
+      type: "relay_thread_state",
+      sessionKey: key,
+      gatewayEpoch: "epoch-1",
+      threadRevision: 1,
+      threadId: "shared-thread",
+      collaborationMode: "default",
+      collaborationModeApplied: true,
+      threadStatus: "idle",
+      waitingOn: null,
+      latestTurn: {
+        turnId: "external-turn",
+        status: "interrupted",
+        source: { kind: "codexCli", label: "Codex CLI" },
+        interruptedBy: { kind: "codexCli", label: "Codex CLI" },
+        finishedAt: 1_700_000_001_000,
+      },
+      revision: 1,
+      updatedAt: 1_700_000_001_000,
+    });
+    await router.handleAgentOutput({
+      type: "turn_completed",
+      sessionKey: key,
+      turnId: "external-turn",
+      status: "interrupted",
+    });
+
+    expect(adapter.sent.at(-1)?.text).toContain("Codex turn interrupted.");
+    expect(adapter.sent.at(-1)?.text).toContain("Source: Codex CLI");
+    expect(adapter.sent.at(-1)?.text).toContain("2023-11-14T22:13:21Z");
+    expect(store.latestTranscriptEvent("1", "demo", "agent")).toBeUndefined();
+  });
+
+  test("does not label a local interrupt as external without shared terminal state", async () => {
+    const { router, store, adapter, agent, path } = experimentalFixture();
+    const key = sessionKey("1", "demo");
+    const status = await agent.start({ conversationId: "1", scopeKey: "1", workspaceName: "demo", workspacePath: path });
+    store.markSessionStarted(key, "1", "demo", 1, status.threadId, "1");
+    const sentBeforeInterrupt = adapter.sent.length;
+
+    await router.handleAgentOutput({
+      type: "turn_completed",
+      sessionKey: key,
+      turnId: "local-turn",
+      status: "interrupted",
+    });
+
+    expect(adapter.sent).toHaveLength(sentBeforeInterrupt);
   });
 
   test("synchronizes Plan implementation state and removes buttons in every shared scope", async () => {
@@ -573,6 +668,8 @@ describe("experimental relay work behavior", () => {
         threadId: "shared-thread",
         collaborationMode: "plan",
         collaborationModeApplied: true,
+        threadStatus: "idle",
+        waitingOn: null,
         revision: 10,
         updatedAt: 100,
       },
@@ -779,6 +876,8 @@ describe("experimental relay work behavior", () => {
         threadId: "shared-thread",
         collaborationMode: "plan",
         collaborationModeApplied: true,
+        threadStatus: "idle",
+        waitingOn: null,
         revision: 2,
         updatedAt: 20,
       },
@@ -817,6 +916,8 @@ describe("experimental relay work behavior", () => {
         threadId: "shared-thread",
         collaborationMode: "default",
         collaborationModeApplied: true,
+        threadStatus: "idle",
+        waitingOn: null,
         revision: 1,
         updatedAt: 10,
       },

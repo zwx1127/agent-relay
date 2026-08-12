@@ -604,7 +604,23 @@ describe("relay controller tasks and media", () => {
     expect(agent.sent[0]?.options?.attachments?.[0]?.type).toBe("localImage");
   });
 
-  test("an explicit Plan switch remains pending when its input steers an active turn", async () => {
+  test("a failed Plan photo prompt does not leak its mode into the next turn", async () => {
+    const { router, store, adapter, agent, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+    adapter.downloads.set("photo-large", new Uint8Array([1, 2, 3]).buffer);
+    agent.failSend = new Error("mode start rejected");
+
+    await router.handle(mediaMessage("/plan inspect this layout"));
+
+    expect(adapter.sent.at(-1)?.text).toContain("mode start rejected");
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
+    expect(store.getPendingCollaborationMode("codex:1:demo")).toBeUndefined();
+  });
+
+  test("a Plan photo prompt is rejected while a turn is active without leaving a pending mode", async () => {
     const { router, store, adapter, agent, root } = fixture();
     const path = join(root, "demo");
     mkdirSync(path);
@@ -614,17 +630,13 @@ describe("relay controller tasks and media", () => {
 
     await router.handle(textMessage("current work"));
     expect(agent.getStatus("codex:1:demo")?.activeTurnId).toBe("turn-1");
+    const sendsBeforePlan = agent.sent.length;
 
     await router.handle(mediaMessage("/plan inspect during turn"));
 
-    expect(agent.sent.at(-1)?.options?.collaborationModeExplicit).toBe(true);
-    expect(store.getPendingCollaborationMode("codex:1:demo")).toBe("plan");
-
-    agent.getStatus("codex:1:demo")!.activeTurnId = undefined;
-    await router.handleAgentOutput({ type: "turn_completed", sessionKey: "codex:1:demo", turnId: "turn-1" });
-    await router.handle(textMessage("next plan turn"));
-
-    expect(agent.sent.at(-1)).toEqual(sentPrompt("next plan turn", "plan", true));
+    expect(agent.sent).toHaveLength(sendsBeforePlan);
+    expect(adapter.sent.at(-1)?.text).toContain("Codex is busy.");
+    expect(store.getCollaborationMode("codex:1:demo")).toBe("default");
     expect(store.getPendingCollaborationMode("codex:1:demo")).toBeUndefined();
   });
 

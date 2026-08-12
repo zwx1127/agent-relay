@@ -35,6 +35,8 @@ export interface AgentRelayThreadStateEvent extends AgentRelayThreadState {
   sessionKey: string;
   gatewayEpoch: string;
   threadRevision: number;
+  /** True only for the Relay scope that initiated the projected mode change. */
+  initiatedByClient?: boolean;
 }
 
 export interface AgentRelayPlanDecisionStateEvent extends AgentRelayPlanDecisionState {

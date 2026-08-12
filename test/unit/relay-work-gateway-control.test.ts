@@ -40,6 +40,20 @@ function notifications(target: TestClient, method: string): Array<Record<string,
   return target.sent.filter((message) => message.method === method);
 }
 
+function observeIdle(control: GatewayRelayControl, threadId = "thread-1"): void {
+  control.handleObserver({ method: "thread/status/changed", params: { threadId, status: { type: "idle" } } });
+}
+
+function updateNativeMode(control: GatewayRelayControl, target: TestClient, id: number, mode: "default" | "plan"): void {
+  const routed = control.handleFrontend(target, {
+    id,
+    method: "thread/settings/update",
+    params: { threadId: "thread-1", collaborationMode: { mode, settings: {} } },
+  });
+  expect(routed.handled).toBe(false);
+  control.handleBackend(target, { id, result: {} });
+}
+
 describe("experimental Relay Gateway control plane", () => {
   test("keeps thread mode and command snapshots in memory with revisioned envelopes", () => {
     const origin = client("origin", "agent-relay", ["thread-1"]);
@@ -48,14 +62,27 @@ describe("experimental Relay Gateway control plane", () => {
     const control = new GatewayRelayControl(() => clients.values());
     hello(control, origin);
     hello(control, peer);
+    observeIdle(control);
+    origin.sent.length = 0;
+    peer.sent.length = 0;
 
     control.handleFrontend(origin, {
       id: 2,
       method: RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
       params: { threadId: "thread-1", operation: "set", mode: "plan" },
     });
+    expect(origin.sent.find((message) => message.id === 2)?.result).toEqual({ collaborationMode: "plan" });
+    expect(notifications(peer, "agent-relay/control/threadState")).toHaveLength(0);
+    updateNativeMode(control, origin, 22, "plan");
     const state = peer.sent.find((message) => message.method === "agent-relay/control/threadState");
-    expect(state?.params).toMatchObject({ threadId: "thread-1", collaborationMode: "plan", collaborationModeApplied: false });
+    expect(state?.params).toMatchObject({
+      threadId: "thread-1",
+      collaborationMode: "plan",
+      collaborationModeApplied: true,
+      collaborationModeSource: { kind: "relay", label: "Agent Relay" },
+      threadStatus: "idle",
+      waitingOn: null,
+    });
 
     const metadata = { version: RELAY_CONTROL_PROTOCOL_VERSION, commandId: "command-1", kind: "review", originToken: "origin-1" };
     const routed = control.handleFrontend(origin, {
@@ -75,7 +102,7 @@ describe("experimental Relay Gateway control plane", () => {
     control.sendSnapshot(peer, "thread-1");
     const snapshot = notifications(peer, RELAY_CONTROL_SNAPSHOT_METHOD).at(-1)?.params as Record<string, unknown>;
     expect(snapshot).toMatchObject({ gatewayEpoch: control.gatewayEpoch, consistency: "live" });
-    expect(snapshot.threadState).toMatchObject({ collaborationMode: "plan", collaborationModeApplied: false });
+    expect(snapshot.threadState).toMatchObject({ collaborationMode: "plan", collaborationModeApplied: true, threadStatus: "idle" });
     expect(snapshot.commands).toEqual([expect.objectContaining({ commandId: "command-1", kind: "review", phase: "completed" })]);
     expect(JSON.stringify(snapshot)).not.toContain("uncommittedChanges");
     expect(JSON.stringify(snapshot)).not.toContain("origin-1");
@@ -142,21 +169,14 @@ describe("experimental Relay Gateway control plane", () => {
     const clients = new Map([[relay.data.id, relay]]);
     const control = new GatewayRelayControl(() => clients.values());
     hello(control, relay);
-    control.handleFrontend(relay, {
-      id: 60,
-      method: RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
-      params: { threadId: "thread-1", operation: "set", mode: "plan" },
-    });
+    observeIdle(control);
+    updateNativeMode(control, relay, 60, "plan");
     control.handleFrontend(relay, {
       id: 61,
       method: RELAY_CONTROL_PLAN_DECISION_REGISTER_METHOD,
       params: { threadId: "thread-1", planTurnId: "plan-turn" },
     });
-    control.handleFrontend(relay, {
-      id: 62,
-      method: RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
-      params: { threadId: "thread-1", operation: "set", mode: "default" },
-    });
+    updateNativeMode(control, relay, 62, "default");
     control.handleFrontend(relay, {
       id: 63,
       method: RELAY_CONTROL_PLAN_DECISION_CLAIM_METHOD,
@@ -164,6 +184,156 @@ describe("experimental Relay Gateway control plane", () => {
     });
 
     expect(relay.sent.find((message) => message.id === 63)?.result).toMatchObject({ claimed: false, state: { phase: "expired" } });
+  });
+
+  test("rejects collaboration mode changes while active or waiting", () => {
+    const native = client("native", "codex-cli", ["thread-1"]);
+    const relay = client("relay", "agent-relay", ["thread-1"]);
+    const control = new GatewayRelayControl(() => [native, relay]);
+    hello(control, relay);
+    control.handleObserver({
+      method: "thread/status/changed",
+      params: { threadId: "thread-1", status: { type: "active", activeFlags: ["waitingOnUserInput"] } },
+    });
+    relay.sent.length = 0;
+
+    expect(control.handleFrontend(relay, {
+      id: 70,
+      method: RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
+      params: { threadId: "thread-1", operation: "toggle" },
+    }).handled).toBe(true);
+    expect(relay.sent.find((message) => message.id === 70)?.error).toMatchObject({
+      code: -32000,
+      message: "'/plan' is disabled while a task is in progress.",
+    });
+
+    expect(control.handleFrontend(native, {
+      id: 71,
+      method: "thread/settings/update",
+      params: { threadId: "thread-1", collaborationMode: { mode: "plan", settings: {} } },
+    }).handled).toBe(true);
+    expect(native.sent.find((message) => message.id === 71)?.error).toMatchObject({ code: -32000 });
+    expect(notifications(relay, "agent-relay/control/threadState")).toHaveLength(0);
+  });
+
+  test("serializes idle mode changes with turn starts in both request orders", () => {
+    const native = client("native", "codex-cli", ["thread-1"]);
+    const relay = client("relay", "agent-relay", ["thread-1"]);
+    const control = new GatewayRelayControl(() => [native, relay]);
+    hello(control, relay);
+    observeIdle(control);
+
+    control.handleFrontend(relay, {
+      id: 72,
+      method: RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
+      params: { threadId: "thread-1", operation: "set", mode: "plan" },
+    });
+    expect(control.handleFrontend(native, {
+      id: 73,
+      method: "turn/start",
+      params: { threadId: "thread-1", input: [{ type: "text", text: "work" }] },
+    }).handled).toBe(true);
+    expect(native.sent.find((message) => message.id === 73)?.error).toMatchObject({ code: -32000 });
+
+    control.handleFrontend(relay, {
+      id: 74,
+      method: "thread/settings/update",
+      params: { threadId: "thread-1", collaborationMode: { mode: "plan", settings: {} } },
+    });
+    control.handleBackend(relay, { id: 74, result: {} });
+    control.handleFrontend(native, {
+      id: 75,
+      method: "turn/start",
+      params: { threadId: "thread-1", input: [{ type: "text", text: "work" }] },
+    });
+    expect(control.handleFrontend(relay, {
+      id: 76,
+      method: RELAY_CONTROL_THREAD_STATE_UPDATE_METHOD,
+      params: { threadId: "thread-1", operation: "set", mode: "default" },
+    }).handled).toBe(true);
+    expect(relay.sent.find((message) => message.id === 76)?.error).toMatchObject({
+      code: -32000,
+      message: "'/plan' is disabled while a task is in progress.",
+    });
+  });
+
+  test("projects native start, waiting, interrupt, and terminal source without letting old terminals clear a new turn", () => {
+    const native = client("native", "codex-cli", ["thread-1"]);
+    const relay = client("relay", "agent-relay", ["thread-1"]);
+    const control = new GatewayRelayControl(() => [native, relay]);
+    hello(control, relay);
+    observeIdle(control);
+    relay.sent.length = 0;
+
+    control.handleFrontend(native, {
+      id: 80,
+      method: "turn/start",
+      params: { threadId: "thread-1", input: [{ type: "text", text: "work" }] },
+    });
+    control.handleBackend(native, {
+      method: "turn/started",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "inProgress", startedAt: 100 } },
+    });
+    control.handleBackend(native, {
+      method: "thread/status/changed",
+      params: { threadId: "thread-1", status: { type: "active", activeFlags: ["waitingOnApproval"] } },
+    });
+    control.handleObserver({
+      method: "turn/started",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "inProgress", startedAt: 100, itemsView: "summary" } },
+    });
+    expect(notifications(relay, "agent-relay/control/threadState").at(-1)?.params).toMatchObject({
+      threadStatus: "active",
+      waitingOn: "approval",
+      activeTurn: { turnId: "turn-1", source: { kind: "codexCli", label: "Codex CLI" }, startedAt: 100_000 },
+    });
+
+    control.handleFrontend(native, {
+      id: 81,
+      method: "turn/interrupt",
+      params: { threadId: "thread-1", turnId: "turn-1" },
+    });
+    expect(notifications(relay, "agent-relay/control/threadState").at(-1)?.params).toMatchObject({
+      activeTurn: { turnId: "turn-1", interruptRequest: { source: { kind: "codexCli" } } },
+    });
+    control.handleBackend(native, {
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "interrupted", startedAt: 100, completedAt: 101 } },
+    });
+    control.handleObserver({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "interrupted", startedAt: 100, completedAt: 101, itemsView: "summary" } },
+    });
+    expect(notifications(relay, "agent-relay/control/threadState").at(-1)?.params).toMatchObject({
+      threadStatus: "idle",
+      waitingOn: null,
+      latestTurn: {
+        turnId: "turn-1",
+        status: "interrupted",
+        source: { kind: "codexCli" },
+        interruptedBy: { kind: "codexCli" },
+        finishedAt: 101_000,
+      },
+    });
+
+    control.handleFrontend(native, {
+      id: 82,
+      method: "turn/start",
+      params: { threadId: "thread-1", input: [{ type: "text", text: "new" }] },
+    });
+    control.handleBackend(native, {
+      method: "turn/started",
+      params: { threadId: "thread-1", turn: { id: "turn-2", status: "inProgress", startedAt: 102 } },
+    });
+    control.handleObserver({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", completedAt: 103 } },
+    });
+    expect(notifications(relay, "agent-relay/control/threadState").at(-1)?.params).toMatchObject({
+      threadStatus: "active",
+      activeTurn: { turnId: "turn-2" },
+      latestTurn: { turnId: "turn-1", status: "interrupted" },
+    });
   });
 
   test("keeps ephemeral BTW forks outside Relay control snapshots", () => {
@@ -290,5 +460,58 @@ describe("experimental Relay Gateway control plane", () => {
       params: { gatewayEpoch: control.gatewayEpoch, threadId: "thread-1", revision: 0 },
     });
     expect(peer.data.relayControlAcks?.get("thread-1")).toBe(0);
+  });
+
+  test("hydrates active and terminal state from observer resume snapshots without replay data", () => {
+    const native = client("native", "codex-cli", ["thread-1"]);
+    const peer = client("peer", "agent-relay", ["thread-1"]);
+    const control = new GatewayRelayControl(() => [native, peer]);
+    hello(control, peer);
+
+    control.handleObserverSnapshot("thread-1", {
+      thread: { id: "thread-1", status: { type: "active", activeFlags: ["waitingOnUserInput"] } },
+      initialTurnsPage: { data: [{ id: "turn-1", status: "inProgress", startedAt: 200 }] },
+    });
+    peer.sent.length = 0;
+    control.sendSnapshot(peer, "thread-1");
+    expect((notifications(peer, RELAY_CONTROL_SNAPSHOT_METHOD).at(-1)?.params as Record<string, unknown>)?.threadState).toMatchObject({
+      threadStatus: "active",
+      waitingOn: "userInput",
+      activeTurn: { turnId: "turn-1", source: { kind: "unknown" }, startedAt: 200_000 },
+    });
+
+    control.handleFrontend(native, {
+      id: 90,
+      method: "turn/interrupt",
+      params: { threadId: "thread-1", turnId: "turn-1" },
+    });
+
+    control.handleObserverSnapshot("thread-1", {
+      thread: { id: "thread-1", status: { type: "idle" } },
+      initialTurnsPage: { data: [{ id: "turn-1", status: "interrupted", startedAt: 200, completedAt: 201, error: { message: "boom" } }] },
+    });
+    peer.sent.length = 0;
+    control.sendSnapshot(peer, "thread-1");
+    expect((notifications(peer, RELAY_CONTROL_SNAPSHOT_METHOD).at(-1)?.params as Record<string, unknown>)?.threadState).toMatchObject({
+      threadStatus: "idle",
+      waitingOn: null,
+      latestTurn: {
+        turnId: "turn-1",
+        status: "interrupted",
+        source: { kind: "unknown" },
+        interruptedBy: { kind: "codexCli" },
+        finishedAt: 201_000,
+        error: "boom",
+      },
+    });
+
+    control.handleObserverSnapshot("thread-1", {
+      thread: { id: "thread-1", status: { type: "idle" } },
+      initialTurnsPage: { data: [] },
+    });
+    peer.sent.length = 0;
+    control.sendSnapshot(peer, "thread-1");
+    const emptyState = (notifications(peer, RELAY_CONTROL_SNAPSHOT_METHOD).at(-1)?.params as Record<string, unknown>)?.threadState as Record<string, unknown>;
+    expect(emptyState.latestTurn).toBeUndefined();
   });
 });

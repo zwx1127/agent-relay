@@ -1,4 +1,5 @@
 import type { ConversationId } from "../../domain/ids.ts";
+import type { AgentRelayThreadState } from "./control.ts";
 import type { AgentActivity, AgentTurnError, AgentTurnStatus } from "./events.ts";
 import type { AgentThreadGoal, AgentTokenUsage } from "./thread.ts";
 
@@ -59,6 +60,8 @@ export interface AgentSessionStatus {
   collaborationMode?: "default" | "plan";
   collaborationModeApplied?: boolean;
   relayStateConsistency?: "live" | "resyncing";
+  /** Latest Gateway control-plane projection for cross-client handoff UI. */
+  relayThreadState?: AgentRelayThreadState;
 }
 
 export interface StartAgentOptions {

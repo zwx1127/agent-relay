@@ -207,6 +207,14 @@ export class MediaRelayService {
     if (prompt && !this.deps.sideConversationActive(scope.scopeKey)) {
       const status = await this.deps.ensureAgentStarted(scope.scopeKey, workspace);
       if (await this.deps.sendWaitingPromptNotice(scope.scopeKey, status)) return;
+      if (planMatch && (status.activeTurnId
+        || this.deps.store.countTasks(scope.scopeKey, workspace.name, ["waiting", "queued", "running", "blocked"]) > 0)) {
+        await this.deps.sendRendered(scope.scopeKey, messageWithTitle(
+          "Codex is busy.",
+          "Wait for the current turn, answer the pending question, or handle the approval request before running this command.",
+        ));
+        return;
+      }
     }
     const images: AgentImageInput[] = [];
     for (const media of sorted) {
@@ -220,11 +228,23 @@ export class MediaRelayService {
       });
       return;
     }
-    if (planMatch && !this.deps.sideConversationActive(scope.scopeKey)) this.deps.store.requestCollaborationMode(sessionKey(scope.scopeKey, workspace.name), "plan");
-    await this.deps.submitTask(scope.scopeKey, prompt, sorted[0]?.messageId, "auto", {
-      text: prompt,
-      attachments: images.map((image) => ({ type: "localImage", path: image.path, ...(image.caption ? { caption: image.caption } : {}) })),
-    });
+    const planSessionKey = planMatch && !this.deps.sideConversationActive(scope.scopeKey)
+      ? sessionKey(scope.scopeKey, workspace.name)
+      : undefined;
+    const previousMode = planSessionKey ? this.deps.store.getCollaborationMode(planSessionKey) : undefined;
+    if (planSessionKey) this.deps.store.requestCollaborationMode(planSessionKey, "plan");
+    try {
+      await this.deps.submitTask(scope.scopeKey, prompt, sorted[0]?.messageId, "auto", {
+        text: prompt,
+        attachments: images.map((image) => ({ type: "localImage", path: image.path, ...(image.caption ? { caption: image.caption } : {}) })),
+      });
+    } catch (error) {
+      if (planSessionKey && previousMode) {
+        const projectedMode = this.deps.agent.getStatus(planSessionKey)?.collaborationMode;
+        this.deps.store.setCollaborationMode(planSessionKey, projectedMode ?? previousMode);
+      }
+      throw error;
+    }
   }
 
   private async downloadAndSavePhoto(workspace: WorkspaceRecord, message: MediaInboundMessage): Promise<AgentImageInput> {

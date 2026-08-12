@@ -5,6 +5,7 @@ describe("experimental Relay Gateway observer", () => {
   test("re-subscribes anchored threads and keeps observing after its backend socket drops", async () => {
     const received: Array<Record<string, unknown>> = [];
     const observed: Array<Record<string, unknown>> = [];
+    const snapshots: Array<{ threadId: string; value: unknown }> = [];
     let activeSocket: { close(code?: number, reason?: string): void } | undefined;
     const server = Bun.serve({
       hostname: "127.0.0.1",
@@ -35,6 +36,8 @@ describe("experimental Relay Gateway observer", () => {
     const observer = new GatewayObserver(
       `ws://127.0.0.1:${server.port}`,
       (message) => observed.push(message),
+      undefined,
+      (threadId, value) => snapshots.push({ threadId, value }),
     );
 
     try {
@@ -47,6 +50,10 @@ describe("experimental Relay Gateway observer", () => {
         initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "full" },
       });
       expect(observed).toContainEqual(expect.objectContaining({ method: "thread/goal/updated" }));
+      expect(snapshots).toContainEqual({
+        threadId: "thread-1",
+        value: { thread: { id: "thread-1" }, initialTurnsPage: { data: [] } },
+      });
 
       activeSocket?.close(1012, "test reconnect");
       await waitFor(() => received.filter((message) => message.method === "thread/resume").length >= 2, 3_000);

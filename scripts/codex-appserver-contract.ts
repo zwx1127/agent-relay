@@ -59,11 +59,14 @@ function assertGeneratedProtocol(schemaDir: string): void {
   const threadReadPath = join(schemaDir, "v2", "ThreadReadParams.ts");
   const threadPath = join(schemaDir, "v2", "Thread.ts");
   const threadStatusPath = join(schemaDir, "v2", "ThreadStatus.ts");
+  const threadActiveFlagPath = join(schemaDir, "v2", "ThreadActiveFlag.ts");
+  const threadSettingsUpdatePath = join(schemaDir, "v2", "ThreadSettingsUpdateParams.ts");
   const threadItemPath = join(schemaDir, "v2", "ThreadItem.ts");
   const turnPath = join(schemaDir, "v2", "Turn.ts");
   const turnStartPath = join(schemaDir, "v2", "TurnStartParams.ts");
   const turnSteerPath = join(schemaDir, "v2", "TurnSteerParams.ts");
-  if (![clientRequestPath, capabilitiesPath, userInputPath, notificationsPath, threadResumePath, threadReadPath, threadPath, threadStatusPath, threadItemPath, turnPath, turnStartPath, turnSteerPath].every(existsSync)) throw new Error("Experimental TypeScript schema was not generated.");
+  const turnInterruptPath = join(schemaDir, "v2", "TurnInterruptParams.ts");
+  if (![clientRequestPath, capabilitiesPath, userInputPath, notificationsPath, threadResumePath, threadReadPath, threadPath, threadStatusPath, threadActiveFlagPath, threadSettingsUpdatePath, threadItemPath, turnPath, turnStartPath, turnSteerPath, turnInterruptPath].every(existsSync)) throw new Error("Experimental TypeScript schema was not generated.");
   const requests = readFileSync(clientRequestPath, "utf8");
   const capabilities = readFileSync(capabilitiesPath, "utf8");
   const userInput = readFileSync(userInputPath, "utf8");
@@ -72,16 +75,20 @@ function assertGeneratedProtocol(schemaDir: string): void {
   const threadRead = readFileSync(threadReadPath, "utf8");
   const thread = readFileSync(threadPath, "utf8");
   const threadStatus = readFileSync(threadStatusPath, "utf8");
+  const threadActiveFlag = readFileSync(threadActiveFlagPath, "utf8");
+  const threadSettingsUpdate = readFileSync(threadSettingsUpdatePath, "utf8");
   const threadItem = readFileSync(threadItemPath, "utf8");
   const turn = readFileSync(turnPath, "utf8");
   const turnStart = readFileSync(turnStartPath, "utf8");
   const turnSteer = readFileSync(turnSteerPath, "utf8");
+  const turnInterrupt = readFileSync(turnInterruptPath, "utf8");
   for (const method of [
     "model/list",
     "collaborationMode/list",
     "review/start",
     "thread/compact/start",
     "thread/read",
+    "thread/settings/update",
     "thread/name/set",
     "thread/goal/set",
     "thread/goal/clear",
@@ -93,6 +100,8 @@ function assertGeneratedProtocol(schemaDir: string): void {
     "thread/backgroundTerminals/terminate",
     "skills/list",
     "fuzzyFileSearch",
+    "turn/start",
+    "turn/interrupt",
   ]) {
     if (!requests.includes(`\"method\": \"${method}\"`)) throw new Error(`Generated schema is missing ${method}.`);
   }
@@ -111,6 +120,9 @@ function assertGeneratedProtocol(schemaDir: string): void {
     "thread/goal/updated",
     "thread/goal/cleared",
     "thread/status/changed",
+    "thread/settings/updated",
+    "turn/started",
+    "turn/completed",
     "thread/archived",
     "thread/deleted",
     "hook/started",
@@ -125,12 +137,18 @@ function assertGeneratedProtocol(schemaDir: string): void {
   for (const status of ["notLoaded", "idle", "systemError", "active", "activeFlags"]) {
     if (!threadStatus.includes(status)) throw new Error(`Generated ThreadStatus is missing ${status}.`);
   }
+  for (const flag of ["waitingOnApproval", "waitingOnUserInput"]) {
+    if (!threadActiveFlag.includes(flag)) throw new Error(`Generated ThreadActiveFlag is missing ${flag}.`);
+  }
+  if (!threadSettingsUpdate.includes("collaborationMode")) throw new Error("Generated thread/settings/update schema is missing collaborationMode.");
   if (!threadItem.includes('"type": "userMessage"') || !threadItem.includes("clientId") || !threadItem.includes("content")) {
     throw new Error("Generated ThreadItem is missing shared user-message fields.");
   }
   if (!turnStart.includes("clientUserMessageId") || !turnSteer.includes("clientUserMessageId")) {
     throw new Error("Generated turn input schemas are missing clientUserMessageId.");
   }
+  if (!turnStart.includes("collaborationMode")) throw new Error("Generated turn/start schema is missing collaborationMode.");
+  if (!turnInterrupt.includes("threadId") || !turnInterrupt.includes("turnId")) throw new Error("Generated turn/interrupt schema is missing threadId or turnId.");
   for (const field of ["items", "status", "error", "startedAt", "completedAt", "durationMs"]) {
     if (!turn.includes(field)) throw new Error(`Generated Turn is missing ${field}.`);
   }

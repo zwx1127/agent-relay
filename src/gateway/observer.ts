@@ -24,6 +24,7 @@ export class GatewayObserver {
     private readonly backendUrl: string,
     private readonly onMessage: (message: Record<string, unknown>) => void,
     private readonly onError: (error: Error) => void = () => undefined,
+    private readonly onSnapshot: (threadId: string, value: unknown) => void = () => undefined,
   ) {}
 
   async start(): Promise<void> {
@@ -105,11 +106,12 @@ export class GatewayObserver {
 
   private async resume(threadId: string): Promise<void> {
     if (this.socket?.readyState !== WebSocket.OPEN) return;
-    await this.request("thread/resume", {
+    const result = await this.request("thread/resume", {
       threadId,
       excludeTurns: true,
       initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "full" },
     });
+    this.onSnapshot(threadId, result);
   }
 
   private request(method: string, params?: unknown): Promise<unknown> {

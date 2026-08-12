@@ -99,12 +99,23 @@ export class RelayController {
       getSessionContext: (sessionKeyValue) => {
         const status = deps.agent.getStatus(sessionKeyValue);
         const stored = deps.store.getSession(sessionKeyValue);
+        const projected = status?.relayThreadState;
+        const projectedTurn = projected?.activeTurn
+          ?? (projected?.latestTurn && projected.latestTurn.turnId === status?.latestTurn?.id ? projected.latestTurn : undefined);
+        const interrupt = projected?.activeTurn?.interruptRequest
+          ?? (projected?.latestTurn?.interruptedBy
+            ? { source: projected.latestTurn.interruptedBy, requestedAt: projected.latestTurn.finishedAt }
+            : undefined);
         return {
           threadId: status?.threadId ?? stored?.thread_id ?? undefined,
           threadName: status?.threadName,
           collaborationMode: status?.collaborationMode ?? deps.store.getCollaborationMode(sessionKeyValue),
           goal: status?.threadGoal,
           activeTurnId: status?.activeTurnId,
+          ...(projectedTurn?.source.label ? { turnSourceLabel: projectedTurn.source.label } : {}),
+          ...(projectedTurn?.startedAt !== undefined ? { turnStartedAt: projectedTurn.startedAt } : {}),
+          ...(interrupt?.source.label ? { interruptSourceLabel: interrupt.source.label } : {}),
+          ...(interrupt?.requestedAt !== undefined ? { interruptAt: interrupt.requestedAt } : {}),
         };
       },
       sendRendered: (conversationId, rendered, options) => this.sendRendered(conversationId, rendered, options),

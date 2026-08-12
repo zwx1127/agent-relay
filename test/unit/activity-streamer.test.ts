@@ -169,6 +169,42 @@ describe("activity streamer lifecycle", () => {
     expect(edited.at(-1)?.text).not.toContain("No new events.");
   });
 
+  test("locks the turn mode while rendering shared source and interrupt metadata", async () => {
+    const sent: string[] = [];
+    const edited: string[] = [];
+    const context: ActivitySessionContext = {
+      threadId: "thread-a",
+      collaborationMode: "default",
+      goal: null,
+      activeTurnId: "turn-a",
+      turnSourceLabel: "Codex CLI",
+      turnStartedAt: 1_700_000_000_000,
+    };
+    const streamer = activityStreamer(context, sent, edited, { quietMs: 1, minEditMs: 0, maxMs: 10 });
+
+    await streamer.handle({
+      type: "activity",
+      sessionKey: "codex:1:demo",
+      threadId: "thread-a",
+      turnId: "turn-a",
+      activity: { kind: "plan", steps: [{ step: "Shared work", status: "inProgress" }] },
+    });
+    expect(sent[0]).toContain("Mode Default");
+    expect(sent[0]).toContain("Source Codex CLI");
+    expect(sent[0]).toContain("2023-11-14T22:13:20Z");
+
+    context.collaborationMode = "plan";
+    context.interruptSourceLabel = "Codex CLI";
+    context.interruptAt = 1_700_000_001_000;
+    await streamer.refreshContext("codex:1:demo");
+    await streamer.setPhase("codex:1:demo", "interrupting");
+
+    expect(edited.at(-1)).toContain("Interrupting");
+    expect(edited.at(-1)).toContain("Mode Default");
+    expect(edited.at(-1)).toContain("Interrupt Codex CLI");
+    expect(edited.at(-1)).toContain("2023-11-14T22:13:21Z");
+  });
+
   test("routine edits are coalesced behind the minimum edit interval", async () => {
     const sent: string[] = [];
     const edited: string[] = [];

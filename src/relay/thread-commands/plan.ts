@@ -164,7 +164,7 @@ export class PlanCommandService {
       : update.operation === "toggle"
         ? current === "plan" ? "default" : "plan"
         : update.mode ?? current;
-    this.deps.store.requestCollaborationMode(key, mode);
+    this.deps.store.setCollaborationMode(key, mode);
     return mode;
   }
 
