@@ -54,6 +54,7 @@ interface InteractiveRequestClaim {
   kind: InteractiveRequestKind;
   signature: string;
   request: InteractiveRequestEvent;
+  localUserInputResultSignature?: string;
   state: "rendering" | "active" | "resolved";
   expiresAt: number;
   requestIds: Map<string, string | number>;
@@ -425,7 +426,15 @@ export class CodexPromptFlow {
 
   private async respondToCodexPrompt(response: { sessionKey: string; requestId: string | number; result: unknown }): Promise<void> {
     if (!this.deps.agent.respond) throw new Error("Agent driver cannot answer Codex prompts.");
-    await this.deps.agent.respond(response.sessionKey, response.requestId, response.result);
+    const claim = this.requestClaim(response.sessionKey, response.requestId);
+    const resultSignature = canonicalJson(response.result);
+    if (claim?.kind === "user_input_request") claim.localUserInputResultSignature = resultSignature;
+    try {
+      await this.deps.agent.respond(response.sessionKey, response.requestId, response.result);
+    } catch (error) {
+      if (claim?.localUserInputResultSignature === resultSignature) claim.localUserInputResultSignature = undefined;
+      throw error;
+    }
     await this.deps.markActiveTask(response.sessionKey, "running");
   }
 
@@ -508,6 +517,10 @@ export class CodexPromptFlow {
 
   async handleRequestResolved(event: AgentServerRequestResolvedEvent): Promise<void> {
     const claim = this.resolveRequestClaim(event);
+    const preserveLocalUserInput = claim?.kind === "user_input_request"
+      && claim.localUserInputResultSignature !== undefined
+      && Object.prototype.hasOwnProperty.call(event, "result")
+      && claim.localUserInputResultSignature === canonicalJson(event.result);
     const requestIds = claim ? [...claim.requestIds.values()] : [event.requestId];
     let rendered: { scopeKey: string; promptMessageId: MessageId } | undefined;
     for (const requestId of requestIds) {
@@ -518,7 +531,9 @@ export class CodexPromptFlow {
     }
     if (rendered) {
       this.deps.store.deletePendingPrompt(rendered.scopeKey, rendered.promptMessageId);
-      await this.retireResolvedPrompt(rendered.scopeKey, rendered.promptMessageId, event, claim?.request);
+      if (!preserveLocalUserInput) {
+        await this.retireResolvedPrompt(rendered.scopeKey, rendered.promptMessageId, event, claim?.request);
+      }
     }
     for (const requestId of requestIds) await this.mcp.resolve(event.sessionKey, requestId, event.result);
   }
@@ -552,6 +567,11 @@ export class CodexPromptFlow {
 
   private rememberRenderedRequest(sessionKeyValue: string, requestId: string | number, scopeKey: string, promptMessageId: MessageId): void {
     this.renderedRequests.set(codexRequestKey(sessionKeyValue, requestId), { scopeKey, promptMessageId });
+  }
+
+  private requestClaim(sessionKeyValue: string, requestId: string | number): InteractiveRequestClaim | undefined {
+    const logicalKey = this.requestAliases.get(codexRequestKey(sessionKeyValue, requestId));
+    return logicalKey ? this.requestClaims.get(logicalKey) : undefined;
   }
 
   private beginRequest(event: InteractiveRequestEvent): InteractiveRequestClaim | undefined {

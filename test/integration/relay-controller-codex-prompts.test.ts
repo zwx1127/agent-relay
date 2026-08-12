@@ -46,15 +46,53 @@ describe("relay controller Codex prompts", () => {
       { conversationId: "1", messageId: "1", emoji: "🤔" },
       { conversationId: "1", messageId: "1", emoji: "✍" },
     ]);
+    const localEditCount = adapter.edited.length;
     await router.handleAgentOutput({
       type: "server_request_resolved",
       sessionKey: "codex:1:demo",
       requestId: 77,
       result: { answers: { choice: { answers: ["Fast"] } } },
     });
+    expect(adapter.edited).toHaveLength(localEditCount);
     expect(adapter.edited.at(-1)?.text).toContain("Answered");
     expect(adapter.edited.at(-1)?.text).toContain("Fast");
     expect(adapter.edited.at(-1)?.text).not.toContain("Codex request resolved");
+    expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
+  });
+
+  test("codex option question replaces a local choice when another client wins", async () => {
+    const { router, store, adapter, root } = fixture();
+    const path = join(root, "demo");
+    mkdirSync(path);
+    store.upsertWorkspace({ name: "demo", path, createdAt: 1 });
+    store.bindConversation(1, "demo");
+
+    await router.handleAgentOutput({
+      type: "user_input_request",
+      sessionKey: "codex:1:demo",
+      requestId: "losing-choice",
+      questions: [{
+        id: "choice",
+        header: "Mode",
+        question: "Pick one.",
+        options: [{ label: "Fast", description: "Low detail" }, { label: "Deep", description: "More detail" }],
+      }],
+    });
+
+    const prompt = adapter.sent.at(-1)!;
+    const fast = prompt.options!.replyMarkup!.inline_keyboard[0]![0]!;
+    await router.handle(callbackMessage(fast.callback_data, 7, "cb-losing-fast", prompt.messageId));
+    expect(adapter.edited.at(-1)?.text).toBe("Answered: Fast");
+
+    await router.handleAgentOutput({
+      type: "server_request_resolved",
+      sessionKey: "codex:1:demo",
+      requestId: "losing-choice",
+      result: { answers: { choice: { answers: ["Deep"] } } },
+    });
+
+    expect(adapter.edited).toHaveLength(2);
+    expect(adapter.edited.at(-1)?.text).toBe("Answered: Deep");
     expect(adapter.edited.at(-1)?.options.replyMarkup?.inline_keyboard).toEqual([]);
   });
 
@@ -165,6 +203,15 @@ describe("relay controller Codex prompts", () => {
       requestId: 78,
       result: { answers: { choice: { answers: ["Fast"] } } },
     }]);
+    const localEditCount = adapter.edited.length;
+    await router.handleAgentOutput({
+      type: "server_request_resolved",
+      sessionKey: "codex:1:demo",
+      requestId: 78,
+      result: { answers: { choice: { answers: ["Fast"] } } },
+    });
+    expect(adapter.edited).toHaveLength(localEditCount);
+    expect(adapter.edited.at(-1)?.text).toBe("Answered: Fast");
   });
 
   test("submitting the final Plan answer returns the Activity card to Working", async () => {
@@ -507,6 +554,17 @@ describe("relay controller Codex prompts", () => {
       result: { answers: { notes: { answers: ["Use SQLite"] } } },
     }]);
     expect(agent.sent).toEqual([]);
+    const localSentCount = adapter.sent.length;
+    const localEditCount = adapter.edited.length;
+    await router.handleAgentOutput({
+      type: "server_request_resolved",
+      sessionKey: "codex:1:demo",
+      requestId: "req1",
+      result: { answers: { notes: { answers: ["Use SQLite"] } } },
+    });
+    expect(adapter.sent).toHaveLength(localSentCount);
+    expect(adapter.edited).toHaveLength(localEditCount);
+    expect(adapter.sent.filter((message) => message.text === "Answered: Use SQLite")).toHaveLength(1);
   });
 
   test("ordinary text is not forwarded while Codex waits for user input", async () => {
@@ -574,14 +632,17 @@ describe("relay controller Codex prompts", () => {
         second: { answers: ["B"] },
       },
     });
+    const localEditCount = adapter.edited.length;
     await router.handleAgentOutput({
       type: "server_request_resolved",
       sessionKey: "codex:1:demo",
       requestId: 88,
       result: { answers: { first: { answers: ["A"] }, second: { answers: ["B"] } } },
     });
-    expect(adapter.edited.at(-1)?.text).toContain("First: A");
-    expect(adapter.edited.at(-1)?.text).toContain("Second: B");
+    expect(adapter.edited).toHaveLength(localEditCount);
+    expect(adapter.edited.filter((message) => message.options.messageId === first.messageId).at(-1)?.text).toBe("Answered: A");
+    expect(adapter.edited.filter((message) => message.options.messageId === second.messageId).at(-1)?.text).toBe("Answered: B");
+    expect(adapter.edited.some((message) => message.text.includes("First: A") && message.text.includes("Second: B"))).toBe(false);
   });
 
   test("a secret answer resolved in another IM scope is shown on the terminal card", async () => {
