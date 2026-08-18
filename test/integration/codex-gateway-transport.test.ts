@@ -286,6 +286,140 @@ fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({ args: process.arg
     }
   });
 
+  test("ignores idempotent Goal resume snapshots while preserving real shared mutations", async () => {
+    const outputs: Array<Record<string, unknown>> = [];
+    let sendNotification: ((message: unknown) => void) | undefined;
+    const server = Bun.serve<{ name?: string }>({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request, bunServer) {
+        if (bunServer.upgrade(request, { data: {} })) return undefined;
+        return new Response("not found", { status: 404 });
+      },
+      websocket: {
+        open(socket) {
+          sendNotification = (message) => socket.send(JSON.stringify(message));
+        },
+        close() {
+          sendNotification = undefined;
+        },
+        message(socket, data) {
+          const message = JSON.parse(String(data)) as Record<string, unknown>;
+          const id = message.id;
+          const method = message.method;
+          const params = message.params as Record<string, unknown> | undefined;
+          const send = (result: unknown) => socket.send(JSON.stringify({ id, result }));
+          if (method === "initialize") send({ userAgent: "codex-cli 0.145.0" });
+          else if (method === "agent-relay/control/hello") send({ version: RELAY_CONTROL_PROTOCOL_VERSION, gatewayEpoch: "test-gateway" });
+          else if (method === "agent-relay/control/resync") {
+            socket.send(JSON.stringify({
+              method: "agent-relay/control/snapshot",
+              params: {
+                gatewayEpoch: "test-gateway",
+                threadId: params?.threadId,
+                revision: 0,
+                consistency: "live",
+                threadState: {
+                  threadId: params?.threadId,
+                  collaborationMode: "default",
+                  collaborationModeApplied: true,
+                  threadStatus: "idle",
+                  waitingOn: null,
+                  revision: 0,
+                  updatedAt: Date.now(),
+                },
+                commands: [],
+              },
+            }));
+            send({ gatewayEpoch: "test-gateway", revision: 0 });
+          }
+          else if (method === "model/list") send({ data: [{ id: "gpt-test", model: "gpt-test", isDefault: true }] });
+          else if (method === "collaborationMode/list") send({ data: [{ mode: "default" }, { mode: "plan" }] });
+          else if (method === "thread/resume") send({
+            thread: { id: params?.threadId, status: { type: "idle" } },
+            initialTurnsPage: {
+              data: [{ id: "completed-turn", status: "completed", items: [], startedAt: 1, completedAt: 2, durationMs: 1_000 }],
+              nextCursor: null,
+            },
+          });
+          else if (method === "thread/backgroundTerminals/list") send({ data: [] });
+          else if (method === "thread/goal/get") send({ goal: null });
+          else if (method === "thread/goal/clear") {
+            send({ cleared: true });
+            socket.send(JSON.stringify({ method: "thread/goal/cleared", params: { threadId: params?.threadId } }));
+          }
+          else if (method === "thread/unsubscribe") send({});
+        },
+      },
+    });
+    const driver = new CodexDriver({
+      codexBin: fakeCodexBin(),
+      gatewayUrl: `ws://127.0.0.1:${server.port}`,
+      sandbox: "workspace-write",
+      approval: "on-request",
+    }, (event) => {
+      outputs.push(event as unknown as Record<string, unknown>);
+    }, () => undefined);
+    const goalEvents = () => outputs.filter((event) => {
+      const activity = event.activity as Record<string, unknown> | undefined;
+      return event.type === "activity" && activity?.kind === "goal";
+    });
+
+    try {
+      const first = await driver.start({ conversationId: "1", scopeKey: "1", workspaceName: "demo", workspacePath: "C:/work/demo", threadId: "shared-thread" });
+      const second = await driver.start({ conversationId: "2", scopeKey: "2", workspaceName: "demo", workspacePath: "C:/work/demo", threadId: "shared-thread" });
+      const goal = {
+        threadId: "shared-thread",
+        objective: "ship shared goal",
+        status: "active",
+        tokenBudget: null,
+        tokensUsed: 10,
+        timeUsedSeconds: 5,
+        createdAt: 10,
+        updatedAt: 20,
+      };
+      const cleared = { method: "thread/goal/cleared", params: { threadId: "shared-thread" } };
+      const updated = { method: "thread/goal/updated", params: { threadId: "shared-thread", goal } };
+
+      outputs.length = 0;
+      sendNotification?.(cleared);
+      sendNotification?.(cleared);
+      await Bun.sleep(20);
+      expect(goalEvents()).toEqual([]);
+
+      sendNotification?.(updated);
+      sendNotification?.(updated);
+      await Bun.sleep(20);
+      expect(goalEvents().map((event) => event.sessionKey).sort()).toEqual([first.sessionKey, second.sessionKey].sort());
+      expect(goalEvents().every((event) => (event.activity as Record<string, unknown>)?.goal !== null)).toBe(true);
+
+      outputs.length = 0;
+      sendNotification?.(cleared);
+      sendNotification?.(cleared);
+      await Bun.sleep(20);
+      expect(goalEvents().map((event) => event.sessionKey).sort()).toEqual([first.sessionKey, second.sessionKey].sort());
+      expect(goalEvents().every((event) => (event.activity as Record<string, unknown>)?.goal === null)).toBe(true);
+
+      sendNotification?.(updated);
+      await Bun.sleep(20);
+      outputs.length = 0;
+      expect(await driver.clearThreadGoal(first.sessionKey)).toBe(true);
+      await Bun.sleep(20);
+      expect(goalEvents()).toEqual([
+        expect.objectContaining({ sessionKey: second.sessionKey, activity: { kind: "goal", goal: null } }),
+      ]);
+
+      outputs.length = 0;
+      sendNotification?.(cleared);
+      await Bun.sleep(20);
+      expect(goalEvents()).toEqual([]);
+      await driver.release(first.sessionKey);
+      await driver.release(second.sessionKey);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("mirrors live user messages across shared IM scopes without echoing the origin", async () => {
     const received: Array<Record<string, unknown>> = [];
     const outputs: Array<Record<string, unknown>> = [];

@@ -249,6 +249,18 @@ function localPlanDecision(
   return { threadId, planTurnId, phase, ...(action ? { action } : {}), revision: 0, createdAt: now, updatedAt: now };
 }
 
+function sameThreadGoal(left: AgentThreadGoal | null | undefined, right: AgentThreadGoal): boolean {
+  return Boolean(left
+    && left.threadId === right.threadId
+    && left.objective === right.objective
+    && left.status === right.status
+    && left.tokenBudget === right.tokenBudget
+    && left.tokensUsed === right.tokensUsed
+    && left.timeUsedSeconds === right.timeUsedSeconds
+    && left.createdAt === right.createdAt
+    && left.updatedAt === right.updatedAt);
+}
+
 function commandExecutionFailed(item: Record<string, unknown>): boolean {
   return getString(item, "status") === "failed"
     || (typeof item.exitCode === "number" && item.exitCode !== 0);
@@ -349,7 +361,7 @@ export class CodexDriver implements AgentDriver {
   private appServerCommand?: CodexSpawnCommand;
   private readonly sideConversations = new Map<string, SideConversationCollector>();
   private readonly requestedLifecycle = new Map<string, "archived" | "deleted">();
-  private readonly requestedGoalMutation = new Map<string, { action: "updated" | "cleared"; sessionKey: string; objective?: string; expiresAt: number }>();
+  private readonly requestedGoalMutation = new Map<string, { action: "updated" | "cleared"; sessionKey: string; objective?: string; hadGoal?: boolean; expiresAt: number }>();
   private readonly pendingGlobalNotices: PendingGlobalNotice[] = [];
   private readonly globalNoticeKeys = new Set<string>();
   private readonly terminalTurns = new Map<string, number>();
@@ -1025,7 +1037,12 @@ export class CodexDriver implements AgentDriver {
   async clearThreadGoal(key: string): Promise<boolean> {
     const running = this.requireRunningSession(key);
     const threadId = running.status.threadId!;
-    this.requestedGoalMutation.set(threadId, { action: "cleared", sessionKey: key, expiresAt: Date.now() + 30_000 });
+    this.requestedGoalMutation.set(threadId, {
+      action: "cleared",
+      sessionKey: key,
+      hadGoal: Boolean(running.status.threadGoal),
+      expiresAt: Date.now() + 30_000,
+    });
     let result: unknown;
     try {
       result = await this.request("thread/goal/clear", { threadId }, this.relayCommandRequestOptions(key, "goal_clear"));
@@ -1752,20 +1769,29 @@ export class CodexDriver implements AgentDriver {
 
     if (message.method === "thread/goal/updated") {
       const goal = toThreadGoal(params?.goal);
+      const previousGoal = running.status.threadGoal;
       running.status.threadGoal = goal ?? running.status.threadGoal;
       const requested = this.requestedGoalMutation.get(threadId!);
       const suppress = requested?.action === "updated" && requested.expiresAt >= Date.now() && (!requested.objective || requested.objective === goal?.objective);
       if (suppress) this.requestedGoalMutation.delete(threadId!);
-      if (goal) await this.emitGoalActivity(threadId!, goal, suppress ? requested?.sessionKey : undefined, getTurnId(params));
+      // Codex broadcasts the current Goal whenever another client resumes the
+      // thread. Project only real state changes, while retaining local-mutation
+      // fan-out when the RPC response updated our cache before its notification.
+      if (goal && (suppress || !sameThreadGoal(previousGoal, goal))) {
+        await this.emitGoalActivity(threadId!, goal, suppress ? requested?.sessionKey : undefined, getTurnId(params));
+      }
       return;
     }
 
     if (message.method === "thread/goal/cleared") {
+      const previousGoal = running.status.threadGoal;
       running.status.threadGoal = null;
       const requested = this.requestedGoalMutation.get(threadId!);
       const suppress = requested?.action === "cleared" && requested.expiresAt >= Date.now();
       if (suppress) this.requestedGoalMutation.delete(threadId!);
-      await this.emitGoalActivity(threadId!, null, suppress ? requested?.sessionKey : undefined, getTurnId(params));
+      if (Boolean(previousGoal) || (suppress && requested?.hadGoal === true)) {
+        await this.emitGoalActivity(threadId!, null, suppress ? requested?.sessionKey : undefined, getTurnId(params));
+      }
       return;
     }
 
