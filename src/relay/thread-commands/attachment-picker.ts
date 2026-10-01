@@ -19,7 +19,7 @@ type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
 
 export interface AttachmentPickerDeps {
   store: Pick<RelayStore, "setPendingPrompt" | "deletePendingPrompt">;
-  agent: Pick<AgentDriver, "listSkills" | "searchFiles" | "getStatus">;
+  agent: Pick<AgentDriver, "listSkills" | "searchFiles" | "getStatus" | "providerId">;
   commandSession(conversationId: ConversationId): Promise<{ workspace: WorkspaceRecord; status: AgentSessionStatus; key: string }>;
   commandBusy(conversationId: ConversationId, workspaceName: string, status: AgentSessionStatus | undefined): boolean;
   sendBusyCommandNotice(conversationId: ConversationId): Promise<void>;
@@ -69,7 +69,7 @@ export class AttachmentPicker {
       return;
     }
     const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
-    const key = sessionKey(message.conversationId, workspace.name);
+    const key = sessionKey(message.conversationId, workspace.name, this.deps.agent.providerId);
     const status = this.deps.agent.getStatus(key);
     if (!status?.running || pending.sessionKey !== key || status.threadId !== data.threadId || this.deps.commandBusy(message.conversationId, workspace.name, status)) {
       this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);

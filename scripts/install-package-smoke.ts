@@ -18,7 +18,7 @@ for (const path of [home, cwd, workspace]) mkdirSync(path, { recursive: true });
 const codex = join(root, "codex stub with spaces");
 writeFileSync(codex, '#!/bin/sh\nprintf "codex-cli 0.159.2\\n"\n'); chmodSync(codex, 0o755);
 const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: data, npm_config_cache: join(root, "interactive npx cache"), AGENT_RELAY_CONFIG: "", AGENT_RELAY_BUN_PATH: "" };
-for (const key of Object.keys(env)) if (/^(TELEGRAM_|LARK_|CODEX_|IM_PROVIDER$|AGENT_PROVIDER$|ALLOWED_|WORKSPACE_ROOT$|SQLITE_PATH$|RELAY_|EXPERIMENTAL_RELAY_)/.test(key)) delete env[key];
+for (const key of Object.keys(env)) if (/^(TELEGRAM_|LARK_|CODEX_|CLAUDE_|DSH_|IM_PROVIDER$|AGENT_PROVIDER$|ALLOWED_|WORKSPACE_ROOT$|SQLITE_PATH$|RELAY_|EXPERIMENTAL_RELAY_)/.test(key)) delete env[key];
 const fakeToken = "123456:fake-private-install-smoke-token";
 const base = ["npx", "--yes", `--package=${tarball}`, "agent-relay", "install", "--prefix", prefix, "--config", config];
 
@@ -63,7 +63,8 @@ function snapshotTree(path: string): unknown {
 
 const prompts: [string, string][] = [
   ["Install this version here, then open configuration? [Y/n]:", "y\r"],
-  ["Select a number [1]:", "1\r"],
+  ["Select a number [1]:", "1\r"], // Agent backend: Codex
+  ["Select a number [1]:", "1\r"], // Messaging provider: Telegram
   ["Telegram bot token:", `${fakeToken}\r`],
   ["Allowed Telegram user IDs (comma-separated):", "123456\r"],
   ["Allowed Telegram chat IDs (optional, comma-separated; - clears restrictions; blank keeps saved IDs):", "\r"],
@@ -87,7 +88,7 @@ assert.equal(JSON.parse(saved).env.TELEGRAM_BOT_TOKEN, fakeToken);
 assert.equal(JSON.parse(saved).env.WORKSPACE_ROOT, workspace);
 const installedSnapshot = snapshotTree(prefix);
 // The second invocation uses the same pinned installer, skips npm, and cancels safely.
-const cancelPrompts: [string, string][] = [["Select a number [1]:", "1\r"], ["Telegram bot token [saved value; Enter to keep]:", "\x03"]];
+const cancelPrompts: [string, string][] = [["Select a number [1]:", "1\r"], ["Select a number [1]:", "1\r"], ["Telegram bot token [saved value; Enter to keep]:", "\x03"]];
 const second = await session(base, cancelPrompts, 130);
 assert(second.includes("This version is already installed here"));
 assert(!second.includes("Installing the persistent copy"));

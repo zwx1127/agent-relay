@@ -2,7 +2,7 @@ import type { LogLevel } from "../domain/logger.ts";
 
 export interface AppConfig {
   imProvider: "telegram" | "lark";
-  agentProvider: "codex";
+  agentProvider: "codex" | "claude" | "dsh";
   allowedUserIds: Set<string>;
   allowedConversationIds?: Set<string>;
   mediaMaxBytes: number;
@@ -21,6 +21,10 @@ export interface AppConfig {
   codexBin: string;
   codexSandbox: string;
   codexApproval: string;
+  /** Native Claude Code executable; defaults to claude when loaded from env. */
+  claudeBin?: string;
+  /** Native DeepSeek Harness executable; defaults to dsh when loaded from env. */
+  dshBin?: string;
   codexDeveloperInstructions?: string;
   codexBaseInstructions?: string;
   relayAgentName?: string;

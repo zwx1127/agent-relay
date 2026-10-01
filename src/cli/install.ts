@@ -153,7 +153,7 @@ export async function installAndConfigure(options: InstallOptions): Promise<numb
     }
     const already = priorCheck?.code === 0 && priorCheck.stdout.trim() === metadata.version;
     const npm = already ? undefined : npmCommand(env, node);
-    ui.write(`Install and configure ${metadata.name}@${metadata.version}\nPersistent npm prefix: ${terminalText(prefix)}\nExecutable: ${terminalText(paths.executable)}\nConfiguration: ${terminalText(options.configPath)}\nSource: ${packageFile ? terminalText(packageFile) : `${metadata.name}@${metadata.version}`}\nNo sudo, shell profile changes, or npm settings changes are used. npm installs the official Bun dependency. Bot creation, console setup, and Codex sign-in remain manual guided steps.`);
+    ui.write(`Install and configure ${metadata.name}@${metadata.version}\nPersistent npm prefix: ${terminalText(prefix)}\nExecutable: ${terminalText(paths.executable)}\nConfiguration: ${terminalText(options.configPath)}\nSource: ${packageFile ? terminalText(packageFile) : `${metadata.name}@${metadata.version}`}\nNo sudo, shell profile changes, or npm settings changes are used. npm installs the official Bun dependency. Bot creation, console setup, native agent installation, and native agent sign-in remain manual guided steps.`);
     if (candidate && !already) ui.write("The existing copy failed its version check. Confirm installation below to repair it before configuration.");
     if (!already && !(await ui.confirm("Install this version here, then open configuration?", true))) {
       ui.write("Installation cancelled. No persistent installation or configuration was changed."); return 130;

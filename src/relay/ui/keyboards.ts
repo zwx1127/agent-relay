@@ -17,12 +17,12 @@ export function pagedOutputKeyboard(token: string, pageIndex: number, totalPages
   };
 }
 
-export function resumeKeyboard(token: string, threads: AgentThreadSummary[]): InlineKeyboardMarkup {
+export function resumeKeyboard(token: string, threads: AgentThreadSummary[], searchable = false): InlineKeyboardMarkup {
   return {
-    inline_keyboard: threads.map((thread, index) => [{
+    inline_keyboard: [...threads.map((thread, index) => [{
       text: buttonLabel(thread.name ?? thread.id),
       callback_data: `ar:cmd:resume:${token}:${index}`,
-    }]),
+    }]), ...(searchable ? [[{ text: "Search sessions", callback_data: `ar:cmd:resume:${token}:search` }]] : [])],
   };
 }
 
@@ -118,12 +118,13 @@ export function mcpElicitationKeyboard(token: string, actions: Array<{ action: s
   };
 }
 
-export function codexQuestionKeyboard(token: string, options: AgentUserInputOption[], includeOther = false): InlineKeyboardMarkup {
+export function codexQuestionKeyboard(token: string, options: AgentUserInputOption[], includeOther = false, selected?: number[]): InlineKeyboardMarkup {
   const rows = options.map((option, index) => [{
-      text: buttonLabel(option.label),
+      text: buttonLabel(`${selected ? selected.includes(index) ? "☑ " : "☐ " : ""}${option.label}`),
       callback_data: `ar:q:${token}:${index}`,
     }]);
   if (includeOther) rows.push([{ text: "Other", callback_data: `ar:q:${token}:other` }]);
+  if (selected) rows.push([{ text: "Submit selections", callback_data: `ar:q:${token}:multi_submit` }]);
   return {
     inline_keyboard: rows,
   };

@@ -20,6 +20,18 @@ export function isExpired(prompt: { expiresAt?: number }): boolean {
 }
 
 export function approvalChoices(kind: AgentApprovalKind, params: unknown): Array<{ action: string; label: string }> {
+  if (kind === "native_tool") {
+    const choices = asPromptRecord(params)?.choices;
+    if (!Array.isArray(choices)) return [];
+    const seen = new Set<string>();
+    return choices.flatMap((choice) => {
+      const record = asPromptRecord(choice);
+      if (!record || typeof record.action !== "string" || !/^[a-z][a-z0-9_-]{0,23}$/.test(record.action)
+        || typeof record.label !== "string" || !record.label.trim() || seen.has(record.action)) return [];
+      seen.add(record.action);
+      return [{ action: record.action, label: record.label }];
+    });
+  }
   if (kind === "legacy_command" || kind === "legacy_patch") return [
     { action: "once", label: "Approve" },
     { action: "decline", label: "Deny" },
@@ -52,8 +64,11 @@ export function approvalChoices(kind: AgentApprovalKind, params: unknown): Array
 export function approvalResponse(kind: AgentApprovalKind, decision: string | boolean, params: unknown): unknown {
   const action = typeof decision === "boolean" ? (decision ? "once" : "decline") : decision;
   if (!approvalChoices(kind, params).some((choice) => choice.action === action)) {
-    throw new Error("This approval decision is not offered by Codex.");
+    throw new Error(`This approval decision is not offered by ${kind === "native_tool" ? "the agent" : "Codex"}.`);
   }
+  // Only the native driver knows how to encode this selection. It must validate
+  // the live request again, rather than trusting a persisted chat card.
+  if (kind === "native_tool") return { action };
   if (kind === "legacy_command" || kind === "legacy_patch") {
     return { decision: action === "once" || action === "session" ? "approved" : "denied" };
   }

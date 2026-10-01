@@ -19,6 +19,7 @@ import { gatewayUrlForRelay, readRelayWorkControl, relayWorkControlPath } from "
 export async function main(config: AppConfig = loadConfig()): Promise<void> {
   const logger = new TextLogger(config.logLevel);
   const store = new SQLiteStore(config.sqlitePath, logger);
+  try { store.bindAgentProvider(config.agentProvider); } catch (error) { store.close(); throw error; }
   const imAdapter = createImAdapter(config, logger);
   let router: RelayController;
   let control: RunningControlServer | undefined;
@@ -84,10 +85,14 @@ export async function main(config: AppConfig = loadConfig()): Promise<void> {
     controlEnv.AGENT_RELAY_BUN_PATH = process.execPath;
   }
 
-  const shutdown = (signal: string): void => {
+  let shuttingDown = false;
+  const shutdown = async (signal: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info("app.shutdown_requested", { signal });
     control?.stop();
     imAdapter.stop?.();
+    try { await agent.dispose?.(); } catch { logger.warn("app.agent_cleanup_failed", { agent_provider: config.agentProvider }); }
     store.close();
     process.exit(0);
   };
@@ -100,9 +105,8 @@ export async function main(config: AppConfig = loadConfig()): Promise<void> {
     agent_provider: config.agentProvider,
     workspace_root: config.workspaceRoot,
     sqlite_path: config.sqlitePath,
-    codex_bin: config.codexBin,
-    codex_sandbox: config.codexSandbox,
-    codex_approval: config.codexApproval,
+    ...(config.agentProvider === "codex" ? { codex_bin: config.codexBin, codex_sandbox: config.codexSandbox, codex_approval: config.codexApproval }
+      : { agent_bin: config.agentProvider === "claude" ? config.claudeBin : config.dshBin }),
     telegram_poll_timeout_seconds: config.telegramPollTimeoutSeconds,
     telegram_request_retry_max_attempts: config.telegramRequestRetryMaxAttempts,
     telegram_retry_initial_delay_ms: config.telegramRetryInitialDelayMs,
@@ -118,7 +122,7 @@ export async function main(config: AppConfig = loadConfig()): Promise<void> {
     allowed_user_count: config.allowedUserIds.size,
     allowed_conversation_count: config.allowedConversationIds?.size ?? 0,
   });
-  if (config.codexSandbox === "danger-full-access") {
+  if (config.agentProvider === "codex" && config.codexSandbox === "danger-full-access") {
     logger.warn("app.config_risky", { setting: "CODEX_SANDBOX", value: config.codexSandbox });
   }
   if (config.relayControlEnabled) {

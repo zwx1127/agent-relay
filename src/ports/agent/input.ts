@@ -58,3 +58,17 @@ export interface AgentBuiltinResult {
   turnId?: string;
   threadId?: string;
 }
+
+/** A backend's own command. Names and argument semantics are never translated. */
+export interface AgentNativeCommandSummary {
+  command: string;
+  description: string;
+  /** Interactive-terminal-only commands remain discoverable, but are not emulated. */
+  availability?: "supported" | "local-only";
+}
+
+export interface AgentNativeCommandResult extends AgentBuiltinResult {
+  /** The native command replaced the session's thread (clear, resume, fork). */
+  threadChanged?: boolean;
+  clearDisplay?: boolean;
+}

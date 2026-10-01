@@ -60,7 +60,7 @@ export interface MediaRelayDeps {
   config: AppConfig;
   store: RelayStore;
   adapter: Pick<ImAdapter, "sendMessage" | "sendPhoto" | "sendFile" | "downloadFile">;
-  agent: Pick<AgentDriver, "getStatus">;
+  agent: Pick<AgentDriver, "getStatus" | "providerId" | "displayName">;
   logger: Logger;
   currentWorkspace(conversationId: ConversationId): WorkspaceRecord | undefined;
   renderConsole(conversationId: ConversationId): Promise<void>;
@@ -210,7 +210,7 @@ export class MediaRelayService {
       if (planMatch && (status.activeTurnId
         || this.deps.store.countTasks(scope.scopeKey, workspace.name, ["waiting", "queued", "running", "blocked"]) > 0)) {
         await this.deps.sendRendered(scope.scopeKey, messageWithTitle(
-          "Codex is busy.",
+          `${this.deps.agent.displayName ?? "Codex"} is busy.`,
           "Wait for the current turn, answer the pending question, or handle the approval request before running this command.",
         ));
         return;
@@ -229,7 +229,7 @@ export class MediaRelayService {
       return;
     }
     const planSessionKey = planMatch && !this.deps.sideConversationActive(scope.scopeKey)
-      ? sessionKey(scope.scopeKey, workspace.name)
+      ? sessionKey(scope.scopeKey, workspace.name, this.deps.agent.providerId)
       : undefined;
     const previousMode = planSessionKey ? this.deps.store.getCollaborationMode(planSessionKey) : undefined;
     if (planSessionKey) this.deps.store.requestCollaborationMode(planSessionKey, "plan");
@@ -465,7 +465,7 @@ export class MediaRelayService {
       forceReply: true,
       forceReplyInstruction: "Reply to this prompt, or send your next message with what you want Codex to do.",
       disableWebPagePreview: true,
-      inputFieldPlaceholder: "What should Codex do?",
+      inputFieldPlaceholder: `What should ${this.deps.agent.displayName ?? "Codex"} do?`,
     });
     if (!result.messageId) throw new Error("IM adapter did not return an attachment prompt message id.");
     this.deps.store.setPendingPrompt({

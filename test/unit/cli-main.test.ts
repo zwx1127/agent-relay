@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,7 +15,7 @@ function isolatedCli() {
   const home = join(root, "home"); mkdirSync(home);
   const config = join(home, "private", "config.json");
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local", "share"), AGENT_RELAY_CONFIG: "" };
-  for (const key of Object.keys(env)) if (/^(TELEGRAM_|LARK_|CODEX_|IM_PROVIDER$|AGENT_PROVIDER$|ALLOWED_|WORKSPACE_ROOT$|SQLITE_PATH$|RELAY_|EXPERIMENTAL_RELAY_)/.test(key)) delete env[key];
+  for (const key of Object.keys(env)) if (/^(TELEGRAM_|LARK_|CODEX_|CLAUDE_|DSH_|IM_PROVIDER$|AGENT_PROVIDER$|ALLOWED_|WORKSPACE_ROOT$|SQLITE_PATH$|RELAY_|EXPERIMENTAL_RELAY_)/.test(key)) delete env[key];
   const run = (args: string[]) => {
     const result = spawnSync(process.execPath, ["--no-env-file", "--no-install", fileURLToPath(new URL("../../src/cli/main.ts", import.meta.url)), ...args], { cwd: root, env, encoding: "utf8", timeout: 10_000 });
     expect(result.error).toBeUndefined();
@@ -111,5 +111,48 @@ describe("public CLI setup entry point", () => {
       expect(existsSync(config)).toBe(false);
       expect(readdirSync(home)).toEqual([]);
     }
+  });
+});
+
+describe("selected backend doctor and Gateway boundary", () => {
+  test("doctor detects only the selected backend without reading stale Codex instruction files", () => {
+    for (const provider of ["claude", "dsh"] as const) {
+      const { root, home, config, run } = isolatedCli();
+      const binary = join(root, process.platform === "win32" ? "native agent.cmd" : "native agent");
+      const log = join(root, "native-version-args.json");
+      const script = join(root, "version-fixture.cjs");
+      const version = provider === "dsh" ? "0.2.0-rc.2" : "2.1.280";
+      writeFileSync(script, `require('node:fs').writeFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2))); console.log(${JSON.stringify(`${provider} ${version}`)});`);
+      writeFileSync(binary, process.platform === "win32" ? `@echo off\r\n"${process.execPath}" "${script}" %*\r\n` : `#!/bin/sh\nexec '${process.execPath.replace(/'/g, "'\\''")}' '${script.replace(/'/g, "'\\''")}' "$@"\n`);
+      chmodSync(binary, 0o700);
+      mkdirSync(join(home, "private"), { mode: 0o700 });
+      writeFileSync(config, JSON.stringify({ version: 1, env: {
+        AGENT_PROVIDER: provider, [provider === "claude" ? "CLAUDE_BIN" : "DSH_BIN"]: binary,
+        TELEGRAM_BOT_TOKEN: "fake-token", ALLOWED_USER_IDS: "10", WORKSPACE_ROOT: root,
+        CODEX_BIN: join(root, "must-not-detect-codex"), CODEX_MODEL_INSTRUCTIONS_FILE: join(root, "missing-codex-instructions"),
+      } }), { mode: 0o600 });
+      const result = run(["doctor", "--config", config]);
+      expect(result.code).toBe(0);
+      expect(result.output).toContain(`agent backend: ${provider}`);
+      expect(result.output).toContain(version);
+      expect(result.output).toContain("executable detection only");
+      expect(result.output).toContain("native agent authentication are not verified");
+      expect(JSON.parse(readFileSync(log, "utf8"))).toEqual(["--version"]);
+    }
+  });
+
+  test("Gateway commands fail closed for non-Codex backends before launching management", () => {
+    const { home, config, run } = isolatedCli();
+    mkdirSync(join(home, "private"), { mode: 0o700 });
+    for (const provider of ["claude", "dsh"]) {
+      writeFileSync(config, JSON.stringify({ version: 1, env: { AGENT_PROVIDER: provider } }), { mode: 0o600 });
+      for (const subcommand of ["setup", "start", "status", "stop", "remove"]) {
+        const result = run(["gateway", subcommand, "--config", config]);
+        expect(result.code).toBe(1);
+        expect(result.output).toContain("Gateway commands require AGENT_PROVIDER=codex");
+      }
+    }
+    expect(readdirSync(home)).toEqual(["private"]);
+    expect(readdirSync(join(home, "private"))).toEqual(["config.json"]);
   });
 });

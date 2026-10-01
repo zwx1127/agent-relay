@@ -13,7 +13,7 @@ export function relayCapabilityInstructions(helperPath: string, capabilityInstru
   return [
     "## Agent Relay Capabilities",
     "",
-    "This Codex session can call local agent-relay capabilities through the helper exposed in `AGENT_RELAY_HELPER`.",
+    "This agent session can call local agent-relay capabilities through the helper exposed in `AGENT_RELAY_HELPER`.",
     "",
     capabilityInstructions ?? [sendImageCapabilityInstructions(helperPath, platform), sendFileCapabilityInstructions(helperPath, platform)].join("\n\n"),
   ].join("\n");

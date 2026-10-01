@@ -28,6 +28,7 @@ export function relayFixture(logLevel: LogLevel = "info", configOverrides: Parti
   fixtureStores.push(store);
   const adapter = new FakeImAdapter();
   const agent = new FakeAgent();
+  agent.providerId = configOverrides.agentProvider;
   const logLines: string[] = [];
   const logger = new TextLogger(logLevel, (line) => logLines.push(line), () => new Date("2026-05-02T08:00:00.000Z"));
   const config = relayTestConfig(root, logLevel, configOverrides);

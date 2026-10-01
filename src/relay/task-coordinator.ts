@@ -49,11 +49,11 @@ export class TaskCoordinator {
     }
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
 
-    const existingStatus = this.deps.agent.getStatus(sessionKey(scope.scopeKey, workspace.name));
+    const existingStatus = this.deps.agent.getStatus(sessionKey(scope.scopeKey, workspace.name, this.deps.agent.providerId));
     if (existingStatus) {
       if (await this.sendWaitingPromptNotice(scope.scopeKey, existingStatus)) return;
       if (preference === "immediate" && existingStatus.activeTurnId) {
-        await this.deps.sendRendered(scope.scopeKey, messageWithTitle("Codex is busy.", "Wait for the current turn before running this command."));
+        await this.deps.sendRendered(scope.scopeKey, messageWithTitle(`${this.deps.agent.displayName ?? "Codex"} is busy.`, "Wait for the current turn before running this command."));
         return;
       }
     }
@@ -89,13 +89,18 @@ export class TaskCoordinator {
       return;
     }
     const busy = Boolean(status.activeTurnId);
+    if (busy && status.canAcceptDirectInput === false) {
+      await this.trySetMessageReaction({ conversationId: scope.conversationId, messageId: userMessageId, phase: "status" });
+      await this.deps.sendRendered(scope.scopeKey, messageWithTitle("Agent is busy.", "Wait for this turn to finish or use Interrupt before sending another message."));
+      return;
+    }
     if (preference === "immediate" && busy) {
       await this.trySetMessageReaction({
         conversationId: scope.conversationId,
         messageId: userMessageId,
         phase: "status",
       });
-      await this.deps.sendRendered(scope.scopeKey, messageWithTitle("Codex is busy.", "Wait for the current turn before running this command."));
+      await this.deps.sendRendered(scope.scopeKey, messageWithTitle(`${this.deps.agent.displayName ?? "Codex"} is busy.`, "Wait for the current turn before running this command."));
       return;
     }
     if (preference === "auto" && busy) {
@@ -249,7 +254,7 @@ export class TaskCoordinator {
 
   private async sendToAgent(conversationId: ConversationId, workspace: WorkspaceRecord, input: AgentTaskInput, userMessageId?: MessageId, task?: RelayTask): Promise<void> {
     const scope = parseChatScopeKey(String(conversationId));
-    const key = sessionKey(scope.scopeKey, workspace.name);
+    const key = sessionKey(scope.scopeKey, workspace.name, this.deps.agent.providerId);
     await this.deps.finalizeSessionOutput(key);
     if (userMessageId) this.deps.setReplyToMessageId(key, userMessageId);
     await this.deps.adapter.sendChatAction?.(scope.conversationId, "typing", { topic: scope.topic }).catch((error) => {
@@ -295,8 +300,10 @@ export class TaskCoordinator {
       const mode = this.deps.store.getCollaborationMode(key);
       const pendingMode = this.deps.store.getPendingCollaborationMode(key);
       const sendOptions: AgentSendOptions = {
-        collaborationMode: mode,
-        ...(pendingMode === mode ? { collaborationModeExplicit: true } : {}),
+        ...(!this.deps.agent.providerId || this.deps.agent.providerId === "codex" ? {
+          collaborationMode: mode,
+          ...(pendingMode === mode ? { collaborationModeExplicit: true } : {}),
+        } : {}),
         ...(clientUserMessageId ? { clientUserMessageId } : {}),
         ...(input.attachments?.length ? { attachments: input.attachments } : {}),
         ...(input.images?.length ? { images: input.images } : {}),
@@ -328,11 +335,11 @@ export class TaskCoordinator {
     // Preserve the brief startup case where waiting arrives before the turn id.
     if (!status.activeTurnId && status.latestTurn && status.latestTurn.status !== "inProgress") return false;
     if (status.waitingForUserInput) {
-      await this.deps.sendRendered(conversationId, messageWithTitle("Codex is waiting for your answer.", "Open the latest question card or reply to it. Direct messages are not submitted as answers; use Interrupt on the latest activity card if the question expired."));
+      await this.deps.sendRendered(conversationId, messageWithTitle(`${this.deps.agent.displayName ?? "Codex"} is waiting for your answer.`, "Open the latest question card or reply to it. Direct messages are not submitted as answers; use Interrupt on the latest activity card if the question expired."));
       return true;
     }
     if (status.waitingForApproval) {
-      await this.deps.sendRendered(conversationId, messageWithTitle("Codex is waiting for approval.", "Use the approval buttons before sending another instruction. Direct messages are not submitted while approval is pending; use Interrupt on the latest activity card to stop the blocked turn."));
+      await this.deps.sendRendered(conversationId, messageWithTitle(`${this.deps.agent.displayName ?? "Codex"} is waiting for approval.`, "Use the approval buttons before sending another instruction. Direct messages are not submitted while approval is pending; use Interrupt on the latest activity card to stop the blocked turn."));
       return true;
     }
     return false;

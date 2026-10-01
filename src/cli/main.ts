@@ -3,10 +3,10 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import metadata from "../../package.json";
-import { codexVersionSpawnCommand, parseCodexVersion, isCodexVersionSupported } from "../providers/agents/codex/spawn.ts";
 import { loadConfig, type Env } from "../runtime/config.ts";
 import { absoluteConfigPaths, defaultConfigPath, importEnvFile, mergeConfigEnv, readConfigFile, requireAbsoluteState } from "./config-file.ts";
 import { installAndConfigure } from "./install.ts";
+import { AGENT_BACKENDS, detectAgent, backendVersionRequirement } from "./agent-detection.ts";
 
 export interface CliArgs { command: string; subcommand?: string; configPath: string; envFile?: string; prefix?: string; packageFile?: string; }
 export function parseArgs(args: string[], env: Env = process.env): CliArgs {
@@ -43,7 +43,7 @@ Usage: agent-relay [command] [--config <file>] [--env-file <file>]
 
   install        Install or reconfigure using the English setup wizard
   start          Start in foreground (default); configure with install first
-  doctor         Check local configuration, paths, Bun and Codex; no bot network calls
+  doctor         Check config, paths, Bun and the selected agent; no bot network calls
   config path    Print the selected configuration file path, never its credentials
   gateway ...    Explicit experimental setup/start/stop/status/remove
   --help         Show this help
@@ -59,7 +59,7 @@ this CLI. Existing source-checkout 'bun run start' keeps its .env behavior.
 Configuration: --config > AGENT_RELAY_CONFIG > per-user config.json.
 Values: shell environment > explicit --env-file OR saved config. No config files are
 merged together. Secrets are masked during setup; never put them in CLI arguments.
-Gateway setup is separate, experimental, and can modify native client integration.
+Gateway setup is separate, experimental, Codex-only, and can modify native client integration.
 `;
 
 export function redactCliError(error: unknown, env: Env): string {
@@ -73,26 +73,26 @@ export function redactCliError(error: unknown, env: Env): string {
 
 async function doctor(env: Env, configPath: string): Promise<void> {
   const config = loadConfig(env);
-  console.log(`Bun ${Bun.version}; config: ${configPath}; provider: ${config.imProvider}`);
+  console.log(`Bun ${Bun.version}; config: ${configPath}; provider: ${config.imProvider}; agent backend: ${config.agentProvider}`);
   let failed = false;
   if (!existsSync(config.workspaceRoot) || !statSync(config.workspaceRoot).isDirectory()) {
     console.error("Workspace root is missing or is not a directory. Create it or rerun install."); failed = true;
   } else console.log(`Workspace root: ${config.workspaceRoot}`);
   console.log(`State database: ${resolve(config.sqlitePath)}`);
-  const binary = Bun.which(config.codexBin) || (existsSync(config.codexBin) ? config.codexBin : undefined) || (process.platform === "win32" ? config.codexBin : undefined);
-  if (!binary) {
-    console.error("Codex was not found. Install/login to the official Codex CLI yourself, then rerun install or set CODEX_BIN."); failed = true;
+  const backend = AGENT_BACKENDS[config.agentProvider];
+  const binary = config.agentProvider === "codex" ? config.codexBin : config.agentProvider === "claude" ? config.claudeBin ?? "claude" : config.dshBin ?? "dsh";
+  const detected = await detectAgent(config.agentProvider, binary, process.cwd());
+  if (!detected.found) {
+    console.error(`${backend.label} was not found or its version check failed; its output is hidden. Install/configure the native CLI yourself, then rerun install or set ${backend.binaryKey}.`); failed = true;
+  } else if (!detected.version) {
+    console.error(`${backend.label} version check failed; its output is hidden. Verify ${backend.binaryKey} manually.`); failed = true;
+  } else if (detected.compatible === false) {
+    console.error(backendVersionRequirement(config.agentProvider)); failed = true;
   } else {
-    const command = codexVersionSpawnCommand(binary);
-    const result = spawnSync(command.command, command.args, { encoding: "utf8", timeout: 5_000, windowsHide: true, windowsVerbatimArguments: command.windowsVerbatimArguments });
-    const version = parseCodexVersion(result.stdout ?? "");
-    if (result.error || result.status !== 0 || !version) {
-      console.error("Codex version check failed; its output is hidden. Verify CODEX_BIN manually."); failed = true;
-    } else if (!isCodexVersionSupported(version)) {
-      console.error("Codex CLI 0.145.0 or newer is required."); failed = true;
-    } else console.log(`Codex ${version} is available (authentication and bot delivery are not tested).`);
+    console.log(`${backend.label}${detected.version ? ` ${detected.version}` : " (version unrecognized)"} is available (authentication and bot delivery are not tested).`);
+    if (config.agentProvider !== "codex") console.log("This is executable detection only; native protocol compatibility and permission behavior require an end-to-end check. Codex settings and Gateway sharing do not apply.");
   }
-  console.log("Bot credentials, webhook state, Feishu permissions/events/publication and Codex authentication are not verified by doctor. Use install for opt-in credential validation, then send /relay for an end-to-end check.");
+  console.log("Bot credentials, webhook state, Feishu permissions/events/publication and native agent authentication are not verified by doctor. Use install for opt-in credential validation, then send /relay for an end-to-end check.");
   if (failed) process.exitCode = 1;
 }
 
@@ -106,6 +106,9 @@ export async function runCli(args = process.argv.slice(2)): Promise<void> {
   try {
     if (parsed.command === "install") { process.exitCode = await installAndConfigure(parsed); return; }
     if (parsed.command === "gateway") {
+      if (initial.AGENT_PROVIDER?.trim() && initial.AGENT_PROVIDER.trim() !== "codex") {
+        throw new Error("Experimental Gateway commands require AGENT_PROVIDER=codex. They cannot manage a Claude Code or DeepSeek Harness backend.");
+      }
       const entry = fileURLToPath(new URL("../gateway/manage.ts", import.meta.url));
       const result = spawnSync(process.execPath, ["--no-env-file", "--no-install", entry, parsed.subcommand || "status"], {
         stdio: "inherit", env: { ...process.env, ...initial, AGENT_RELAY_DISABLE_DOTENV: "1" },

@@ -51,7 +51,7 @@ export class PlanCommandService {
       await this.deps.sendRendered(conversationId, messageWithTitle("Codex is busy.", "Wait for the current turn, answer the pending question, or handle the approval request before running this command."));
       return;
     }
-    const key = sessionKey(conversationId, workspace.name);
+    const key = sessionKey(conversationId, workspace.name, this.deps.agent.providerId);
     const normalizedPrompt = prompt.trim();
     if (!normalizedPrompt || normalizedPrompt === "--on" || normalizedPrompt === "--off") {
       const update = normalizedPrompt === "--on"
@@ -83,7 +83,7 @@ export class PlanCommandService {
 
   async handleCallback(message: CallbackMessage, pending: PendingPrompt, data: Record<string, unknown>, action: string | undefined): Promise<void> {
     const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
-    const key = sessionKey(message.conversationId, workspace.name);
+    const key = sessionKey(message.conversationId, workspace.name, this.deps.agent.providerId);
     if (pending.sessionKey && pending.sessionKey !== key) {
       this.deps.logger.info("router.plan_callback_expired", { conversation_id: message.conversationId, session_key: pending.sessionKey, reason: "session_mismatch" });
       await this.deps.renderStrictCallbackPage(message, messageWithTitle("Plan action expired.", "Open the latest Plan ready card."), { inline_keyboard: [] });

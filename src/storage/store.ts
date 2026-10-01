@@ -11,6 +11,8 @@ export interface ControlMessageRecord {
 export interface RelayStore {
   close(): void;
   migrate(): void;
+  /** Bind backend-specific task/prompt state before any work can be replayed. */
+  bindAgentProvider?(provider: string): void;
   upsertWorkspace(record: WorkspaceRecord): void;
   listWorkspaces(): WorkspaceRecord[];
   getWorkspace(name: string): WorkspaceRecord | undefined;

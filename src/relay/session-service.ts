@@ -28,7 +28,7 @@ export class RelaySessionService {
   ): Promise<AgentSessionStatus> {
     if (!isRealDirectory(workspace.path)) throw new Error(`Workspace path does not exist: ${workspace.path}`);
     const scope = parseChatScopeKey(String(conversationId));
-    const key = sessionKey(scope.scopeKey, workspace.name);
+    const key = sessionKey(scope.scopeKey, workspace.name, this.deps.agent.providerId);
     const existing = this.deps.agent.getStatus(key);
     if (existing?.running && !threadId) {
       await this.hydrateThreadGoal(key, existing);
@@ -98,7 +98,7 @@ export class RelaySessionService {
     const scope = parseChatScopeKey(String(conversationId));
     const workspace = this.deps.currentWorkspace(scope.scopeKey);
     if (!workspace) return {};
-    const status = this.deps.agent.getStatus(sessionKey(scope.scopeKey, workspace.name));
+    const status = this.deps.agent.getStatus(sessionKey(scope.scopeKey, workspace.name, this.deps.agent.providerId));
     const recentOutput = this.deps.store.latestTranscriptEvent(scope.scopeKey, workspace.name, "agent");
     const latestSystemEvent = this.deps.store.latestTranscriptEvent(scope.scopeKey, workspace.name, "system");
     return statusViewFromParts(

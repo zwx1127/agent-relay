@@ -81,3 +81,19 @@ describe("installed CLI configuration", () => {
     expect(existsSync(join(root, "missing"))).toBe(false);
   });
 });
+
+describe("native backend config migration", () => {
+  test("migrates every native executable path with spaces without splitting arguments", () => {
+    const root = temp();
+    const legacy = join(root, ".env");
+    writeFileSync(legacy, 'AGENT_PROVIDER=claude\nCLAUDE_BIN="./native tools/claude"\nDSH_BIN="./native tools/dsh"\nCODEX_BIN=codex\n');
+    const env = importEnvFile(legacy);
+    expect(env.CLAUDE_BIN).toBe(join(root, "native tools", "claude"));
+    expect(env.DSH_BIN).toBe(join(root, "native tools", "dsh"));
+    expect(env.CODEX_BIN).toBe("codex");
+    const config = join(root, "private", "config.json");
+    writeConfigFile(config, env);
+    expect(readConfigFile(config)).toEqual(env);
+    expect(mergeConfigEnv(env, { DSH_BIN: "overrides/my dsh", CLAUDE_BIN: "claude" }, root)).toMatchObject({ DSH_BIN: join(root, "overrides", "my dsh"), CLAUDE_BIN: "claude" });
+  });
+});

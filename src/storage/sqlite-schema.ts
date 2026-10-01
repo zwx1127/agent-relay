@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { Logger } from "../domain/logger.ts";
 
 export function migrateSQLiteSchema(db: Database, logger: Logger): void {
+  db.run("CREATE TABLE IF NOT EXISTS relay_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
   // Tables are created at their earliest baseline shape first; additive columns
   // below keep existing local databases compatible across relay upgrades.
   db.run(`

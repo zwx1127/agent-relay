@@ -373,9 +373,9 @@ export class RelayAgentEventRouter {
     if (turnStatus === "failed") {
       const parsed = parseSessionKey(event.sessionKey);
       if (parsed) {
-        const detail = event.error?.message ?? "Codex turn failed.";
+        const detail = event.error?.message ?? `${parsed.agentProvider === "codex" ? "Codex" : parsed.agentProvider === "claude" ? "Claude Code" : "DeepSeek Harness"} turn failed.`;
         this.deps.appendSystem(parsed.scopeKey, `Error: ${detail}\n`);
-        await this.deps.sendRendered(parsed.scopeKey, messageWithTitle("Codex turn failed.", detail));
+        await this.deps.sendRendered(parsed.scopeKey, messageWithTitle(`${parsed.agentProvider === "codex" ? "Codex" : parsed.agentProvider === "claude" ? "Claude Code" : "DeepSeek Harness"} turn failed.`, detail));
       }
     }
     if (!presented && turnStatus === "interrupted") {
@@ -387,7 +387,7 @@ export class RelayAgentEventRouter {
         const parsed = parseSessionKey(event.sessionKey);
         if (parsed) {
           await this.deps.sendRendered(parsed.scopeKey, messageWithTitle(
-            "Codex turn interrupted.",
+            `${parsed.agentProvider === "codex" ? "Codex" : parsed.agentProvider === "claude" ? "Claude Code" : "DeepSeek Harness"} turn interrupted.`,
             `Source: ${source?.label ?? "Unknown client"}\nTime: ${formatRelayStateTime(terminal?.finishedAt ?? Date.now())}`,
           ));
         }

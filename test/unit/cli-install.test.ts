@@ -372,6 +372,7 @@ describe("persistent install and configure", () => {
       LARK_APP_ID: "fixture-app-id", LARK_APP_SECRET: "fixture-lark-secret", LARK_DOMAIN: "feishu",
       IM_PROVIDER: "lark", ALLOWED_USER_IDS: "private-user", ALLOWED_CONVERSATION_IDS: "private-chat",
       WORKSPACE_ROOT: "/private/workspace", SQLITE_PATH: "/private/state", CODEX_BIN: "/private/codex",
+      AGENT_PROVIDER: "claude", CLAUDE_BIN: "/private/claude", DSH_BIN: "/private/dsh",
       CODEX_DEVELOPER_INSTRUCTIONS: "private-instructions", RELAY_CONTROL_ENABLED: "false", LOG_LEVEL: "debug",
     };
     const env = Object.freeze({ ...files.env, ...relayEnv, AGENT_RELAY_BUN_PATH: "/untrusted/transient/bun", KEEP_ME: "unrelated-value" });

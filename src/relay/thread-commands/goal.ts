@@ -93,7 +93,7 @@ export class GoalCommandService {
     sourcePhase: unknown,
   ): Promise<string> {
     const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
-    const key = sessionKey(message.conversationId, workspace.name);
+    const key = sessionKey(message.conversationId, workspace.name, this.deps.agent.providerId);
     const status = this.deps.agent.getStatus(key);
     if (!status?.running || !status.threadId || pending.sessionKey !== key) throw new Error("Goal control expired.");
 
@@ -130,7 +130,7 @@ export class GoalCommandService {
     userMessageId?: MessageId,
   ): Promise<void> {
     const workspace = this.deps.requireCurrentWorkspace(conversationId);
-    const key = sessionKey(conversationId, workspace.name);
+    const key = sessionKey(conversationId, workspace.name, this.deps.agent.providerId);
     const status = this.deps.agent.getStatus(key);
     if (!status?.running || (typeof data.threadId === "string" && status.threadId !== data.threadId) || pending.sessionKey !== key) {
       await this.deps.sendRendered(conversationId, messageWithTitle("Goal edit expired.", "Open /goal and use Edit on the current Goal card."));

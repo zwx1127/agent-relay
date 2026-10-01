@@ -46,11 +46,11 @@ Use this when you want agent-relay to talk to an agent other than Codex.
 Ask Codex to start from:
 
 - `src/ports/agent.ts`
-- `src/providers/agents/codex/driver.ts`
+- `src/providers/agents/codex/driver.ts`, `claude/driver.ts`, and `dsh/driver.ts`
 - `src/providers/agents/factory.ts`
 - `src/runtime/config.ts`
 
-Start with a small working flow: start a session, send text, stream output, stop a session, and report status. Add optional capabilities later.
+Start with a small working flow: start a session, send text, stream output, stop a session, and report status. Add optional capabilities later. Keep native command catalogs, permission choices, and session IDs backend-specific; do not alias another backend’s command meanings or pass unknown slash commands as model prompts. See [native backend boundaries](backends.md).
 
 Suggested prompt:
 

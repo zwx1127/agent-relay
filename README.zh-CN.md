@@ -7,7 +7,7 @@
 
 ## 项目介绍
 
-`agent-relay` 可以让你通过 Telegram 或 Lark/飞书远程控制本地 Codex CLI agent。Codex 仍然运行在可信机器上，你可以在聊天软件里选择工作区、发送提示词、回答问题、审批操作、发起代码审查、管理线程，并收发截图、图片或文件。
+`agent-relay` 可以让你通过 Telegram 或 Lark/飞书远程控制本地 Codex、Claude Code 或 DeepSeek Harness（`dsh`）agent。所选后端仍然运行在可信机器上，你可以在聊天软件里选择工作区、发送提示词、回答问题、审批操作、发起代码审查、管理线程，并收发截图、图片或文件。
 
 它的目标很直接：让 agent 留在代码所在的机器上，同时让你可以从常用聊天工具里操作它。
 
@@ -52,16 +52,18 @@ npx @asuka1127/agent-relay install
 
 `install` 是唯一的“安装并配置”入口：先预览包版本及安装位置，经确认后将当前 scoped 版本持久安装到用户自己的 npm prefix，再打开已安装副本的**英文配置向导**。保存配置不会启动 relay。
 
+> 多后端支持尚未发布。已发布的 npm 0.2.0 仍只支持 Codex；下次发版前，请用本地打包的源码测试 Claude Code 或 DSH。
+
 ### 最低要求
 
 - Node.js 20+ 和 npm。npm 安装包自带官方固定版本的 Bun，详见[运行时说明](#安装位置与运行时)。
-- 单独安装并自行登录 Codex CLI 0.145.0+，需要支持 `codex app-server --listen stdio://`。本地 `codex` 应在 `PATH` 上，或通过 `CODEX_BIN` 指定完整路径。
+- 单独安装并配置原生后端：Codex CLI 0.145.0+（`CODEX_BIN`）、Claude Code 2.1.285（`CLAUDE_BIN`），或 DeepSeek Harness 0.2.0-rc.2 开发预览版（`DSH_BIN`）。可执行文件应位于 `PATH`，或指定绝对路径。已验证版本和限制见[后端支持与原生命令](docs/en/backends.md)。
 - Git，用于 Codex 工作区和版本控制操作；仅安装 npm 包不需要 Git。
 - Telegram bot token，或 Lark/飞书自建应用。创建机器人/应用和账号登录需自行完成。
 
 ### 配置机器人
 
-向导引导配置机器人凭据、用户/会话白名单、工作区根目录、SQLite 状态文件、Codex 可执行文件、沙箱及审批选项，并可选择启用本地 helper 或实验性 Gateway 开关。工作区根目录应选择代码/项目目录，而非安装目录。请在可信机器上运行，并只允许可信用户访问。
+向导先选择原生后端，再配置机器人凭据、用户/会话白名单、工作区根目录、SQLite 状态文件及可执行文件。Codex 单独提供沙箱、审批选项和实验性 Gateway；Claude 和 DSH 的原生设置与认证保留在各自配置中。工作区根目录应选择代码/项目目录，而非安装目录。请在可信机器上运行，并只允许可信用户访问。
 
 - **Telegram**：通过 [BotFather](https://t.me/BotFather) 创建机器人，填入 token 和本人数字 user ID。完整步骤见 [Telegram 快速上手](docs/en/quickstart-telegram.md)。
 - **飞书/Lark**：在[飞书开发者后台](https://open.feishu.cn/app)或 [Lark 开发者后台](https://open.larksuite.com/app)创建自建应用，启用机器人能力，填入 App ID/Secret 和该应用专属的 `open_id` 白名单。先保存配置并启动 relay，**再保存长连接订阅**。按 [Lark/飞书快速上手](docs/en/quickstart-lark.md)完成权限、消息事件、卡片回调、版本发布和可用范围设置。
@@ -72,7 +74,7 @@ Secret 输入会被掩码；只有明确同意后，才会把凭据发送到所�
 
 保存配置后：
 
-1. 执行**安装器打印的 `doctor` 命令**，检查本地配置、路径、Bun 和 Codex 版本。它不会验证机器人认证、Codex 登录或消息收发。
+1. 执行**安装器打印的 `doctor` 命令**，检查本地配置、路径、Bun 和所选后端版本。它不会验证机器人认证、后端登录或消息收发。
 2. 执行**打印的 `start` 命令**，并保持前台进程运行。飞书/Lark 用户此时应按[快速上手](docs/en/quickstart-lark.md#3-start-the-connection-then-finish-console-setup)完成平台后台设置。
 3. 打开与机器人的私聊，发送 `/relay`。
 4. 选择或创建工作区，发送普通提示词，并测试卡片按钮来回答问题或审批操作。
@@ -88,11 +90,11 @@ agent-relay start
 
 ## 能做什么
 
-- 通过 Telegram 或 Lark/飞书远程控制本地 Codex 会话。
+- 通过 Telegram 或 Lark/飞书远程控制本地 Codex、Claude Code 或 DeepSeek Harness 会话，保留各后端原生命令与能力边界。
 - 在聊天里选择、创建、浏览、删除工作区。
 - 发送普通提示词、图片、语音/音频、文件提及、技能和运行中的补充指令。
 - 在可编辑的活动卡片中查看推理摘要、计划进度、工具、文件改动、警告和 diff；较长的详情保留 24 小时。
-- 直接在聊天里回答 Codex 问题和审批操作。
+- 在聊天里回答原生问题（包括多选），审批选项与范围以当前后端实际提供的内容为准。
 - 支持私聊和指定群聊；群聊消息只有提及 bot 时才会被处理。
 - 使用 review、Plan mode、goal、resume、fork、side conversation、interrupt、后台终端清理等常见 Codex 工作流。
 - 通过可选的本地 relay 能力 API，把截图、生成图片或文件发回聊天窗口。
@@ -103,7 +105,9 @@ agent-relay start
 
 ### 聊天命令
 
-先发送 `/relay`。Relay Home 会显示当前工作区、Codex 状态、等待状态、最近错误和可用操作。
+`/help` 显示所选后端的实时命令列表。Claude 和 DSH 命令保留原生参数及含义，不会误调用 Codex 命令，也不会把未知命令悄悄当作提示词发送。保留原有 `/relay` 工作区和状态面板，会话指令沿用各后端原生写法。DSH 使用 `/new` 新建会话、`/resume [搜索词]` 选择历史会话；这两个快捷指令由 Relay 映射到 DSH 原生会话 API。中断仍使用活动卡上的 Interrupt 按钮，不引入新的 `/relay` 子命令。下面的原有命令表适用于 **Codex**；Claude 和 DSH 见[后端命令矩阵](docs/en/backends.md)。
+
+先发送 `/relay`。Relay Home 会显示当前工作区、agent 状态、等待状态、最近错误和可用操作。
 
 常用命令：
 
@@ -132,7 +136,7 @@ agent-relay start
 | --- | --- |
 | `agent-relay` / `agent-relay start` | 以前台方式运行。缺少配置时退出并提示运行 `install`，不会打开向导。 |
 | `agent-relay install` | 安装并配置，或重新配置当前持久安装。执行 npm 安装和保存前分别需要确认；Ctrl+C 或拒绝保存不会改写已有配置。 |
-| `agent-relay doctor` | 检查本地配置、路径、Bun 和 Codex，不访问机器人 API。 |
+| `agent-relay doctor` | 检查本地配置、路径、Bun 和所选后端，不访问机器人 API。 |
 | `agent-relay config path` | 仅显示所选配置文件位置，不显示 secret。 |
 | `agent-relay gateway <setup\|start\|stop\|status\|remove>` | 管理需手动启用的[实验性 Gateway](#实验性功能接力工作)。 |
 
@@ -143,7 +147,7 @@ agent-relay 支持私聊，也支持群聊。群聊适合作为一个共享的 a
 - 把 bot 加入群聊，并用 `ALLOWED_CONVERSATION_IDS` 允许这个群。
 - 发送文本、图片/文件 caption 和 slash command 时提及 bot；普通 `@bot` 或 `@BotName` 前后用空格分隔。
 - 未提及 bot 的群聊消息会在授权检查前被忽略。
-- Telegram 论坛话题和 Lark/飞书线程会被视为独立 scope，因此同一个群里的不同话题或线程可以各自选择 workspace，并行运行独立 Codex 会话。
+- Telegram 论坛话题和 Lark/飞书线程会被视为独立 scope，因此同一个群里的不同话题或线程可以各自选择 workspace，并行运行所选后端的独立会话。
 - 如果希望多个 agent 在同一个群里协作，每个 agent bot 运行一个 agent-relay 进程。
 - 如果希望 Codex 主动提及另一个 agent bot，需要配置 peer agents 并开启本地 relay 能力 API。
 
@@ -201,6 +205,8 @@ agent-relay install
 
 ### 实验性功能：接力工作
 
+共享 Gateway 仍然仅支持 Codex；为 Claude 或 DSH 启用会直接报错。这两个后端使用各自原生协议和会话存储。
+
 > **本功能处于实验阶段、默认关闭，并且只能手动开启。** 在正式稳定前，其接口和启用方式可能发生不兼容变化。未手动开启时，它不会启动 Gateway、安装客户端代理，也不会改变现有 Relay、Codex CLI 或 Codex 桌面版的任何行为。
 
 “接力工作”允许你先在原生 Codex CLI 或 Windows/macOS Codex 桌面版开始工作，离开电脑后再通过 Telegram 或 Lark/飞书继续同一个 Codex thread。Relay、交互式 Codex CLI 进程和 Codex 桌面版统一连接一个独立的本地 Gateway，由其唯一 app-server 管理 thread；用户正常启动 Codex，无需选择远端入口。
@@ -229,7 +235,7 @@ git clone https://github.com/zwx1127/agent-relay.git
 cd agent-relay
 bun install
 npm pack
-bun run cli install --package /absolute/path/asuka1127-agent-relay-0.2.0.tgz
+bun run cli install --package /absolute/path/asuka1127-agent-relay-0.3.0-next.2.tgz
 bun run cli start
 ```
 
@@ -249,7 +255,7 @@ npm pack
 使用 `npm pack` 实际输出的文件名，将下面两处路径替换为该文件的真实绝对路径，再用一条命令安装并进入配置：
 
 ```bash
-npx --package=/absolute/path/asuka1127-agent-relay-0.2.0.tgz agent-relay install --package /absolute/path/asuka1127-agent-relay-0.2.0.tgz
+npx --package=/absolute/path/asuka1127-agent-relay-0.3.0-next.2.tgz agent-relay install --package /absolute/path/asuka1127-agent-relay-0.3.0-next.2.tgz
 ```
 
 前一个 `--package` 告诉 npx 从哪里运行安装器，后一个告诉安装器持久安装哪个本地 tarball，而不是下载 registry 版本。tarball 中的 scoped 包名和版本必须匹配。只使用可信的安装包：npm 会安装依赖并执行依赖的安装脚本。

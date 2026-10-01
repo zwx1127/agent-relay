@@ -1,5 +1,7 @@
 import type { AppConfig } from "../../runtime/config.ts";
 import { CodexDriver } from "./codex/driver.ts";
+import { ClaudeDriver } from "./claude/driver.ts";
+import { DshDriver } from "./dsh/driver.ts";
 import { noopLogger, type Logger } from "../../domain/logger.ts";
 import type { AgentDriver, AgentExitHandler, AgentOutputHandler } from "../../ports/agent.ts";
 import { relayInteractionInstructions } from "../../relay/control/skills.ts";
@@ -16,7 +18,21 @@ export interface AgentFactoryOptions {
 
 export function createAgentDriver(config: AppConfig, options: AgentFactoryOptions): AgentDriver {
   const logger = options.logger ?? noopLogger;
+  if (config.agentProvider === "dsh" && (config.relayControlEnabled || options.controlInstructions)) {
+    throw new Error("DSH Web does not expose a native relay-helper instruction channel. Set RELAY_CONTROL_ENABLED=false.");
+  }
+  if (config.agentProvider !== "codex" && (options.gatewayUrl || options.gatewayUrlProvider || config.experimentalRelayWorkEnabled)) {
+    throw new Error("The experimental shared Gateway supports only the Codex backend.");
+  }
   switch (config.agentProvider) {
+    case "claude":
+      return new ClaudeDriver({
+        claudeBin: config.claudeBin ?? "claude",
+        env: options.controlEnv,
+        ...(options.controlInstructions ? { appendSystemPrompt: options.controlInstructions } : {}),
+      }, options.onOutput, options.onExit, logger);
+    case "dsh":
+      return new DshDriver({ dshBin: config.dshBin ?? "dsh", env: options.controlEnv }, options.onOutput, options.onExit, logger);
     case "codex":
       return new CodexDriver(
         {

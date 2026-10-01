@@ -19,6 +19,7 @@ import type { RelayStore } from "../storage/store.ts";
 import type { PendingPrompt, WorkspaceRecord } from "./types.ts";
 import { CODEX_PROMPT_TTL_MS, LIST_PAGE_SIZE } from "./ui/constants.ts";
 import { shortToken } from "./ui/callback-data.ts";
+import { NativeModelPicker } from "./thread-commands/native-model-picker.ts";
 import { commandArgs, parseReviewTarget } from "./ui/commands.ts";
 import { commandConfirmKeyboard, resumeKeyboard } from "./ui/keyboards.ts";
 import {
@@ -93,6 +94,7 @@ interface ThreadConfirmationCard {
 }
 
 export class ThreadCommandService {
+  private readonly nativeModels: NativeModelPicker;
   private readonly attachments: AttachmentPicker;
   private readonly backgroundTerminals: BackgroundTerminalService;
   private readonly goals: GoalCommandService;
@@ -102,6 +104,7 @@ export class ThreadCommandService {
   private readonly threadConfirmationCards = new Map<string, ThreadConfirmationCard>();
 
   constructor(private readonly deps: ThreadCommandDeps) {
+    this.nativeModels = new NativeModelPicker(deps);
     this.sideConversations = new SideConversationPresenter({
       store: deps.store,
       adapter: deps.adapter,
@@ -195,6 +198,28 @@ export class ThreadCommandService {
     await this.runBuiltinCommand(conversationId, { type: "review", target });
   }
 
+  async runNativeCommand(conversationId: ConversationId, text: string): Promise<void> {
+    if (text.trim() === "/model" && this.deps.agent.setModel) return this.nativeModels.render(conversationId);
+    const { workspace, status, key } = await this.commandSession(conversationId);
+    if (this.commandBusy(conversationId, workspace.name, status)) {
+      await this.sendBusyCommandNotice(conversationId);
+      return;
+    }
+    if (!this.deps.agent.runNativeCommand) throw new Error("This backend does not expose native commands over its remote interface.");
+    const result = await this.deps.agent.runNativeCommand(key, text);
+    if (result.threadChanged) {
+      await this.deps.resetSessionPresentation(key, { deletePages: false });
+      this.deps.store.clearSessionThreadId(key);
+      this.deps.store.setCollaborationMode(key, "default");
+    }
+    if (result.threadId) this.deps.store.setSessionThreadId(key, result.threadId);
+    if (result.clearDisplay) {
+      this.deps.store.clearTranscript(conversationId, workspace.name);
+      this.deps.store.deletePagedOutputsForSession(key);
+    }
+    if (result.message) await this.deps.sendRendered(conversationId, messageWithTitle(result.message));
+  }
+
   async runBuiltinCommand(conversationId: ConversationId, command: AgentBuiltinCommand): Promise<void> {
     const { workspace, status, key } = await this.commandSession(conversationId);
     if (this.commandBusy(conversationId, workspace.name, status)) {
@@ -219,7 +244,7 @@ export class ThreadCommandService {
 
   async startFreshThread(conversationId: ConversationId, name = "", clearDisplay = false): Promise<void> {
     const workspace = this.deps.requireCurrentWorkspace(conversationId);
-    const key = sessionKey(conversationId, workspace.name);
+    const key = sessionKey(conversationId, workspace.name, this.deps.agent.providerId);
     const existing = this.deps.agent.getStatus(key);
     if (this.commandBusy(conversationId, workspace.name, existing)) {
       await this.sendBusyCommandNotice(conversationId);
@@ -254,7 +279,7 @@ export class ThreadCommandService {
 
   async renderResumePicker(conversationId: ConversationId, searchTerm: string): Promise<void> {
     const workspace = this.deps.requireCurrentWorkspace(conversationId);
-    const key = sessionKey(conversationId, workspace.name);
+    const key = sessionKey(conversationId, workspace.name, this.deps.agent.providerId);
     if (this.commandBusy(conversationId, workspace.name, this.deps.agent.getStatus(key))) {
       await this.sendBusyCommandNotice(conversationId);
       return;
@@ -265,13 +290,14 @@ export class ThreadCommandService {
       limit: LIST_PAGE_SIZE,
       ...(searchTerm ? { searchTerm } : {}),
     });
-    if (threads.length === 0) {
+    const searchable = this.deps.agent.providerId === "dsh";
+    if (threads.length === 0 && !searchable) {
       await this.deps.sendRendered(conversationId, messageWithTitle("No saved chats found."));
       return;
     }
     const token = shortToken();
-    const result = await this.deps.sendRendered(conversationId, formatResumeMessage(threads), {
-      replyMarkup: resumeKeyboard(token, threads),
+    const result = await this.deps.sendRendered(conversationId, threads.length ? formatResumeMessage(threads) : messageWithTitle("No saved chats found.", "Search by native session name or ID."), {
+      replyMarkup: resumeKeyboard(token, threads, searchable),
       disableWebPagePreview: true,
     });
     if (!result.messageId) throw new Error("IM adapter did not return a resume picker message id.");
@@ -408,7 +434,7 @@ export class ThreadCommandService {
 
   private async openSideConversation(conversationId: ConversationId): Promise<ActiveSideConversation> {
     const workspace = this.deps.requireCurrentWorkspace(conversationId);
-    const ownerSessionKey = sessionKey(conversationId, workspace.name);
+    const ownerSessionKey = sessionKey(conversationId, workspace.name, this.deps.agent.providerId);
     const status = await this.deps.ensureAgentStarted(conversationId, workspace);
     if (!status.threadId) throw new Error("Send a normal message first, then try /btw again.");
     if (!this.deps.agent.openSideConversation || !this.deps.agent.sendSideConversationInput
@@ -547,7 +573,7 @@ export class ThreadCommandService {
       return;
     }
     const workspace = this.deps.requireCurrentWorkspace(conversationId);
-    const key = sessionKey(conversationId, workspace.name);
+    const key = sessionKey(conversationId, workspace.name, this.deps.agent.providerId);
     const result = await this.deps.sendRendered(conversationId, textMessage("New chat name requested."), {
       forceReply: true,
       forceReplyInstruction: "Reply to this prompt, or send your next message with the new chat name.",
@@ -662,7 +688,7 @@ export class ThreadCommandService {
   private async commandSession(conversationId: ConversationId): Promise<{ workspace: WorkspaceRecord; status: AgentSessionStatus; key: string }> {
     const workspace = this.deps.requireCurrentWorkspace(conversationId);
     const status = await this.deps.ensureAgentStarted(conversationId, workspace);
-    return { workspace, status, key: sessionKey(conversationId, workspace.name) };
+    return { workspace, status, key: sessionKey(conversationId, workspace.name, this.deps.agent.providerId) };
   }
 
   private sessionBusy(status: AgentSessionStatus): boolean {
@@ -670,7 +696,7 @@ export class ThreadCommandService {
   }
 
   private async sendBusyCommandNotice(conversationId: ConversationId): Promise<void> {
-    await this.deps.sendRendered(conversationId, messageWithTitle("Codex is busy.", "Wait for the current turn, answer the pending question, or handle the approval request before running this command."));
+    await this.deps.sendRendered(conversationId, messageWithTitle(`${this.deps.agent.displayName ?? "Codex"} is busy.`, "Wait for the current turn, answer the pending question, or handle the approval request before running this command."));
   }
 
   async handleCommandCallback(message: CallbackMessage, payload: string): Promise<string | void> {
@@ -721,6 +747,10 @@ export class ThreadCommandService {
 
     if (command === "resume") {
       await this.resumeFromCallback(message, pending, data, action);
+      return;
+    }
+    if (command === "model") {
+      await this.nativeModels.handle(message, pending, data, action);
       return;
     }
     if (command === "plan") {
@@ -801,7 +831,7 @@ export class ThreadCommandService {
     if (!allowed) return this.expireActivityControl(message, pending);
 
     const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
-    const key = sessionKey(message.conversationId, workspace.name);
+    const key = sessionKey(message.conversationId, workspace.name, this.deps.agent.providerId);
     const status = this.deps.agent.getStatus(key);
     if (!status?.running
       || pending.sessionKey !== key
@@ -905,7 +935,7 @@ export class ThreadCommandService {
     }
     if (action !== "confirm") throw new Error("Command confirmation is unavailable.");
     const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
-    const key = sessionKey(message.conversationId, workspace.name);
+    const key = sessionKey(message.conversationId, workspace.name, this.deps.agent.providerId);
     const status = this.deps.agent.getStatus(key);
     if (!status?.running || status.threadId !== data.threadId || pending.sessionKey !== key) {
       this.forgetThreadConfirmation(pending);
@@ -915,7 +945,7 @@ export class ThreadCommandService {
     }
     if (this.commandBusy(message.conversationId, workspace.name, status)) {
       this.forgetThreadConfirmation(pending);
-      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Codex is busy.", "Wait for the current work to finish and run the command again."), { inline_keyboard: [] });
+      await this.deps.renderStrictCallbackPage(message, messageWithTitle(`${this.deps.agent.displayName ?? "Codex"} is busy.`, "Wait for the current work to finish and run the command again."), { inline_keyboard: [] });
       this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
       return;
     }
@@ -948,15 +978,8 @@ export class ThreadCommandService {
     data: Record<string, unknown>,
     rawIndex: string | undefined,
   ): Promise<void> {
-    const index = Number(rawIndex);
-    if (!Number.isInteger(index) || index < 0) throw new Error("Resume thread is missing.");
-    const threads = Array.isArray(data.threads) ? data.threads : [];
-    const selected = asPromptRecord(threads[index]);
-    const threadId = typeof selected?.id === "string" ? selected.id : undefined;
-    if (!threadId) throw new Error("Resume selection expired.");
-    const threadName = typeof selected?.name === "string" ? selected.name : threadId;
     const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
-    const key = sessionKey(message.conversationId, workspace.name);
+    const key = sessionKey(message.conversationId, workspace.name, this.deps.agent.providerId);
     const statusBefore = this.deps.agent.getStatus(key);
     const sourceMode = this.deps.store.getCollaborationMode(key);
     const currentThreadId = statusBefore?.threadId ?? this.deps.store.getSession(key)?.thread_id ?? undefined;
@@ -968,10 +991,36 @@ export class ThreadCommandService {
       return;
     }
     if (this.commandBusy(message.conversationId, workspace.name, statusBefore)) {
-      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Codex is busy.", "The current chat was not changed."), { inline_keyboard: [] });
+      await this.deps.renderStrictCallbackPage(message, messageWithTitle(`${this.deps.agent.displayName ?? "Codex"} is busy.`, "The current chat was not changed."), { inline_keyboard: [] });
       this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
       return;
     }
+    if (rawIndex === "search" && this.deps.agent.providerId === "dsh") {
+      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Session search requested.", "Reply to the prompt below."), { inline_keyboard: [] });
+      this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
+      const result = await this.deps.sendRendered(message.conversationId, messageWithTitle("Search sessions", "Reply with a native session name or ID."), {
+        forceReply: true,
+        inputFieldPlaceholder: "Session name or ID",
+      });
+      if (!result.messageId) throw new Error("IM adapter did not return a session search prompt message id.");
+      this.deps.store.setPendingPrompt({
+        conversationId: message.conversationId, promptMessageId: result.messageId, kind: "relay_command",
+        createdAt: Date.now(), sessionKey: key, expiresAt: Date.now() + CODEX_PROMPT_TTL_MS,
+        payloadJson: JSON.stringify({ command: "resume_search", sourceWorkspace: workspace.name, sourceThreadId: currentThreadId ?? null }),
+      });
+      // Retain the prompt's purpose after a session reset removes pending input,
+      // so a late search reply cannot become a task in the replacement session.
+      const scope = parseChatScopeKey(String(message.conversationId));
+      this.deps.store.setControlMessage(scope.conversationId, result.messageId, scope.scopeKey, "session_search");
+      return;
+    }
+    const index = Number(rawIndex);
+    if (!Number.isInteger(index) || index < 0) throw new Error("Resume thread is missing.");
+    const threads = Array.isArray(data.threads) ? data.threads : [];
+    const selected = asPromptRecord(threads[index]);
+    const threadId = typeof selected?.id === "string" ? selected.id : undefined;
+    if (!threadId) throw new Error("Resume selection expired.");
+    const threadName = typeof selected?.name === "string" ? selected.name : threadId;
     if (threadId === currentThreadId) {
       await this.deps.renderStrictCallbackPage(message, messageWithTitle("Already using this chat.", threadName), { inline_keyboard: [] });
       this.deps.store.deletePendingPrompt(pending.conversationId, pending.promptMessageId);
@@ -1099,13 +1148,25 @@ export class ThreadCommandService {
       return;
     }
     this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
+    if (data.command === "resume_search") {
+      const workspace = this.deps.requireCurrentWorkspace(conversationId);
+      const key = sessionKey(conversationId, workspace.name, this.deps.agent.providerId);
+      const threadId = this.deps.agent.getStatus(key)?.threadId ?? this.deps.store.getSession(key)?.thread_id ?? null;
+      if (this.deps.agent.providerId !== "dsh" || pending.sessionKey !== key
+        || data.sourceWorkspace !== workspace.name || data.sourceThreadId !== threadId) {
+        await this.deps.sendRendered(conversationId, messageWithTitle("Session search expired.", "Send /resume again to search saved sessions."));
+        return;
+      }
+      await this.renderResumePicker(conversationId, text.trim());
+      return;
+    }
     if (data.command === "rename") {
       await this.renameCurrentThread(conversationId, text.trim());
       return;
     }
     if (data.command === "attachment_task") {
       const workspace = this.deps.requireCurrentWorkspace(conversationId);
-      const key = sessionKey(conversationId, workspace.name);
+      const key = sessionKey(conversationId, workspace.name, this.deps.agent.providerId);
       const status = this.deps.agent.getStatus(key);
       const attachment = parseAttachmentRecord(data.attachment);
       const activeSideConversation = this.hasActiveSideConversation(conversationId);

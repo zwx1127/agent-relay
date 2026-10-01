@@ -1,4 +1,4 @@
-import type { AgentBackgroundTerminalSummary, AgentThreadGoal, AgentThreadSummary, AgentUserInputQuestion } from "../../ports/agent.ts";
+import type { AgentBackgroundTerminalSummary, AgentThreadGoal, AgentThreadSummary, AgentUserInputQuestion, AgentNativeCommandSummary } from "../../ports/agent.ts";
 import { renderTelegramText, truncateForTelegramLabel, type RenderedTelegramText, type TelegramTextPart } from "../../presentation/telegram/text.ts";
 import { UI_BUTTON } from "./constants.ts";
 import { bold, code } from "./text-parts.ts";
@@ -36,6 +36,17 @@ export function formatHelpMessage(): RenderedTelegramText {
     "- ", code("/stop"), ", ", code("/clean"), " - Stop all background terminals for this chat.\n\n",
     "Relay-only commands: ", code("/help"), ", ", code("/relay"), ".",
   ];
+  return renderTelegramText(parts);
+}
+
+export function formatNativeHelpMessage(name: string, commands: AgentNativeCommandSummary[]): RenderedTelegramText {
+  const parts: TelegramTextPart[] = [bold(`${name} commands`), "\n\nCommands keep this backend's own argument and permission semantics.\n"];
+  for (const command of commands) {
+    parts.push("\n- ", code(command.command), " - ", command.description,
+      command.availability === "local-only" ? " (local native UI only)" : "");
+  }
+  if (!commands.length) parts.push("\nSelect a workspace with /relay, then send /help to load the native command catalog.");
+  parts.push("\n\n", code("/relay"), " opens Home. Use the activity card's Interrupt button to stop a turn. Unknown commands are never sent as ordinary prompts.");
   return renderTelegramText(parts);
 }
 

@@ -5,6 +5,8 @@ import type {
   AgentInterruptResult,
   AgentSendOptions,
   AgentSendResult,
+  AgentNativeCommandSummary,
+  AgentNativeCommandResult,
 } from "./input.ts";
 import type { AgentSessionStatus, StartAgentOptions } from "./session.ts";
 import type {
@@ -31,17 +33,22 @@ import type { AgentCollaborationMode } from "./input.ts";
 
 export interface AgentDriver {
   readonly providerId?: ProviderId;
+  readonly displayName?: string;
   /** Feature flags are advisory; callers still guard each optional method before invoking it. */
   readonly capabilities?: Partial<AgentDriverCapabilities>;
   start(options: StartAgentOptions): Promise<AgentSessionStatus>;
   send(sessionKey: string, text: string, options?: AgentSendOptions): Promise<AgentSendResult>;
   stop(sessionKey: string): Promise<void>;
+  /** Close every process owned by this driver when the Relay itself exits. */
+  dispose?(): Promise<void>;
   /** Release this logical client without interrupting a shared thread. */
   release?(sessionKey: string): Promise<void>;
   getStatus(sessionKey: string): AgentSessionStatus | undefined;
   interrupt?(sessionKey: string): Promise<AgentInterruptResult>;
   respond?(sessionKey: string, requestId: string | number, result: unknown): Promise<void>;
   runBuiltinCommand?(sessionKey: string, command: AgentBuiltinCommand): Promise<AgentBuiltinResult>;
+  listNativeCommands?(sessionKey?: string): Promise<AgentNativeCommandSummary[]>;
+  runNativeCommand?(sessionKey: string, text: string): Promise<AgentNativeCommandResult>;
   getThreadGoal?(sessionKey: string): Promise<AgentThreadGoal | null>;
   setThreadGoal?(sessionKey: string, goal: AgentThreadGoalSetOptions): Promise<AgentThreadGoal>;
   clearThreadGoal?(sessionKey: string): Promise<boolean>;
@@ -58,6 +65,8 @@ export interface AgentDriver {
   listBackgroundTerminals?(sessionKey: string): Promise<AgentBackgroundTerminalSummary[]>;
   listThreads?(options: AgentThreadListOptions): Promise<AgentThreadSummary[]>;
   listModels?(): Promise<AgentModelSummary[]>;
+  /** Select an opaque id from the native model catalog, without rewriting provider settings. */
+  setModel?(sessionKey: string, modelId: string): Promise<void>;
   listSkills?(workspacePath: string, options?: AgentSkillListOptions): Promise<AgentSkillSummary[]>;
   searchFiles?(workspacePath: string, query: string, options?: AgentFileSearchOptions): Promise<AgentFileSearchResult[]>;
   syncThreadCollaborationMode?(sessionKey: string, currentMode: AgentCollaborationMode, update: AgentRelayThreadStateUpdate): Promise<AgentCollaborationMode>;

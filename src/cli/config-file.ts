@@ -9,7 +9,7 @@ import type { Env } from "../runtime/config-types.ts";
 const CONFIG_KEYS = new Set([
   "IM_PROVIDER", "AGENT_PROVIDER", "TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_USERNAME", "ALLOWED_USER_IDS", "ALLOWED_CONVERSATION_IDS", "WORKSPACE_ROOT",
   "LARK_APP_ID", "LARK_APP_SECRET", "LARK_DOMAIN", "LARK_CARD_ACTION_DISPATCH_DELAY_MS", "TELEGRAM_POLL_TIMEOUT_SECONDS", "TELEGRAM_REQUEST_RETRY_MAX_ATTEMPTS",
-  "TELEGRAM_RETRY_INITIAL_DELAY_MS", "TELEGRAM_RETRY_MAX_DELAY_MS", "MEDIA_MAX_BYTES", "SQLITE_PATH", "CODEX_BIN", "CODEX_SANDBOX", "CODEX_APPROVAL",
+  "TELEGRAM_RETRY_INITIAL_DELAY_MS", "TELEGRAM_RETRY_MAX_DELAY_MS", "MEDIA_MAX_BYTES", "SQLITE_PATH", "CODEX_BIN", "CODEX_SANDBOX", "CODEX_APPROVAL", "CLAUDE_BIN", "DSH_BIN",
   "CODEX_DEVELOPER_INSTRUCTIONS_FILE", "CODEX_DEVELOPER_INSTRUCTIONS", "CODEX_MODEL_INSTRUCTIONS_FILE", "RELAY_AGENT_NAME", "RELAY_PEER_AGENTS_FILE",
   "RELAY_CONTROL_ENABLED", "RELAY_CONTROL_PORT", "EXPERIMENTAL_RELAY_WORK_ENABLED", "EXPERIMENTAL_RELAY_GATEWAY_PORT", "EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH", "LOG_LEVEL",
 ]);
@@ -30,7 +30,9 @@ export function selectConfigEnv(env: Env): Env {
 export function absoluteConfigPaths(env: Env, base: string): Env {
   const result = selectConfigEnv(env);
   for (const key of PATH_KEYS) if (result[key]?.trim()) result[key] = resolve(base, result[key]!);
-  if (result.CODEX_BIN?.includes("/") || result.CODEX_BIN?.includes("\\")) result.CODEX_BIN = resolve(base, result.CODEX_BIN);
+  for (const key of ["CODEX_BIN", "CLAUDE_BIN", "DSH_BIN"]) {
+    if (result[key]?.includes("/") || result[key]?.includes("\\")) result[key] = resolve(base, result[key]!);
+  }
   return result;
 }
 

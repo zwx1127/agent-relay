@@ -1,21 +1,14 @@
-import { execFile } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { promisify } from "node:util";
 import type { Env } from "../runtime/config-types.ts";
-import { codexVersionSpawnCommand, isCodexVersionSupported, parseCodexVersion } from "../providers/agents/codex/spawn.ts";
+import { AGENT_BACKENDS, detectAgent, backendVersionRequirement, type AgentDetection, type AgentProvider } from "./agent-detection.ts";
 import { TerminalWizardUI, WizardCancelledError, terminalText, type WizardUI } from "./prompts.ts";
 import { LARK_API_ORIGINS, validateProvider, validLarkAppId, validLarkSecret, validTelegramToken, type ProviderValidationResult } from "./validate-provider.ts";
 
 export type { WizardUI } from "./prompts.ts";
 
-export interface CodexDetection {
-  found: boolean;
-  path?: string;
-  version?: string;
-  compatible?: boolean;
-}
+export type CodexDetection = AgentDetection;
 
 export interface WizardOptions {
   ui?: WizardUI;
@@ -24,27 +17,12 @@ export interface WizardOptions {
   cwd?: string;
   validateProvider?: (env: Env, options: { approved: boolean }) => Promise<ProviderValidationResult>;
   detectCodex?: (binary: string, cwd: string) => Promise<CodexDetection>;
+  detectAgent?: (provider: AgentProvider, binary: string, cwd: string) => Promise<AgentDetection>;
 }
 
-const executeFile = promisify(execFile);
-
-export async function detectCodex(binary: string, cwd: string): Promise<CodexDetection> {
-  const path = typeof Bun !== "undefined" ? Bun.which(binary, { cwd }) ?? undefined : undefined;
-  try {
-    const command = codexVersionSpawnCommand(path ?? binary);
-    const { stdout } = await executeFile(command.command, command.args, {
-      cwd, timeout: 5_000, maxBuffer: 8192, windowsHide: true,
-      ...(command.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
-    });
-    const version = parseCodexVersion(stdout);
-    return {
-      found: true,
-      ...(isAbsolute(command.resolvedCodexBin) ? { path: command.resolvedCodexBin } : {}),
-      ...(version ? { version, compatible: isCodexVersionSupported(version) } : {}),
-    };
-  } catch {
-    return { found: false };
-  }
+/** Backward-compatible alias for callers testing Codex setup. */
+export function detectCodex(binary: string, cwd: string): Promise<CodexDetection> {
+  return detectAgent("codex", binary, cwd);
 }
 
 type AllowlistKind = "telegram-user" | "telegram-chat" | "lark-user" | "lark-chat";
@@ -85,18 +63,25 @@ function count(value: string | undefined): number {
 export async function runWizard(options: WizardOptions): Promise<Env | undefined> {
   const ui = options.ui ?? new TerminalWizardUI();
   const initial = options.initial ?? {};
+  const initialAgentProvider = initial.AGENT_PROVIDER?.trim();
   const env: Env = { ...initial };
   const cwd = resolve(options.cwd ?? process.cwd());
   const configPath = resolve(cwd, options.configPath);
   try {
-    ui.write("agent-relay setup\nThis grants allowlisted chat users access to a local Codex agent. Use a trusted machine and only allow people you trust.\nSecrets are masked. Do not share credentials, configuration files, private IDs, or raw debug logs. Ctrl+C cancels without saving.");
+    ui.write("agent-relay setup\nThis grants allowlisted chat users access to your selected local coding agent. Use a trusted machine and only allow people you trust.\nSecrets are masked. Do not share credentials, configuration files, private IDs, or raw debug logs. Ctrl+C cancels without saving.");
+    const agentProvider = await ui.choose("Agent backend", [
+      { value: "codex", label: "Codex" },
+      { value: "claude", label: "Claude Code" },
+      { value: "dsh", label: "DeepSeek Harness (dsh)" },
+    ] as const, initialAgentProvider === "claude" || initialAgentProvider === "dsh" ? initialAgentProvider : "codex");
+    env.AGENT_PROVIDER = agentProvider;
+    const backend = AGENT_BACKENDS[agentProvider];
     const provider = await ui.choose("Messaging provider", [
       { value: "telegram", label: "Telegram" },
       { value: "lark", label: "Feishu / Lark" },
     ] as const, initial.IM_PROVIDER === "lark" ? "lark" : "telegram");
     const sameProvider = provider === (initial.IM_PROVIDER ?? "telegram");
     env.IM_PROVIDER = provider;
-    env.AGENT_PROVIDER = "codex";
     delete env.MESSAGING_PROVIDER;
 
     if (provider === "telegram") {
@@ -136,39 +121,58 @@ export async function runWizard(options: WizardOptions): Promise<Env | undefined
         if (!path) return undefined;
         return !existsSync(path) || statSync(path).isDirectory() ? path : undefined;
       }, "Choose a directory path. Relative paths are resolved from the setup directory.");
-    env.SQLITE_PATH = await askValid(ui, "SQLite state file (absolute path)", absolutePath(initial.SQLITE_PATH ?? join(dirname(configPath), "state", "agent-relay.sqlite"), cwd),
+    const backendChanged = agentProvider !== (initial.AGENT_PROVIDER?.trim() || "codex");
+    const defaultState = join(dirname(configPath), "state", agentProvider === "codex" ? "agent-relay.sqlite" : `agent-relay-${agentProvider}.sqlite`);
+    if (backendChanged) ui.write("Changing backends selects a separate state file by default. The previous backend's sessions, prompts and history are preserved; they are never replayed through another agent.");
+    env.SQLITE_PATH = await askValid(ui, "SQLite state file (absolute path)", absolutePath(backendChanged ? defaultState : initial.SQLITE_PATH ?? defaultState, cwd),
       (value) => {
         const path = absolutePath(value, cwd);
         if (!path || existsSync(path) && !statSync(path).isFile()) return undefined;
         return path;
       }, "Choose a file path for SQLite state, not a directory.");
-    const binary = await askValid(ui, "Codex binary (PATH command or executable path)", initial.CODEX_BIN ?? "codex",
-      (value) => value && !/[\u0000-\u001f\u007f]/.test(value) ? value : undefined, "Enter the Codex executable name or path, without command-line arguments.");
-    env.CODEX_BIN = isAbsolute(binary) || binary.includes("/") || binary.includes("\\") ? absolutePath(binary, cwd)! : binary;
-    const codex = await (options.detectCodex ?? detectCodex)(env.CODEX_BIN, cwd);
-    if (codex.found) {
-      if (codex.path) env.CODEX_BIN = codex.path;
-      ui.write(codex.compatible === false
-        ? "The installed Codex CLI is older than 0.145.0. Upgrade it before starting relay."
-        : codex.version ? `Codex CLI detected (${terminalText(codex.version)}).` : "Codex CLI detected; its version could not be verified. Require 0.145.0 or newer.");
+    const binary = await askValid(ui, `${backend.label} binary (PATH command or executable path)`, initial[backend.binaryKey] ?? backend.defaultBinary,
+      (value) => value && !/[\u0000-\u001f\u007f]/.test(value) ? value : undefined, `Enter the ${backend.label} executable name or path, without command-line arguments.`);
+    env[backend.binaryKey] = isAbsolute(binary) || binary.includes("/") || binary.includes("\\") ? absolutePath(binary, cwd)! : binary;
+    const detected = agentProvider === "codex" && options.detectCodex
+      ? await options.detectCodex(env[backend.binaryKey]!, cwd)
+      : await (options.detectAgent ?? detectAgent)(agentProvider, env[backend.binaryKey]!, cwd);
+    if (detected.found) {
+      if (detected.path) env[backend.binaryKey] = detected.path;
+      ui.write(detected.compatible === false
+        ? backendVersionRequirement(agentProvider)
+        : detected.version ? `${backend.label} CLI detected (${terminalText(detected.version)}).` : `${backend.label} CLI detected; its version could not be verified.${agentProvider === "codex" ? " Require 0.145.0 or newer." : ""}`);
     } else {
-      ui.write("Codex CLI was not found or could not run --version. Install Codex CLI 0.145.0 or newer and sign in on this machine before starting relay. Setup will not install or sign in for you.");
+      ui.write(`${backend.label} CLI was not found or could not run --version. Install ${backend.label}${agentProvider === "codex" ? " CLI 0.145.0 or newer" : ""} and configure its native authentication on this machine before starting relay. Setup will not install or sign in for you.`);
     }
-    ui.write("Local Codex uses its own sign-in. Keep approval prompts enabled; review chat requests before approving them.");
-    env.CODEX_SANDBOX = await ui.choose("Codex sandbox", [
-      { value: "workspace-write", label: "Workspace write (recommended)" },
-      { value: "read-only", label: "Read only" },
-    ] as const, initial.CODEX_SANDBOX === "read-only" ? "read-only" : "workspace-write");
-    env.CODEX_APPROVAL = await ui.choose("Codex approval policy", [
-      { value: "on-request", label: "On request (recommended)" },
-      { value: "untrusted", label: "Untrusted commands require approval" },
-    ] as const, initial.CODEX_APPROVAL === "untrusted" ? "untrusted" : "on-request");
+    if (agentProvider === "codex") {
+      ui.write("Local Codex uses its own sign-in. Keep approval prompts enabled; review chat requests before approving them.");
+      env.CODEX_SANDBOX = await ui.choose("Codex sandbox", [
+        { value: "workspace-write", label: "Workspace write (recommended)" },
+        { value: "read-only", label: "Read only" },
+      ] as const, initial.CODEX_SANDBOX === "read-only" ? "read-only" : "workspace-write");
+      env.CODEX_APPROVAL = await ui.choose("Codex approval policy", [
+        { value: "on-request", label: "On request (recommended)" },
+        { value: "untrusted", label: "Untrusted commands require approval" },
+      ] as const, initial.CODEX_APPROVAL === "untrusted" ? "untrusted" : "on-request");
+    } else {
+      ui.write(`${backend.label} uses its native configuration, authentication, project instructions, and permission rules. Codex sandbox, approval, and instruction settings do not apply. Version detection does not verify protocol compatibility or authentication.`);
+    }
     env.LOG_LEVEL = "info";
     ui.write("Logging is set to info. Debug logs can expose messages, agent input, and output.");
-    env.RELAY_CONTROL_ENABLED = String(await ui.confirm("Enable the optional localhost helper so Codex can send files/images and use relay capabilities?", false));
+    if (agentProvider === "dsh") {
+      env.RELAY_CONTROL_ENABLED = "false";
+      ui.write("The optional localhost file/capability helper is unavailable for the verified DeepSeek Harness Web profile. It remains disabled; setup does not modify native dsh configuration or wrap your prompts.");
+    } else {
+      env.RELAY_CONTROL_ENABLED = String(await ui.confirm(`Enable the optional localhost helper so ${backend.label} can send files/images and use relay capabilities?`, false));
+    }
     env.RELAY_CONTROL_PORT = initial.RELAY_CONTROL_PORT ?? "0";
-    ui.write("Experimental Gateway sharing is optional and disabled by default. It shares Codex threads with native clients and uses the Gateway's Codex settings. Enabling this flag requires separate manual Gateway setup/start; this wizard does not install proxies, start Gateway, or change Codex configuration.");
-    env.EXPERIMENTAL_RELAY_WORK_ENABLED = String(await ui.confirm("Enable the experimental Gateway sharing flag?", false));
+    if (agentProvider === "codex") {
+      ui.write("Experimental Gateway sharing is optional and disabled by default. It shares Codex threads with native clients and uses the Gateway's Codex settings. Enabling this flag requires separate manual Gateway setup/start; this wizard does not install proxies, start Gateway, or change Codex configuration.");
+      env.EXPERIMENTAL_RELAY_WORK_ENABLED = String(await ui.confirm("Enable the experimental Gateway sharing flag?", false));
+    } else {
+      env.EXPERIMENTAL_RELAY_WORK_ENABLED = "false";
+      ui.write("Experimental Gateway sharing supports Codex only and is disabled for this backend.");
+    }
     // Preserve an existing Gateway state override independently of launch cwd.
     if (env.EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH) {
       env.EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH = absolutePath(env.EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH, cwd);
@@ -197,7 +201,7 @@ export async function runWizard(options: WizardOptions): Promise<Env | undefined
       ui.write("Credential verification skipped. No credentials were sent.");
     }
 
-    ui.write(`\nReview configuration\nProvider: ${provider}${provider === "lark" ? ` (${env.LARK_DOMAIN})` : ""}\nCredentials: [hidden]\nAllowed users: ${count(env.ALLOWED_USER_IDS)}\nAllowed chats: ${env.ALLOWED_CONVERSATION_IDS ? count(env.ALLOWED_CONVERSATION_IDS) : "any chat for allowed users"}\nWorkspace root: ${terminalText(env.WORKSPACE_ROOT)}\nSQLite state: ${terminalText(env.SQLITE_PATH)}\nCodex: ${terminalText(env.CODEX_BIN)}\nSandbox: ${env.CODEX_SANDBOX}; approvals: ${env.CODEX_APPROVAL}; logging: info\nLocal helper: ${env.RELAY_CONTROL_ENABLED}; experimental Gateway: ${env.EXPERIMENTAL_RELAY_WORK_ENABLED}\nCredential check: ${verified ? "passed (not an end-to-end setup test)" : attempted ? "did not pass" : "skipped"}\nSave destination: ${terminalText(configPath)}\nThe file contains credentials in plain text. Keep it private and out of source control.`);
+    ui.write(`\nReview configuration\nProvider: ${provider}${provider === "lark" ? ` (${env.LARK_DOMAIN})` : ""}\nCredentials: [hidden]\nAllowed users: ${count(env.ALLOWED_USER_IDS)}\nAllowed chats: ${env.ALLOWED_CONVERSATION_IDS ? count(env.ALLOWED_CONVERSATION_IDS) : "any chat for allowed users"}\nWorkspace root: ${terminalText(env.WORKSPACE_ROOT)}\nSQLite state: ${terminalText(env.SQLITE_PATH)}\nAgent backend: ${backend.label}\nExecutable: ${terminalText(env[backend.binaryKey]!)}\n${agentProvider === "codex" ? `Sandbox: ${env.CODEX_SANDBOX}; approvals: ${env.CODEX_APPROVAL}` : "Permissions: native backend rules"}; logging: info\nLocal helper: ${env.RELAY_CONTROL_ENABLED}; experimental Gateway: ${env.EXPERIMENTAL_RELAY_WORK_ENABLED}\nCredential check: ${verified ? "passed (not an end-to-end setup test)" : attempted ? "did not pass" : "skipped"}\nSave destination: ${terminalText(configPath)}\nThe file contains credentials in plain text. Keep it private and out of source control.`);
     if (!(await ui.confirm(attempted && !verified ? "Save this configuration despite the failed credential check?" : "Save this configuration?", false))) {
       ui.write("Setup cancelled. No configuration was saved.");
       return undefined;

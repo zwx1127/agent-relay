@@ -26,7 +26,7 @@ type CallbackMessage = Extract<InboundMessage, { kind: "callback_query" }>;
 export interface WorkspaceFlowDeps {
   config: AppConfig;
   store: RelayStore;
-  agent: Pick<AgentDriver, "stop" | "release" | "getStatus">;
+  agent: Pick<AgentDriver, "stop" | "release" | "getStatus" | "providerId" | "displayName">;
   logger: Logger;
   ensureAgentStarted(conversationId: ConversationId, workspace: WorkspaceRecord, threadId?: string, options?: { resumePrevious?: boolean }): Promise<AgentSessionStatus>;
   resetSessionPresentation(sessionKey: string, options?: { deletePages?: boolean }): Promise<void>;
@@ -135,7 +135,7 @@ export class WorkspaceFlow {
       await this.activateWorkspace(message.conversationId, workspace);
     } catch (error) {
       if (!(error instanceof WorkspaceSwitchBusyError)) throw error;
-      await this.deps.renderCallbackPage(message, workspaceBusyMessage(), { inline_keyboard: [] });
+      await this.deps.renderCallbackPage(message, workspaceBusyMessage(this.deps.agent.displayName), { inline_keyboard: [] });
       return;
     }
     this.deps.logger.info("router.workspace_selected", { conversation_id: message.conversationId, workspace: workspace.name, path: workspace.path });
@@ -157,7 +157,7 @@ export class WorkspaceFlow {
     const name = await this.workspaceNameForToken(token);
     const workspace = this.requireWorkspace(name);
     await this.deps.renderStrictCallbackPage(message, messageWithTitle("Deleting workspace.", workspace.name), { inline_keyboard: [] });
-    const key = sessionKey(message.conversationId, workspace.name);
+    const key = sessionKey(message.conversationId, workspace.name, this.deps.agent.providerId);
     // Finalize buffered output before stopping/deleting so the user sees the last
     // agent text even if the workspace is removed immediately after.
     await this.deps.resetSessionPresentation(key, { deletePages: true });
@@ -179,7 +179,7 @@ export class WorkspaceFlow {
   async stopFromCallback(message: CallbackMessage): Promise<void> {
     const workspace = this.requireCurrentWorkspace(message.conversationId);
     await this.deps.renderStrictCallbackPage(message, messageWithTitle("Stopping session.", workspace.name), { inline_keyboard: [] });
-    const key = sessionKey(message.conversationId, workspace.name);
+    const key = sessionKey(message.conversationId, workspace.name, this.deps.agent.providerId);
     await this.deps.resetSessionPresentation(key, { deletePages: true });
     await this.deps.agent.stop(key);
     await this.deps.cancelActiveTasks(key);
@@ -239,7 +239,7 @@ export class WorkspaceFlow {
     } catch (error) {
       if (!(error instanceof WorkspaceSwitchBusyError)) throw error;
       this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
-      await this.deps.sendRendered(conversationId, workspaceBusyMessage());
+      await this.deps.sendRendered(conversationId, workspaceBusyMessage(this.deps.agent.displayName));
       return;
     }
     this.deps.store.deletePendingPrompt(conversationId, promptMessageId);
@@ -273,7 +273,7 @@ export class WorkspaceFlow {
       // directory lazily so ordinary input can start fresh and /resume can be
       // the only operation that joins an existing Codex thread.
       await this.deps.ensureAgentStarted(conversationId, workspace, undefined, { resumePrevious: false });
-      this.deps.store.setCollaborationMode(sessionKey(conversationId, workspace.name), "default");
+      this.deps.store.setCollaborationMode(sessionKey(conversationId, workspace.name, this.deps.agent.providerId), "default");
       return;
     }
 
@@ -287,10 +287,10 @@ export class WorkspaceFlow {
     }
     this.assertWorkspaceSwitchAvailable(conversationId, workspace.name);
 
-    const targetKey = sessionKey(conversationId, workspace.name);
+    const targetKey = sessionKey(conversationId, workspace.name, this.deps.agent.providerId);
     await this.releaseWorkspaceSession(conversationId, workspace.name, targetKey, true);
 
-    const sourceKey = current ? sessionKey(conversationId, current.name) : undefined;
+    const sourceKey = current ? sessionKey(conversationId, current.name, this.deps.agent.providerId) : undefined;
     const sourceStatus = sourceKey ? this.deps.agent.getStatus(sourceKey) : undefined;
     const sourceWasRunning = Boolean(sourceStatus?.running);
     const sourceThreadId = sourceKey
@@ -329,7 +329,7 @@ export class WorkspaceFlow {
         this.deps.store,
         conversationId,
         name,
-        this.deps.agent.getStatus(sessionKey(conversationId, name)),
+        this.deps.agent.getStatus(sessionKey(conversationId, name, this.deps.agent.providerId)),
       ));
     if (!busyWorkspace) return;
     this.deps.logger.info("router.workspace_switch_rejected_busy", {
@@ -338,7 +338,7 @@ export class WorkspaceFlow {
       target_workspace: targetWorkspaceName,
       busy_workspace: busyWorkspace,
     });
-    throw new WorkspaceSwitchBusyError();
+    throw new WorkspaceSwitchBusyError(this.deps.agent.displayName);
   }
 
   private async releaseWorkspaceSession(
@@ -374,7 +374,7 @@ export class WorkspaceFlow {
   private resetCurrentCollaborationMode(conversationId: ConversationId): void {
     const current = this.currentWorkspace(conversationId);
     if (!current) return;
-    this.deps.store.setCollaborationMode(sessionKey(conversationId, current.name), "default");
+    this.deps.store.setCollaborationMode(sessionKey(conversationId, current.name, this.deps.agent.providerId), "default");
   }
 
   private async refreshWorkspacesMessageFromPrompt(conversationId: ConversationId, payload: Record<string, unknown> | undefined): Promise<void> {
@@ -411,15 +411,15 @@ export class WorkspaceFlow {
 }
 
 class WorkspaceSwitchBusyError extends Error {
-  constructor() {
-    super("Codex is busy. The current workspace was not changed.");
+  constructor(name = "Codex") {
+    super(`${name} is busy. The current workspace was not changed.`);
     this.name = "WorkspaceSwitchBusyError";
   }
 }
 
-function workspaceBusyMessage(): RenderedTelegramText {
+function workspaceBusyMessage(name = "Codex"): RenderedTelegramText {
   return messageWithTitle(
-    "Codex is busy.",
+    `${name} is busy.`,
     "Wait for the current turn, answer the pending question, or handle the approval request before switching workspace.",
   );
 }

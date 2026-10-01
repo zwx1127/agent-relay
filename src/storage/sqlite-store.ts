@@ -42,6 +42,26 @@ export class SQLiteStore implements RelayStore {
     migrateSQLiteSchema(this.db, this.logger);
   }
 
+  bindAgentProvider(provider: string): void {
+    if (!["codex", "claude", "dsh"].includes(provider)) throw new Error("Unsupported state backend.");
+    this.db.transaction(() => {
+      const existing = this.db.query<{ value: string }, []>("SELECT value FROM relay_metadata WHERE key = 'agent_provider'").get();
+      // Pre-multi-backend state is Codex-owned. Do not reinterpret old queued
+      // prompts, approvals or transcript state under a newly selected backend.
+      const legacyState = !existing && this.db.query<{ present: number }, []>(`SELECT (
+        EXISTS(SELECT 1 FROM agent_sessions) OR EXISTS(SELECT 1 FROM tasks)
+        OR EXISTS(SELECT 1 FROM pending_prompts) OR EXISTS(SELECT 1 FROM transcript_events)
+        OR EXISTS(SELECT 1 FROM paged_outputs)
+      ) AS present`).get()?.present;
+      const owner = existing?.value ?? (legacyState ? "codex" : provider);
+      if (owner !== provider) {
+        const label = ["codex", "claude", "dsh"].includes(owner) ? owner : "another backend";
+        throw new Error(`This SQLite state belongs to ${label}. Choose a separate SQLITE_PATH for ${provider}, or rerun install to select a backend-specific state file. Existing conversations and queued work were preserved.`);
+      }
+      this.db.query("INSERT INTO relay_metadata (key, value) VALUES ('agent_provider', ?) ON CONFLICT(key) DO NOTHING").run(provider);
+    }).immediate();
+  }
+
   upsertWorkspace(record: WorkspaceRecord): void {
     this.repositories.workspaces.upsert(record);
   }

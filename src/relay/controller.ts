@@ -25,7 +25,7 @@ import type { RenderedTelegramText } from "../presentation/telegram/text.ts";
 import { noopLogger, type Logger, type LogFields } from "../domain/logger.ts";
 import { UI_BUTTON } from "./ui/constants.ts";
 import { consoleKeyboard } from "./ui/keyboards.ts";
-import { formatErrorMessage, formatHelpMessage } from "./ui/messages.ts";
+import { formatErrorMessage, formatHelpMessage, formatNativeHelpMessage } from "./ui/messages.ts";
 import { formatHomeMessage } from "./ui/status-message.ts";
 import { messageWithTitle, textMessage } from "./ui/text-parts.ts";
 import type { StatusView } from "./ui/status-view.ts";
@@ -74,6 +74,7 @@ export class RelayController {
   private readonly conversationQueue = new ConversationQueue();
 
   constructor(private readonly deps: RelayControllerDeps) {
+    deps.store.bindAgentProvider?.(deps.config.agentProvider);
     this.logger = deps.logger ?? noopLogger;
     this.renderer = new RelayMessageRenderer(deps.adapter, this.logger);
     this.sharedMessages = new SharedMessageRegistry(deps.config.experimentalRelayWorkEnabled);
@@ -291,7 +292,21 @@ export class RelayController {
     });
     this.slashCommands = new SlashCommandRouter({
       help: async (conversationId) => {
-        await this.sendRendered(conversationId, formatHelpMessage());
+        if (deps.config.agentProvider === "codex") {
+          await this.sendRendered(conversationId, formatHelpMessage());
+          return;
+        }
+        const workspace = this.currentWorkspace(conversationId);
+        const status = workspace ? await this.ensureAgentStarted(conversationId, workspace) : undefined;
+        const commands = [...(await deps.agent.listNativeCommands?.(status?.sessionKey) ?? [])];
+        if (deps.config.agentProvider === "dsh") {
+          // User-facing session shortcuts use DSH APIs, not its slash-command registry.
+          commands.push(
+            { command: "/new", description: "Create a DSH session (Relay shortcut to the native session API)." },
+            { command: "/resume [search]", description: "Choose a saved DSH session (Relay shortcut to the native session API)." },
+          );
+        }
+        await this.sendRendered(conversationId, formatNativeHelpMessage(deps.agent.displayName ?? deps.config.agentProvider, commands));
       },
       review: (conversationId, text) => this.threadCommands.runReviewCommand(conversationId, text),
       compact: (conversationId) => this.threadCommands.requestCompactConfirmation(conversationId),
@@ -313,7 +328,8 @@ export class RelayController {
       unknown: async (conversationId, command) => {
         await this.sendRendered(conversationId, textMessage(`Unknown command: ${command}. Send /help to see supported commands.`));
       },
-    });
+      native: (conversationId, text) => this.threadCommands.runNativeCommand(conversationId, text),
+    }, deps.config.agentProvider);
     this.callbacks = new CallbackRouter({
       isStaleConsoleCallback: (message, payload) => this.isStaleConsoleCallback(message, payload),
       renderStaleConsole: async (message) => {
@@ -373,7 +389,9 @@ export class RelayController {
       return;
     }
 
-    const text = message.text.trim();
+    // Native command plugins may interpret separator/trailing whitespace. Keep
+    // the complete payload; only Codex retains its historical trim behavior.
+    const text = this.deps.config.agentProvider === "codex" ? message.text.trim() : message.text.trimStart();
     const command = this.slashCommands.command(text);
     this.logger.info("router.message_received", {
       conversation_id: scope.conversationId,
@@ -422,6 +440,11 @@ export class RelayController {
         const pending = promptMessageId
           ? this.deps.store.getPendingPrompt(message.conversationId, promptMessageId)
           : this.latestNextMessagePrompt(message.conversationId);
+        if (!pending && promptMessageId
+          && this.deps.store.getControlMessage(scope.conversationId, promptMessageId)?.kind === "session_search") {
+          await this.sendRendered(message.conversationId, messageWithTitle("Session search expired.", "Send /resume again to search saved sessions."));
+          return;
+        }
         if (pending?.kind === "workspace_name") {
           if (this.threadCommands.hasActiveSideConversation(message.conversationId)) {
             await this.threadCommands.rejectNavigationDuringSideConversation(message.conversationId);
@@ -445,7 +468,7 @@ export class RelayController {
           // direct prompts are held back so they do not bypass the requested gate.
           const codexPending = this.deps.store.latestPendingPrompt(message.conversationId, ["codex_user_input", "codex_approval", "codex_mcp_elicitation"]);
           const workspace = this.currentWorkspace(message.conversationId);
-          const blockingKind = workspace && this.codexPromptFlow.blockingPromptKind(sessionKey(message.conversationId, workspace.name));
+          const blockingKind = workspace && this.codexPromptFlow.blockingPromptKind(sessionKey(message.conversationId, workspace.name, this.deps.agent.providerId));
           if (blockingKind || (codexPending && (codexPending.kind !== "codex_user_input"
             || parsePromptPayload(codexPending.payloadJson)?.isBlocking !== false))) {
             await this.sendPendingCodexPromptNotice(message.conversationId, blockingKind ? { kind: blockingKind } : codexPending!);
@@ -482,20 +505,20 @@ export class RelayController {
       await this.sendRendered(
         conversationId,
         messageWithTitle(
-          "Codex is waiting for approval.",
+          `${this.deps.agent.displayName ?? "Codex"} is waiting for approval.`,
           "Use the approval buttons before sending another instruction. Direct messages are not submitted while approval is pending; use Interrupt on the latest activity card to stop the blocked turn.",
         ),
       );
       return;
     }
     if (pending.kind === "codex_mcp_elicitation") {
-      await this.sendRendered(conversationId, messageWithTitle("Codex is waiting for MCP input.", "Open the latest MCP request card or reply to it. Direct messages are not submitted as answers; use Interrupt on the latest activity card to cancel the blocked turn."));
+      await this.sendRendered(conversationId, messageWithTitle(`${this.deps.agent.displayName ?? "Codex"} is waiting for MCP input.`, "Open the latest MCP request card or reply to it. Direct messages are not submitted as answers; use Interrupt on the latest activity card to cancel the blocked turn."));
       return;
     }
     await this.sendRendered(
       conversationId,
       messageWithTitle(
-        "Codex is waiting for your answer.",
+        `${this.deps.agent.displayName ?? "Codex"} is waiting for your answer.`,
         "Open the latest question card or reply to it. Direct messages are not submitted as answers; use Interrupt on the latest activity card if the question expired.",
       ),
     );
@@ -512,6 +535,12 @@ export class RelayController {
 
   private async handleAgentOutputSerial(session: AgentOutputEvent): Promise<void> {
     if (this.isInactiveRelayWorkSession(session.sessionKey, session.type ?? "message")) return;
+    if (this.deps.config.agentProvider !== "codex" && "threadId" in session && session.threadId) {
+      const currentThread = this.deps.agent.getStatus(session.sessionKey)?.threadId ?? this.deps.store.getSession(session.sessionKey)?.thread_id;
+      // A native event may already be queued while /clear or resume replaces
+      // the logical session. Recheck identity at delivery, not just emission.
+      if (currentThread && currentThread !== session.threadId) return;
+    }
     if (await this.agentEvents.handle(session)) return;
     if (session.type !== undefined && session.type !== "message") return;
     const parsed = parseSessionKey(session.sessionKey);
@@ -648,7 +677,7 @@ export class RelayController {
       conversation_id: message.conversationId,
       message_id: message.messageId,
       workspace: status.workspaceName,
-      session_key: status.workspaceName ? sessionKey(message.conversationId, status.workspaceName) : undefined,
+      session_key: status.workspaceName ? sessionKey(message.conversationId, status.workspaceName, this.deps.agent.providerId) : undefined,
       running: Boolean(status.running),
       thread_id: status.threadId,
       previous_console_message_id: previousConsoleMessageId,
@@ -949,6 +978,7 @@ export class RelayController {
       || kind === "codex_user_input"
       || kind === "codex_approval"
       || kind === "relay_command"
+      || kind === "session_search"
       || kind === "side_conversation"
       || kind === "media_action";
   }

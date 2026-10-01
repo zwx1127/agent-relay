@@ -65,7 +65,7 @@ const MAX_INTERACTIVE_REQUEST_CLAIMS = 2_000;
 
 export interface CodexPromptFlowDeps {
   store: RelayStore;
-  agent: Pick<AgentDriver, "respond">;
+  agent: Pick<AgentDriver, "respond" | "displayName" | "providerId">;
   adapter: Pick<ImAdapter, "capabilities">;
   logger: Logger;
   sendRendered(conversationId: ConversationId, rendered: RenderedTelegramText, options?: Omit<SendMessageOptions, "entities" | "parseMode">): Promise<{ messageId?: MessageId }>;
@@ -107,7 +107,7 @@ export class CodexPromptFlow {
 
     try {
       const first = event.questions[0];
-      if (!first) throw new Error("Codex requested user input without questions.");
+      if (!first) throw new Error(`${this.deps.agent.displayName ?? "Codex"} requested user input without questions.`);
       await this.sendCodexQuestion(parsed.scopeKey, event.sessionKey, event.requestId, first, 0, token, expiresAt);
       claim.state = "active";
       return true;
@@ -180,13 +180,14 @@ export class CodexPromptFlow {
       question: question.question,
       isSecret: Boolean(question.isSecret),
       isOther: Boolean(question.isOther),
+      multiSelect: Boolean(question.multiSelect),
       options,
       totalQuestions,
       isBlocking: request?.isBlocking !== false,
     });
     const useInlineOptions = !question.isSecret && options.length > 0 && this.deps.adapter.capabilities.inlineActions;
     const result = await this.deps.sendRendered(scope.scopeKey, formatCodexQuestion(question, questionIndex, totalQuestions), {
-      ...(useInlineOptions ? { replyMarkup: codexQuestionKeyboard(token, options, Boolean(question.isOther)) } : { forceReply: true }),
+      ...(useInlineOptions ? { replyMarkup: codexQuestionKeyboard(token, options, Boolean(question.isOther), question.multiSelect ? [] : undefined) } : { forceReply: true }),
       ...(!useInlineOptions ? { forceReplyInstruction: "Reply to this prompt with your answer.", inputFieldPlaceholder: "Answer" } : {}),
       disableWebPagePreview: true,
     });
@@ -212,6 +213,17 @@ export class CodexPromptFlow {
     const data = parsePromptPayload(pending?.payloadJson);
     if (!pending || pending.kind !== "codex_user_input" || !data || data.token !== token || isExpired(pending)) {
       await this.expireQuestionPrompt(message, data?.isBlocking !== false);
+      return;
+    }
+
+    if (rawAction === "multi_submit" && data.multiSelect === true) {
+      const answers = multiSelectedAnswers(data);
+      if (!answers.length) throw new Error("Select at least one option before submitting.");
+      await this.deps.renderStrictCallbackPage(message, answeredMessage(answers.join("\n")), { inline_keyboard: [] });
+      const response = await this.recordCodexAnswer(pending, data, answers);
+      if (response === "expired") return;
+      if (!response) await this.sendNextCodexQuestion(message.conversationId, pending, data);
+      if (response) await this.respondToCodexPrompt(response);
       return;
     }
 
@@ -269,6 +281,18 @@ export class CodexPromptFlow {
     const option = Array.isArray(data.options) ? asPromptRecord(data.options[optionIndex]) : undefined;
     const answer = typeof option?.label === "string" ? option.label : undefined;
     if (!answer) throw new Error("Question selection expired.");
+
+    if (data.multiSelect === true) {
+      const selected = Array.isArray(data.selectedIndices) ? data.selectedIndices.filter((value): value is number => Number.isInteger(value)) : [];
+      const selectedIndices = selected.includes(optionIndex) ? selected.filter((index) => index !== optionIndex) : [...selected, optionIndex];
+      const options = data.options as AgentUserInputOption[];
+      await this.deps.renderStrictCallbackPage(message, messageWithTitle(
+        typeof data.header === "string" ? data.header : "Select options",
+        `${typeof data.question === "string" ? data.question : ""}\n\nChoose all that apply, then submit.`,
+      ), codexQuestionKeyboard(token, options, Boolean(data.isOther), selectedIndices));
+      this.deps.store.setPendingPrompt({ ...pending, payloadJson: JSON.stringify({ ...data, selectedIndices }) });
+      return;
+    }
 
     if (this.deps.store.getCollaborationMode(pending.sessionKey ?? "") === "plan") {
       await this.deps.renderStrictCallbackPage(message, formatCodexSelectedAnswer(answer), codexQuestionConfirmKeyboard(token));
@@ -374,7 +398,8 @@ export class CodexPromptFlow {
     }
     const selectedAnswer = typeof data.selectedAnswer === "string" ? data.selectedAnswer : undefined;
     const answerMode = typeof data.answerMode === "string" ? data.answerMode : undefined;
-    const answers = answerMode === "note" && selectedAnswer ? [selectedAnswer, text] : [text];
+    const answers = answerMode === "note" && selectedAnswer ? [selectedAnswer, text]
+      : data.multiSelect === true && answerMode === "other" ? [...multiSelectedAnswers(data), text] : [text];
     const response = await this.recordCodexAnswer(pending, data, answers);
     if (response === "expired") return;
     const hasNext = !response && await this.sendNextCodexQuestion(conversationId, pending, data);
@@ -455,8 +480,13 @@ export class CodexPromptFlow {
       return;
     }
     if (!pending.sessionKey || !this.deps.agent.respond) throw new Error("Approval session is missing.");
+    if (data.approvalKind === "native_tool" && !this.requestClaim(pending.sessionKey, data.requestId as string | number)) {
+      await this.deps.renderStrictCallbackPage(message, messageWithTitle("Approval expired.", "This request is no longer active."), { inline_keyboard: [] });
+      this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);
+      return;
+    }
     if (!approvalChoices(data.approvalKind as AgentApprovalKind, data.params).some((choice) => choice.action === decision)) {
-      throw new Error("This approval decision is not offered by Codex.");
+      throw new Error(`This approval decision is not offered by ${this.deps.agent.displayName ?? "Codex"}.`);
     }
     const approved = decision === "once" || decision === "session" || decision === "turn" || decision === "exec" || Boolean(decision?.startsWith("net"));
     await this.deps.renderStrictCallbackPage(
@@ -587,7 +617,7 @@ export class CodexPromptFlow {
     request: InteractiveRequestEvent | undefined,
   ): Promise<void> {
     const finalState = resolvedPromptMessage(request, event.result)
-      ?? messageWithTitle("Codex request resolved.", "The request was answered from a connected client.");
+      ?? messageWithTitle(`${this.deps.agent.displayName ?? "Codex"} request resolved.`, "The request was answered from a connected client.");
     let lastError: unknown;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
@@ -779,6 +809,12 @@ function resolvedUserInputMessage(
 function resolvedApprovalDecision(kind: AgentApprovalKind, result: unknown): string | undefined {
   const record = asPromptRecord(result);
   if (!record) return undefined;
+  if (kind === "native_tool") {
+    if (record.action === "once" || record.action === "session") return "Approved.";
+    if (record.action === "decline") return "Denied.";
+    if (record.action === "cancel") return "Cancelled.";
+    return undefined;
+  }
   if (kind === "permissions") {
     const permissions = asPromptRecord(record.permissions);
     if (!permissions || Object.keys(permissions).length === 0) return "Denied.";
@@ -794,4 +830,14 @@ function resolvedApprovalDecision(kind: AgentApprovalKind, result: unknown): str
   if (amendment?.acceptWithExecpolicyAmendment) return "Approved command rule.";
   if (amendment?.applyNetworkPolicyAmendment) return "Approved network rule.";
   return undefined;
+}
+
+function multiSelectedAnswers(data: Record<string, unknown>): string[] {
+  const selected = Array.isArray(data.selectedIndices) ? data.selectedIndices : [];
+  const options = Array.isArray(data.options) ? data.options : [];
+  return [...new Set(selected)].flatMap((index) => {
+    if (typeof index !== "number" || !Number.isInteger(index) || index < 0) return [];
+    const option = asPromptRecord(options[index]);
+    return typeof option?.label === "string" ? [option.label] : [];
+  });
 }

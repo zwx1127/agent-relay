@@ -88,6 +88,7 @@ export interface AgentServerRequestResolvedEvent {
 export interface AgentMessageOutputEvent {
   type?: "message";
   sessionKey: string;
+  threadId?: string;
   chunk: string;
   turnId?: string;
   itemId?: string;
@@ -96,6 +97,7 @@ export interface AgentMessageOutputEvent {
 export interface AgentImageOutputEvent {
   type: "image";
   sessionKey: string;
+  threadId?: string;
   path?: string;
   data?: string;
   mimeType?: string;
@@ -107,6 +109,7 @@ export interface AgentImageOutputEvent {
 export interface AgentTurnCompletedEvent {
   type: "turn_completed";
   sessionKey: string;
+  threadId?: string;
   turnId?: string;
   /** Optional only for compatibility with older provider test doubles. */
   status?: AgentTurnStatus;
@@ -203,6 +206,8 @@ export interface AgentUserInputQuestion {
   isSecret?: boolean;
   /** Allows the user to provide free text instead of choosing one of `options`. */
   isOther?: boolean;
+  /** Native tools may ask for several options; keep them as distinct answers. */
+  multiSelect?: boolean;
   options?: AgentUserInputOption[] | null;
 }
 
@@ -219,6 +224,7 @@ export interface AgentUserInputRequestEvent {
 }
 
 export type AgentApprovalKind =
+  | "native_tool"
   | "command"
   | "file_change"
   | "permissions"

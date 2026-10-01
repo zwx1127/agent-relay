@@ -90,6 +90,8 @@ export class FakeImAdapter {
 }
 
 export class FakeAgent implements AgentDriver {
+  providerId?: string;
+  displayName?: string;
   capabilities?: Partial<AgentDriverCapabilities>;
   statuses = new Map<string, AgentSessionStatus>();
   sent: Array<{ key: string; text: string; options?: AgentSendOptions }> = [];
@@ -137,7 +139,7 @@ export class FakeAgent implements AgentDriver {
       throw this.failStartForThreadIds.get(options.threadId)!;
     }
     const scopeKey = options.scopeKey ?? String(options.conversationId);
-    const key = sessionKey(scopeKey, options.workspaceName);
+    const key = sessionKey(scopeKey, options.workspaceName, this.providerId);
     const latestTurn = options.threadId ? this.resumeSnapshots.get(options.threadId) : undefined;
     const status: AgentSessionStatus = {
       sessionKey: key,

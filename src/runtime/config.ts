@@ -16,15 +16,25 @@ export function loadConfig(env?: Env): AppConfig {
   const imProvider = parseImProvider(effectiveEnv.IM_PROVIDER?.trim() || "telegram");
   const agentProvider = parseAgentProvider(effectiveEnv.AGENT_PROVIDER?.trim() || "codex");
   const allowedConversations = effectiveEnv.ALLOWED_CONVERSATION_IDS?.trim();
-  const developerInstructions = combineInstructionSources(
+  const experimentalRelayWorkEnabled = parseBooleanEnv(effectiveEnv, "EXPERIMENTAL_RELAY_WORK_ENABLED", false);
+  if (agentProvider !== "codex" && experimentalRelayWorkEnabled) {
+    throw new Error("EXPERIMENTAL_RELAY_WORK_ENABLED is only supported with AGENT_PROVIDER=codex; disable the Codex Gateway for other backends.");
+  }
+  const relayControlEnabled = parseBooleanEnv(effectiveEnv, "RELAY_CONTROL_ENABLED", false);
+  if (agentProvider === "dsh" && relayControlEnabled) {
+    throw new Error("RELAY_CONTROL_ENABLED is not supported by the verified DeepSeek Harness Web profile. Set RELAY_CONTROL_ENABLED=false; native dsh configuration and prompts are left unchanged.");
+  }
+  // Stale Codex settings must neither affect another backend nor cause reads of
+  // instruction files that have no relationship to the selected native agent.
+  const developerInstructions = agentProvider === "codex" ? combineInstructionSources(
     effectiveEnv.CODEX_DEVELOPER_INSTRUCTIONS_FILE,
     effectiveEnv.CODEX_DEVELOPER_INSTRUCTIONS,
     "CODEX_DEVELOPER_INSTRUCTIONS_FILE",
-  );
-  const baseInstructions = readInstructionFile(
+  ) : undefined;
+  const baseInstructions = agentProvider === "codex" ? readInstructionFile(
     effectiveEnv.CODEX_MODEL_INSTRUCTIONS_FILE,
     "CODEX_MODEL_INSTRUCTIONS_FILE",
-  );
+  ) : undefined;
   return {
     imProvider,
     agentProvider,
@@ -48,13 +58,15 @@ export function loadConfig(env?: Env): AppConfig {
     codexBin: effectiveEnv.CODEX_BIN?.trim() || "codex",
     codexSandbox: effectiveEnv.CODEX_SANDBOX?.trim() || "workspace-write",
     codexApproval: effectiveEnv.CODEX_APPROVAL?.trim() || "on-request",
+    claudeBin: effectiveEnv.CLAUDE_BIN?.trim() || "claude",
+    dshBin: effectiveEnv.DSH_BIN?.trim() || "dsh",
     ...(developerInstructions ? { codexDeveloperInstructions: developerInstructions } : {}),
     ...(baseInstructions ? { codexBaseInstructions: baseInstructions } : {}),
     ...(effectiveEnv.RELAY_AGENT_NAME?.trim() ? { relayAgentName: effectiveEnv.RELAY_AGENT_NAME.trim() } : {}),
     relayPeerAgents: parsePeerAgentsFile(effectiveEnv.RELAY_PEER_AGENTS_FILE),
-    relayControlEnabled: parseBooleanEnv(effectiveEnv, "RELAY_CONTROL_ENABLED", false),
+    relayControlEnabled,
     relayControlPort: parseNonNegativeIntegerEnv(effectiveEnv, "RELAY_CONTROL_PORT", 0),
-    experimentalRelayWorkEnabled: parseBooleanEnv(effectiveEnv, "EXPERIMENTAL_RELAY_WORK_ENABLED", false),
+    experimentalRelayWorkEnabled,
     experimentalRelayGatewayPort: parsePositiveIntegerEnv(effectiveEnv, "EXPERIMENTAL_RELAY_GATEWAY_PORT", 18765),
     experimentalRelayGatewayStatePath: effectiveEnv.EXPERIMENTAL_RELAY_GATEWAY_STATE_PATH?.trim() || defaultGatewayStatePath(homedir()),
     logLevel: parseLogLevel(effectiveEnv.LOG_LEVEL),
@@ -86,7 +98,7 @@ function parseLarkDomain(value: string): AppConfig["larkDomain"] {
 }
 
 function parseAgentProvider(value: string): AppConfig["agentProvider"] {
-  if (value === "codex") return value;
+  if (value === "codex" || value === "claude" || value === "dsh") return value;
   throw new Error(`AGENT_PROVIDER is not supported: ${value}`);
 }
 

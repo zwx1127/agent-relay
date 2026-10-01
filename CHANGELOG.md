@@ -15,7 +15,19 @@ The project is pre-1.0. The npm distribution uses the scoped name `@asuka1127/ag
 - Add focused setup/security tests and a clean packed-artifact npm/npx smoke check; update both README languages and provider guides
 - Standardize project documentation and user-facing text on English, keeping `README.zh-CN.md` as the only Chinese document and preserving old documentation URLs with English redirects
 
-## Unreleased
+## Unreleased (0.3.0-next.2 candidate)
+
+### Native backends
+
+- Keep the original `/relay` Home without management subcommands; add the requested DSH-only `/new` and `/resume [search]` shortcuts to its native session APIs, replacing the candidate Home buttons while retaining session search and stale/busy safeguards
+
+- Add backend-first configuration and local executable detection for Codex, Claude Code, and DeepSeek Harness, preserving existing Codex configurations
+- Route Claude and DSH slash commands through their own native command catalogs and semantics; preserve Codex commands and the existing `/relay` Home without new Relay subcommands
+- Isolate native session IDs by backend and preserve backend-owned settings, authentication, permissions, and conversation history
+- Add native approval-choice validation and multi-select questions without widening Codex approval scopes
+- Support bounded native image input and DSH session-authorized image output, with no arbitrary remote image fetching
+- Bind persisted task/prompt state to its backend and propose separate state files when switching, preventing cross-backend replay of legacy queued work
+- Keep the experimental shared Gateway Codex-only; do not silently apply Codex instructions or mode settings to other backends
 
 ### Fixed
 

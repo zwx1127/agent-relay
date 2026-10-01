@@ -142,7 +142,7 @@ export class BackgroundTerminalService {
     const selected = asPromptRecord(terminals[index]);
     const processId = typeof selected?.processId === "string" ? selected.processId : undefined;
     const workspace = this.deps.requireCurrentWorkspace(message.conversationId);
-    const key = sessionKey(message.conversationId, workspace.name);
+    const key = sessionKey(message.conversationId, workspace.name, this.deps.agent.providerId);
     const status = this.deps.agent.getStatus(key);
     if (!processId || !status?.running || status.threadId !== data.threadId || pending.sessionKey !== key || !this.deps.agent.terminateBackgroundTerminal) {
       this.deps.store.deletePendingPrompt(message.conversationId, pending.promptMessageId);

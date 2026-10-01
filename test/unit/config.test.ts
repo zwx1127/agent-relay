@@ -326,3 +326,50 @@ describe("config", () => {
     expect(isAuthorized(config, 9, 2)).toBe(false);
   });
 });
+
+describe("native agent backend configuration", () => {
+  const base = { TELEGRAM_BOT_TOKEN: "token", ALLOWED_USER_IDS: "10", WORKSPACE_ROOT: "/tmp/workspaces" };
+
+  test("defaults old configurations to Codex and native executable names", () => {
+    const config = loadConfig(base);
+    expect(config.agentProvider).toBe("codex");
+    expect(config.claudeBin).toBe("claude");
+    expect(config.dshBin).toBe("dsh");
+  });
+
+  test("selects Claude Code and DeepSeek Harness without translating Codex settings", () => {
+    for (const agentProvider of ["claude", "dsh"] as const) {
+      const config = loadConfig({ ...base, AGENT_PROVIDER: agentProvider, CLAUDE_BIN: "/native tools/claude", DSH_BIN: "/native tools/dsh" });
+      expect(config.agentProvider).toBe(agentProvider);
+      expect(config.claudeBin).toBe("/native tools/claude");
+      expect(config.dshBin).toBe("/native tools/dsh");
+    }
+    expect(() => loadConfig({ ...base, AGENT_PROVIDER: "deepseek" })).toThrow("AGENT_PROVIDER");
+  });
+
+  test("does not read or apply stale Codex instruction files for other backends", () => {
+    for (const agentProvider of ["claude", "dsh"] as const) {
+      const config = loadConfig({ ...base, AGENT_PROVIDER: agentProvider,
+        CODEX_DEVELOPER_INSTRUCTIONS_FILE: "/nonexistent/private-codex-developer.md",
+        CODEX_DEVELOPER_INSTRUCTIONS: "Do not apply to other agents",
+        CODEX_MODEL_INSTRUCTIONS_FILE: "/nonexistent/private-codex-model.md",
+      });
+      expect(config.codexDeveloperInstructions).toBeUndefined();
+      expect(config.codexBaseInstructions).toBeUndefined();
+    }
+    expect(() => loadConfig({ ...base, CODEX_MODEL_INSTRUCTIONS_FILE: "/nonexistent/private-codex-model.md" })).toThrow("CODEX_MODEL_INSTRUCTIONS_FILE");
+  });
+
+  test("fails closed for an unavailable dsh optional helper without changing native configuration", () => {
+    expect(() => loadConfig({ ...base, AGENT_PROVIDER: "dsh", RELAY_CONTROL_ENABLED: "true" })).toThrow("Set RELAY_CONTROL_ENABLED=false");
+    expect(loadConfig({ ...base, AGENT_PROVIDER: "dsh" }).relayControlEnabled).toBe(false);
+    expect(loadConfig({ ...base, AGENT_PROVIDER: "claude", RELAY_CONTROL_ENABLED: "true" }).relayControlEnabled).toBe(true);
+  });
+
+  test("fails closed for a non-Codex backend with experimental Gateway enabled", () => {
+    for (const agentProvider of ["claude", "dsh"] as const) {
+      expect(() => loadConfig({ ...base, AGENT_PROVIDER: agentProvider, EXPERIMENTAL_RELAY_WORK_ENABLED: "true" })).toThrow("only supported with AGENT_PROVIDER=codex");
+      expect(loadConfig({ ...base, AGENT_PROVIDER: agentProvider, EXPERIMENTAL_RELAY_WORK_ENABLED: "false" }).experimentalRelayWorkEnabled).toBe(false);
+    }
+  });
+});

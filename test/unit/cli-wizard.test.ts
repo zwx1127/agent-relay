@@ -206,3 +206,68 @@ describe("setup allowlists", () => {
     expect(normalizeAllowlist("ou_user", "lark-chat", true)).toBeUndefined();
   });
 });
+
+describe("native backend setup selection", () => {
+  test("switching backends defaults to separate state without replaying old queued work", async () => {
+    const configPath = join(tmpdir(), "native-state-config", "config.json");
+    const oldState = join(tmpdir(), "custom-codex.sqlite");
+    const initial = { AGENT_PROVIDER: "codex", SQLITE_PATH: oldState, TELEGRAM_BOT_TOKEN: token, ALLOWED_USER_IDS: "10", CODEX_BIN: "/native/codex" };
+    const ui = new ScriptedUI(undefined, { "Agent backend": "claude" });
+    const env = await runWizard({ ui, initial, configPath, detectAgent: async () => ({ found: false }) });
+    expect(env?.SQLITE_PATH).toBe(join(tmpdir(), "native-state-config", "state", "agent-relay-claude.sqlite"));
+    expect(initial.SQLITE_PATH).toBe(oldState);
+    expect(env?.CODEX_BIN).toBe("/native/codex");
+    expect(ui.messages.join("\n")).toContain("never replayed through another agent");
+    const repeat = await runWizard({ ui: new ScriptedUI(), initial: { ...env, SQLITE_PATH: "/custom/claude-state.sqlite" }, configPath, detectAgent: async () => ({ found: false }) });
+    expect(repeat?.SQLITE_PATH).toBe("/custom/claude-state.sqlite");
+  });
+  test("asks for backend first and offers only the selected backend's settings", async () => {
+    for (const provider of ["claude", "dsh"] as const) {
+      const label = provider === "claude" ? "Claude Code" : "DeepSeek Harness";
+      const key = provider === "claude" ? "CLAUDE_BIN" : "DSH_BIN";
+      const ui = new ScriptedUI({ "Telegram bot token": token, "Allowed Telegram user IDs": "10", [`${label} binary`]: `native tools/${provider}` }, { "Agent backend": provider });
+      let selected: string | undefined;
+      let executable: string | undefined;
+      const cwd = join(tmpdir(), "native setup");
+      const env = await runWizard({ ui, configPath: "config.json", cwd, initial: {
+        CODEX_BIN: "existing-codex", CODEX_SANDBOX: "read-only", CODEX_APPROVAL: "untrusted",
+        CODEX_MODEL_INSTRUCTIONS_FILE: "/missing/codex-only.md", EXPERIMENTAL_RELAY_WORK_ENABLED: "true", RELAY_CONTROL_ENABLED: "true",
+      }, detectAgent: async (agent, binary) => { selected = agent; executable = binary; return { found: true, path: binary, version: "2.1.280" }; },
+        detectCodex: async () => { throw new Error("Must not detect unrelated Codex"); },
+      });
+      expect(selected).toBe(provider);
+      expect(executable).toBe(join(cwd, "native tools", provider));
+      expect(env).toMatchObject({ AGENT_PROVIDER: provider, [key]: executable, EXPERIMENTAL_RELAY_WORK_ENABLED: "false", CODEX_BIN: "existing-codex", CODEX_SANDBOX: "read-only", CODEX_APPROVAL: "untrusted" });
+      expect(loadConfig(env).agentProvider).toBe(provider);
+      expect(ui.choices[0]?.prompt).toBe("Agent backend");
+      expect(ui.choices.some((choice) => choice.prompt.startsWith("Codex"))).toBe(false);
+      expect(ui.textCalls.some((call) => call.prompt.startsWith("Codex"))).toBe(false);
+      expect(ui.confirmations.some((call) => call.prompt.startsWith("Enable the experimental Gateway"))).toBe(false);
+      expect(ui.messages.join("\n")).toContain("Version detection does not verify protocol compatibility or authentication");
+      expect(ui.messages.join("\n")).toContain(`Agent backend: ${label}`);
+      if (provider === "dsh") {
+        expect(env?.RELAY_CONTROL_ENABLED).toBe("false");
+        expect(ui.confirmations.some((call) => call.prompt.startsWith("Enable the optional localhost helper"))).toBe(false);
+        expect(ui.messages.join("\n")).toContain("helper is unavailable for the verified DeepSeek Harness Web profile");
+      } else {
+        expect(ui.confirmations.some((call) => call.prompt.startsWith("Enable the optional localhost helper"))).toBe(true);
+      }
+    }
+  });
+
+  test("reconfiguration defaults to the saved backend and preserves its executable", async () => {
+    for (const provider of ["claude", "dsh"] as const) {
+      const key = provider === "claude" ? "CLAUDE_BIN" : "DSH_BIN";
+      const binary = join(tmpdir(), "saved native tools", provider);
+      const initial = Object.freeze({ AGENT_PROVIDER: provider, [key]: binary, TELEGRAM_BOT_TOKEN: token, ALLOWED_USER_IDS: "10" });
+      const ui = new ScriptedUI();
+      const env = await runWizard({ ui, initial, configPath: join(tmpdir(), "config.json"), detectAgent: async (selected, executable) => {
+        expect(selected).toBe(provider); expect(executable).toBe(binary); return { found: false };
+      } });
+      expect(env?.AGENT_PROVIDER).toBe(provider);
+      expect(env?.[key]).toBe(binary);
+      expect(ui.messages.join("\n")).toContain("Setup will not install or sign in for you");
+      expect(initial[key]).toBe(binary);
+    }
+  });
+});

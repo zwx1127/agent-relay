@@ -7,7 +7,7 @@ English | [Chinese README](README.zh-CN.md)
 
 ## Introduction
 
-`agent-relay` lets you control a local Codex CLI agent from Telegram or Lark/Feishu. You keep Codex running on a trusted machine, then use chat to choose a workspace, send prompts, answer questions, approve actions, review code, manage threads, and exchange screenshots, images, or files.
+`agent-relay` lets you control a local Codex, Claude Code, or DeepSeek Harness (`dsh`) agent from Telegram or Lark/Feishu. You keep the selected backend running on a trusted machine, then use chat to choose a workspace, send prompts, answer questions, approve actions, review code, manage threads, and exchange screenshots, images, or files.
 
 The goal is simple: keep the agent close to your code, while letting you operate it from the chat app you already use.
 
@@ -52,16 +52,18 @@ npx @asuka1127/agent-relay install
 
 `install` is the sole install-and-configure entry point. It previews the package and destination, asks before installation, installs the running scoped version into a persistent user-owned npm prefix, and opens the installed copy's **English-language configuration wizard**. Saving configuration does not start the relay.
 
+> Multi-backend support is unreleased. The published npm 0.2.0 package supports Codex only; use a locally packed checkout to test Claude Code or DSH before the next release.
+
 ### Minimum requirements
 
 - Node.js 20+ and npm. The npm package includes the official, pinned Bun runtime; see [runtime details](#installation-location-and-runtime).
-- A separately installed and signed-in local Codex CLI 0.145.0+ with `codex app-server --listen stdio://`. Make `codex` available on `PATH`, or set its full path with `CODEX_BIN`.
+- A separately installed, configured native backend: Codex CLI 0.145.0+ (`CODEX_BIN`), Claude Code 2.1.285 (`CLAUDE_BIN`), or DeepSeek Harness 0.2.0-rc.2 developer preview (`DSH_BIN`). Native executables must be on `PATH` or selected by absolute path. See [backend support and native commands](docs/en/backends.md) for verified versions and limits.
 - Git for Codex workspace/version-control operations; it is not required just to install the npm package.
 - A Telegram bot token, or a Lark/Feishu self-built app. Create the bot/app and sign into your accounts yourself.
 
 ### Configure your bot
 
-The wizard guides you through bot credentials, operator/chat allowlists, workspace root, SQLite state, Codex discovery, sandbox/approval defaults, and optional local helpers or experimental Gateway flags. Choose your code/projects directory as the workspace root, not the package directory. Use a trusted machine and allow only people you trust.
+The wizard first selects the native backend, then guides you through bot credentials, operator/chat allowlists, workspace root, SQLite state, and executable detection. Codex alone exposes its sandbox/approval defaults and optional experimental Gateway. Native Claude and DSH settings and authentication remain in their own configuration. Choose your code/projects directory as the workspace root, not the package directory. Use a trusted machine and allow only people you trust.
 
 - **Telegram:** create a bot with [BotFather](https://t.me/BotFather), then enter its token and your numeric user ID. Follow the [Telegram quickstart](docs/en/quickstart-telegram.md) for the full setup.
 - **Feishu/Lark:** create a self-built app in the [Feishu developer console](https://open.feishu.cn/app) or [Lark developer console](https://open.larksuite.com/app), enable Bot capability, and enter App ID/Secret and app-specific `open_id` allowlists. Save configuration and start relay **before** saving long-connection subscriptions. Finish permissions, message events, card callbacks, publication and app availability using the [Lark/Feishu quickstart](docs/en/quickstart-lark.md).
@@ -72,7 +74,7 @@ Secret input is masked. The wizard asks before sending credentials to the select
 
 After saving configuration:
 
-1. Run the **`doctor` command printed by the installer** to check local configuration, paths, Bun and the Codex version. It does not test bot authentication, Codex sign-in or message delivery.
+1. Run the **`doctor` command printed by the installer** to check local configuration, paths, Bun and the selected backend version. It does not test bot authentication, native sign-in or message delivery.
 2. Run the **printed `start` command** and leave the foreground process running. For Feishu/Lark, now finish the console steps in its [quickstart](docs/en/quickstart-lark.md#3-start-the-connection-then-finish-console-setup).
 3. Open a private chat with your bot and send `/relay`.
 4. Select or create a workspace, send a normal prompt, and test a card button to answer a question or approve an action.
@@ -88,11 +90,11 @@ Command examples below assume the installed executable is on `PATH`; otherwise u
 
 ## What you can do
 
-- Remote-control local Codex sessions from Telegram or Lark/Feishu.
+- Remote-control local Codex, Claude Code, or DeepSeek Harness sessions from Telegram or Lark/Feishu, with backend-native commands and capability limits.
 - Select, create, browse, and delete workspaces from chat.
-- Send normal prompts, images, voice/audio, file mentions, skills, and follow-up steering messages.
+- Send normal prompts; images, voice/audio, file mentions, skills, and follow-up steering depend on the backend capability.
 - Follow reasoning summaries, plan progress, tools, file changes, warnings, and diffs in one editable activity card; long details remain available for 24 hours.
-- Answer Codex questions and approve actions inline.
+- Answer native questions (including multi-select) and approve only the actions and scopes actually offered by the backend.
 - Use direct chats or allowed group chats; group messages are handled only when they mention the bot.
 - Use common Codex workflows such as review, Plan mode, goals, resume, fork, side conversations, interrupt, and background terminal cleanup.
 - Send screenshots, generated images, or files back to chat with the optional local relay capability API.
@@ -103,9 +105,9 @@ Command examples below assume the installed executable is on `PATH`; otherwise u
 
 ### Chat commands
 
-Start from `/relay`. The home view shows the selected workspace, Codex status, waiting state, recent errors, and available actions.
+Start from `/relay`. The home view shows the selected workspace, agent status, waiting state, recent errors, and available actions. `/help` shows the selected backend’s live command catalog. Claude and DSH commands retain their native arguments and meaning; they never fall through to Codex commands or silently become prompts. The existing `/relay` Home remains the workspace/status entry. Session commands keep their backend’s meaning. DSH uses `/new` to create a session and `/resume [search]` to choose a saved session; these Relay shortcuts call DSH’s native session APIs. Interruption uses the activity-card Interrupt button.
 
-Common commands:
+Common **Codex** commands (see the [backend command matrix](docs/en/backends.md) for Claude and DSH):
 
 | Command | Use |
 | --- | --- |
@@ -132,7 +134,7 @@ In group chats, mention the bot when sending text, images, files, or slash comma
 | --- | --- |
 | `agent-relay` / `agent-relay start` | Start in the foreground. Missing configuration exits with instructions to run `install`; it does not open the wizard. |
 | `agent-relay install` | Install and configure, or reconfigure the current persistent installation. Asks before npm installation and before saving; Ctrl+C or declining save leaves the existing config unchanged. |
-| `agent-relay doctor` | Check local configuration, paths, Bun and Codex; no bot API calls. |
+| `agent-relay doctor` | Check local configuration, paths, Bun and the selected backend; no bot API calls. |
 | `agent-relay config path` | Show the selected config file location without displaying secrets. |
 | `agent-relay gateway <setup\|start\|stop\|status\|remove>` | Manage the opt-in [experimental Gateway](#experimental-relay-work). |
 
@@ -143,7 +145,7 @@ agent-relay works in private chats and group chats. Group chats are useful when 
 - Add the bot to the group and allow the group with `ALLOWED_CONVERSATION_IDS`.
 - Mention the bot in text, image/file captions, and slash commands, with spaces around `@bot` or `@BotName` when it is a normal mention.
 - Unmentioned group messages are ignored before authorization checks.
-- Telegram forum topics and Lark/Feishu threads are treated as separate scopes, so each topic or thread can select its own workspace and run its own Codex session in parallel.
+- Telegram forum topics and Lark/Feishu threads are treated as separate scopes, so each topic or thread can select its own workspace and run its own selected-backend session in parallel.
 - Run one agent-relay process per agent bot when you want several agents in the same group.
 - Configure peer agents and enable the local relay capability API when you want Codex to mention another agent bot.
 
@@ -201,6 +203,8 @@ The second command configures the current global installation; it does not creat
 
 ### Experimental: relay work
 
+This shared Gateway remains Codex-only. Enabling it for Claude or DSH is rejected; those backends use their own native protocols and session stores.
+
 > **Experimental, disabled by default, and opt-in only.** This feature may change incompatibly before it is stable. It does not start a Gateway, install a client proxy, or change existing Relay, Codex CLI, or Codex Desktop behavior unless you enable it manually.
 
 Experimental relay work lets you begin in the native Codex CLI or the Windows/macOS Codex Desktop app, leave the computer, and continue the same Codex thread through Telegram or Lark/Feishu. Relay, interactive Codex CLI processes, and Codex Desktop all connect to one independent local Gateway and its single authoritative app-server; users run Codex normally and do not choose remote endpoints.
@@ -229,7 +233,7 @@ git clone https://github.com/zwx1127/agent-relay.git
 cd agent-relay
 bun install
 npm pack
-bun run cli install --package /absolute/path/asuka1127-agent-relay-0.2.0.tgz
+bun run cli install --package /absolute/path/asuka1127-agent-relay-0.3.0-next.2.tgz
 bun run cli start
 ```
 
@@ -249,7 +253,7 @@ npm pack
 Use the tarball name printed by `npm pack`, replace both paths below with its actual absolute path, and run this single install-and-configure command:
 
 ```bash
-npx --package=/absolute/path/asuka1127-agent-relay-0.2.0.tgz agent-relay install --package /absolute/path/asuka1127-agent-relay-0.2.0.tgz
+npx --package=/absolute/path/asuka1127-agent-relay-0.3.0-next.2.tgz agent-relay install --package /absolute/path/asuka1127-agent-relay-0.3.0-next.2.tgz
 ```
 
 The first `--package` tells npx where to run the installer from; the second tells the installer which local tarball to persist, instead of downloading the registry version. The tarball must contain the matching scoped package name and version. Use only a package you trust: npm installs dependencies and runs their installation scripts.

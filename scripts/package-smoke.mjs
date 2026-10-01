@@ -15,7 +15,7 @@ mkdirSync(home); mkdirSync(cwd);
 // Deliberately omit a globally available Bun; npm-installed runtime must suffice.
 const cleanPath = (process.env.PATH || "").split(delimiter).filter((entry) => !existsSync(join(entry, process.platform === "win32" ? "bun.exe" : "bun"))).join(delimiter);
 const env = { ...process.env, PATH: cleanPath, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local", "share"), npm_config_cache: join(root, "cache"), AGENT_RELAY_CONFIG: "", AGENT_RELAY_BUN_PATH: "" };
-for (const key of Object.keys(env)) if (/^(TELEGRAM_|LARK_|CODEX_|IM_PROVIDER$|AGENT_PROVIDER$|ALLOWED_|WORKSPACE_ROOT$|SQLITE_PATH$|RELAY_|EXPERIMENTAL_RELAY_)/.test(key)) delete env[key];
+for (const key of Object.keys(env)) if (/^(TELEGRAM_|LARK_|CODEX_|CLAUDE_|DSH_|IM_PROVIDER$|AGENT_PROVIDER$|ALLOWED_|WORKSPACE_ROOT$|SQLITE_PATH$|RELAY_|EXPERIMENTAL_RELAY_)/.test(key)) delete env[key];
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const npx = process.platform === "win32" ? "npx.cmd" : "npx";
 function run(command, args, expected = 0, overrides = {}) {
@@ -58,6 +58,24 @@ try {
   if (process.platform !== "win32") {
     const report = run(executable, ["doctor", "--config", config]);
     assert(report.includes("0.159.2")); assert(!report.includes("fake-package-smoke-token"));
+    for (const provider of ["claude", "dsh"]) {
+      const version = provider === "claude" ? "2.1.280" : "0.2.0-rc.2";
+      const native = join(root, `${provider} stub with spaces`);
+      writeFileSync(native, `#!/bin/sh\ntest "$#" -eq 1 && test "$1" = "--version" || exit 1\nprintf '${provider} ${version}\\n'\n`);
+      chmodSync(native, 0o755);
+      const nativeConfig = join(configDir, `${provider}.json`);
+      writeFileSync(nativeConfig, JSON.stringify({ version: 1, env: {
+        ...JSON.parse(savedConfig).env, AGENT_PROVIDER: provider,
+        [provider === "claude" ? "CLAUDE_BIN" : "DSH_BIN"]: native,
+        CODEX_MODEL_INSTRUCTIONS_FILE: join(root, "missing Codex-only instructions"),
+      } }), { mode: 0o600 });
+      const nativeReport = run(executable, ["doctor", "--config", nativeConfig]);
+      assert(nativeReport.includes(`agent backend: ${provider}`));
+      assert(nativeReport.includes(version));
+      assert(nativeReport.includes("executable detection only"));
+      assert(!nativeReport.includes("fake-package-smoke-token"));
+      assert(run(executable, ["gateway", "status", "--config", nativeConfig], 1).includes("Gateway commands require AGENT_PROVIDER=codex"));
+    }
   }
   run(executable, ["gateway", "status", "--config", config]);
   // Load actual packaged native SQLite + runtime imports, without starting a bot/network connection.

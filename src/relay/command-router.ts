@@ -24,16 +24,36 @@ export interface SlashCommandHandlers {
   archive?(conversationId: ConversationId): Promise<void>;
   deleteThread?(conversationId: ConversationId): Promise<void>;
   unknown(conversationId: ConversationId, command: string): Promise<void>;
+  native?(conversationId: ConversationId, text: string, userMessageId?: MessageId): Promise<void>;
 }
 
 export class SlashCommandRouter {
-  constructor(private readonly handlers: SlashCommandHandlers) {}
+  constructor(private readonly handlers: SlashCommandHandlers, private readonly provider = "codex") {}
 
   command(text: string): string | undefined {
     return text.startsWith("/") ? commandName(text) : undefined;
   }
 
   async handle(message: TextMessage, command: string, text: string): Promise<boolean> {
+    // Explicit DSH session shortcuts requested by Relay users. These invoke
+    // native session APIs; they are not advertised as DSH registry commands.
+    if (this.provider === "dsh" && command === "/new") {
+      if (commandArgs(text)) throw new Error("Use /new without arguments to create a DSH session.");
+      await this.handlers.newThread(message.conversationId, "", false);
+      return true;
+    }
+    if (this.provider === "dsh" && command === "/resume") {
+      await this.handlers.resume(message.conversationId, commandArgs(text));
+      return true;
+    }
+    // Keep the native dialect intact. A backend named /plan or /stop must never
+    // accidentally invoke a Codex operation with a different meaning.
+    if (this.provider !== "codex" && command !== "/help") {
+      const nativeText = text.replace(/^\/[^\s]+/, command);
+      if (this.handlers.native) await this.handlers.native(message.conversationId, nativeText, message.messageId);
+      else await this.handlers.unknown(message.conversationId, command);
+      return true;
+    }
     switch (command) {
       case "/help":
         await this.handlers.help(message.conversationId);
